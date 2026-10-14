@@ -3,14 +3,21 @@
   "platforms": [
     {
       "platform": "mac-arm64",
-      "status": "not-run",
-      "evidence": [],
-      "checks": []
+      "status": "lab-partial",
+      "evidence": [
+        "../../RDP-SPIKE-STATUS.md",
+        "../../RDP-BUILD-EVIDENCE.json"
+      ],
+      "checks": [
+        "unknown-certificate-rejected"
+      ]
     },
     {
       "platform": "mac-x86_64",
-      "status": "not-run",
-      "evidence": [],
+      "status": "fixture-tested",
+      "evidence": [
+        "../../RDP-BUILD-EVIDENCE.json"
+      ],
       "checks": []
     },
     {
@@ -31,5 +38,7 @@
     "helper-crash",
     "network-interruption",
     "clipboard"
-  ]
+  ],
+  "stack_decision": "pending-live-evidence",
+  "secrets_in_evidence": false
 }

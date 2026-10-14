@@ -8,3 +8,11 @@ const scans:Record<string,number>={Escape:1,Digit1:2,Digit2:3,Digit3:4,Digit4:5,
 export function keyInput(code:string,down:boolean):Input|undefined{
   return scans[code]?{type:'key',scanCode:scans[code],down}:undefined;
 }
+export function makeInputState(send:(input:Input)=>void){
+  const keys=new Set<string>();let last:Extract<Input,{type:'pointer'}>|undefined;
+  return {
+    key(code:string,down:boolean){const input=keyInput(code,down);if(!input)return;if(down&&keys.has(code))return;if(down)keys.add(code);else keys.delete(code);send(input);},
+    pointer(input:Extract<Input,{type:'pointer'}>){last=input;send(input);},
+    release(){if(last?.buttons){last={...last,buttons:0};send(last);}for(const code of keys)send(keyInput(code,false)!);keys.clear();}
+  };
+}

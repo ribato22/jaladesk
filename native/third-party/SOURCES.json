@@ -1,0 +1,22 @@
+{
+  "freerdp": {
+    "version": "3.32.2",
+    "tag_object": "c7e6848d15e613fda3d3ee7ebca36146088802a2",
+    "commit": "97eff6ddfbbfaa8e42a126d362686bd001ff8bdc",
+    "url": "https://pub.freerdp.com/releases/freerdp-3.32.2.tar.gz",
+    "sha256": "e95a505c0057e4d06a3b120477c421028769deba4db9c639ef3465d050f0955c",
+    "license": "Apache-2.0"
+  },
+  "openssl": {
+    "version": "3.6.5",
+    "url": "https://www.openssl.org/source/openssl-3.6.5.tar.gz",
+    "sha256": "a2157c2830efdec3788939b00c9b0638306d3f0bbb76dc4832ee503bb397df98",
+    "license": "Apache-2.0"
+  },
+  "nlohmann_json": {
+    "version": "3.12.0",
+    "url": "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp",
+    "sha256": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63",
+    "license": "MIT (embedded in header)"
+  }
+}
