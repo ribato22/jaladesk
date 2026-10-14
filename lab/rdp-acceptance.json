@@ -1,0 +1,35 @@
+{
+  "gate": "RDP-embedding",
+  "platforms": [
+    {
+      "platform": "mac-arm64",
+      "status": "not-run",
+      "evidence": [],
+      "checks": []
+    },
+    {
+      "platform": "mac-x86_64",
+      "status": "not-run",
+      "evidence": [],
+      "checks": []
+    },
+    {
+      "platform": "windows-x64",
+      "status": "not-run",
+      "evidence": [],
+      "checks": []
+    }
+  ],
+  "requiredChecks": [
+    "login",
+    "wrong-credentials",
+    "certificate-mismatch",
+    "embedded-input",
+    "resize",
+    "two-sessions",
+    "cancel",
+    "helper-crash",
+    "network-interruption",
+    "clipboard"
+  ]
+}

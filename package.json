@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/tests/*.test.js",
-    "start": "npm run build && electron .",
+    "start": "npm run build && node scripts/start.mjs",
     "build:native": "node scripts/build-native.mjs",
     "test:native": "node scripts/test-native.mjs",
     "test:live": "node scripts/lab-rdp.mjs"
