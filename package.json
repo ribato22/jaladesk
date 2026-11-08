@@ -7,11 +7,17 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/tests/*.test.js",
+    "test:electron": "npm run build && node scripts/test-electron.mjs",
     "start": "npm run build && node scripts/start.mjs",
     "build:native": "node scripts/build-native.mjs",
+    "package:internal": "node scripts/package-internal.mjs",
+    "verify:internal": "node scripts/verify-internal.mjs",
     "bootstrap:native": "node scripts/bootstrap-native.mjs",
     "test:native": "node scripts/test-native.mjs",
-    "test:live": "node scripts/lab-rdp.mjs"
+    "test:native-network": "npm run build && node scripts/test-native-network.mjs",
+    "test:live": "node scripts/lab-rdp.mjs",
+    "test:native-pin": "npm run build && node scripts/test-native-pin.mjs",
+    "test:native-integration": "npm run build && node scripts/test-native-integration.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

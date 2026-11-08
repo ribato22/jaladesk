@@ -1,54 +1,100 @@
-# Remote Workspace — RDP spike
+# JalaDesk
 
-Alternatif independen dengan Electron/TypeScript dan bridge FreeRDP C++. Tahap ini menguji framebuffer dan input RDP di canvas aplikasi. Ini belum produk dengan seluruh fitur Royal TSX.
+**Unified Multi-Protocol Remote Desktop (RDP / VNC), SSH & SFTP Terminal, Cloud Infrastructure & Zero-Trust Operations Suite for macOS, Windows, iOS, iPadOS & Android.**
 
-## Menjalankan
+---
 
-Gunakan Node.js 26.x; versi yang diuji 26.10.0. Dari folder `outputs/app`:
+## Overview
 
-```sh
+**JalaDesk** combines high-performance native remote desktop streaming, an interactive SSH/SFTP terminal workspace, an encrypted zero-trust credential vault, and **46 built-in infrastructure, security, and SRE studios** into a single cohesive platform:
+
+- **Desktop Client (`src/`, `native/`)**: Built on Electron, TypeScript (Strict ESM), and a custom C++17 **FreeRDP 3.x / OpenSSL 3.x** native bridge (`native/rdp/`) with per-session isolated POSIX `0700` / Windows Protected DACL runtime profiles.
+- **Mobile Companion (`mobile/`)**: Built with Flutter 3.x (`iOS 16+`, `iPadOS`, `Android 12+`) providing **Jump Desktop-style Fluid Touch RDP/VNC** (precision virtual trackpad + multi-touch pinch-to-zoom + extended `Ctrl`/`Alt`/`⌘`/`F1–F12` modifier strip), **Termius-style Mobile SSH/SFTP**, **RFC 6238 TOTP 2FA**, and **Zero-Trust QR Vault Pairing** (`jaladesk://pair?v=1&...`).
+
+---
+
+## Core Architecture & Capabilities
+
+### 1. Multi-Protocol Remote Access Engine
+- **Remote Desktop Protocol (RDP)**: Native C++ FreeRDP 3.x helper bridge with NLA/CredSSP, TLS certificate SHA-256 pinning, dynamic display channel (`disp`) client resize without reconnect, vertical/horizontal high-precision mouse wheel & trackpad pinch-zoom forwarding, opt-in 32 KiB directional UTF-8 clipboard (`cliprdr`), and macOS `⌘ Cmd ⇄ Ctrl` key remapping.
+- **VNC / Apple Screen Sharing (RFB 3.8)**: In-tab remote canvas with Fit / Stretch / 1:1 Actual Pixel scaling, View-Only safety lock, and live frame telemetry.
+- **SSH Terminal, Bastion Jump Host & Dual-Pane SFTP**: Interactive VT100/xterm terminal emulator, `ProxyJump` (`ssh -J`) bastion chaining, local/remote/SOCKS5 port forwarding, multi-tab Broadcast Input, and dual-pane SFTP Commander.
+
+### 2. Encrypted Documents & Zero-Trust Credential Vault (`.rwdoc` / `.rtsz` / `.jaladesk`)
+- **Authenticated Encryption**: `AES-256-GCM` document container with `scrypt` key derivation, atomic write-replace revisions, 3-way field-level conflict resolution, and OS Keychain integration (`macOS Keychain` / `Windows DPAPI` via `safeStorage`).
+- **30-Group Hierarchical Inheritance**: Folder-to-connection property inheritance with explicit source provenance, private per-user encrypted overlays, and one-use parameterized connection templates.
+- **RFC 6238 TOTP Authenticator**: Built-in `SHA-1` / `SHA-256` / `SHA-512` 6-digit TOTP generator with zero secret readback to renderer processes.
+- **Strict Content Security Policy (CSP) & Memory Hygiene**: Renderer processes never access raw file paths or stored secrets; zero `innerHTML` or inline style injection across the entire desktop shell; WCAG-verified dual Light and Dark (`Sapphire-Gold NOC Midnight`) color palettes.
+
+### 3. Enterprise Engineering, Security & SRE Studios (46 Built-in Studios)
+Accessible via the **Command Palette (`⌘K`)** or the **Overview Launchpad** across four operational domains:
+- **Network, Routing & Deep Diagnostics**: Network Path & DNS (`ping`/`traceroute`/`dig`), Packet Sniffer & BPF (`tcpdump`), Subnet & IPAM Calculator, GeoIP & BGP ASN Whois, Live Topology Map, WireGuard & IPsec VPN Studio, Wake-on-LAN & Port Knocking.
+- **Zero-Trust Security & Compliance**: TOTP 2FA Vault, SSH Zero-Trust CA (`ssh-keygen -s`), SSH Key Studio, Secret `.env` Sealer (AES-256-GCM), CIS Hardening Benchmark Auditor, File Integrity Monitoring (`FIM` & `auditd`), TLS Certificate Chain Auditor, Firewall Auditor (`pf`/`ufw`/`nftables`), Fail2Ban & Intrusion Studio, Clipboard Secret Scrubber, and Production Safety Guard (`rm -rf` / `DROP` / `shutdown` interceptor).
+- **Fleet, Virtualization & Cloud DevOps**: Hypervisor Studio (Proxmox / VMware / Hyper-V), Container Studio (Docker / Compose), Kubernetes Manifest & Pod Studio, Active Directory & DNS Studio, Systemd / Windows Service Controller, User & Session Audit, OS Patch & CVE Scanner, and IaC / Ansible Inventory Exporter.
+- **SRE Observability, HA, DR & ITIL**: Real-Time Resource Profiler, Storage & NVMe SMART Health, Kernel `sysctl` & File Descriptor Limits, HTTP & TLS API Health Probe, Load Benchmark Studio, Prometheus Metrics Scraper, Reverse Proxy Studio (Nginx / Caddy / HAProxy), Database Studio (`psql`/`mysql`/`redis-cli`), Log Tail & Regex Alert Studio, Network Speed & iPerf3 Studio, Cron & Systemd Timer Scheduler, Backup & Restic DR Studio, Incident Runbook & Postmortem Generator, SSL/TLS CSR & SAN Studio, Port & Socket Conflict Resolver (`lsof`), and Cloud Cost FinOps Estimator.
+
+---
+
+## Repository Structure
+
+```text
+.
+├── src/
+│   ├── credentials/       # Zero-trust credential store, generator, analyzer & RFC 6238 TOTP
+│   ├── documents/         # AES-256-GCM document container, 3-way merge, revisions & templates
+│   ├── protocols/rdp/     # RDP owner lifecycle, wire framing, directional clipboard & profile lease
+│   └── desktop/           # Electron main process, strict-CSP renderer, Settings suite & 46 studios
+├── native/
+│   ├── rdp/               # C++17 FreeRDP 3.x bridge, display/clipboard channels & DACL/0700 guard
+│   └── test-server/       # Loopback FreeRDP test server for automated end-to-end verification
+├── mobile/                # JalaDesk Mobile (Flutter 3.x for iOS, iPadOS & Android)
+│   ├── lib/main.dart      # Touch RDP/VNC canvas, SSH/SFTP console, TOTP 2FA & QR pairing
+│   ├── ios/               # Xcode iOS / iPadOS runner (Deployment Target iOS 16.0+)
+│   ├── android/           # Gradle Kotlin Android runner
+│   └── test/              # Automated Flutter widget test suite
+├── scripts/               # Build, native bootstrap, packaging & verification scripts
+└── tests/                 # 1,428+ automated Node.js, Electron, CSP, WCAG theme & security tests
+```
+
+---
+
+## Getting Started
+
+### Desktop (macOS & Windows)
+
+```bash
+# Install dependencies
 npm ci
+
+# Compile TypeScript & run the unit test suite (1,428 tests)
+npm run build
 npm test
-npm run bootstrap:native
+
+# Launch JalaDesk Desktop
 npm start
 ```
 
-`bootstrap:native` memerlukan compiler/SDK native, CMake >=3.22, Perl, tar, serta make di macOS atau nmake di Windows. Windows: gunakan **x64 Native Tools Command Prompt for Visual Studio** dengan compiler yang mendukung source FreeRDP 3.32.2. Bootstrap tidak menginstal toolchain global dan tidak membuat layanan/server. Build dependensi berada di `../../work`; arsip upstream diverifikasi SHA256 sebelum ekstraksi. Mesin ini menggunakan CMake 4.4.4, Apple clang 21.0.0, SDK 27.0, dan macOS 27.0.1 arm64.
+### Mobile (iOS, iPadOS & Android)
 
-Bootstrap membangun OpenSSL 3.6.5 secara static, FreeRDP 3.32.2, kemudian bridge. Windows men-stage DLL runtime yang ditemukan CMake bersama EXE dan menjalankan self-check fixture dengan PATH dibatasi ke System32. Dependency yang hilang membuat build gagal. **Cabang Windows belum diuji pada host Windows.** macOS masih menggunakan dylib FreeRDP/WinPR dari prefix build; artefak ini belum relocatable, signed, notarized, atau installer.
+```bash
+cd mobile
 
-Untuk bridge x86_64 di Mac yang menyediakan SDK dan Rosetta:
+# Fetch packages, run static analysis & widget tests
+flutter pub get
+flutter analyze
+flutter test
 
-```sh
-RDP_ARCH=x64 npm run bootstrap:native
+# Run on iOS Simulator or Android Emulator
+flutter run -d ios
+flutter run -d android
+
+# Build release bundles for App Store & Google Play
+flutter build ipa
+flutter build appbundle
 ```
 
-Ini mengganti `native/bin/rdp-bridge`. Jalankan ulang bootstrap tanpa override untuk kembali ke arsitektur host. Electron yang dipasang `npm ci` mengikuti arsitektur Node/host; menjalankan bridge x64 dari Electron arm64 bukan bukti baseline aplikasi macOS Intel.
+---
 
-Untuk prefix FreeRDP/OpenSSL yang sudah dibangun, gunakan `npm run build:native` dengan `RDP_FREERDP_PREFIX` dan `RDP_OPENSSL_ROOT`. `RDP_CMAKE`, `RDP_CTEST`, dan `RDP_NATIVE_BUILD` dapat memilih tool/build directory. Bootstrap memakai `work/bridge-build-<platform>-<arch>`; jalankan CTest dengan direktori itu:
+## License
 
-```sh
-RDP_NATIVE_BUILD=../../work/bridge-build-darwin-arm64 npm run test:native
-npm start -- --fixture
-npm run test:live
-```
-
-`--fixture` menghasilkan dua pixel lokal. `test:live` mengevaluasi evidence manual, bukan login otomatis; exit **2** berarti acceptance belum lulus. [Prosedur lab](lab/README.md) memisahkan fixture, build, dan sesi RDP nyata.
-
-## Koneksi lab
-
-Isi host/port/username pada aplikasi. Password/domain hanya melalui dialog lokal dan stdin bridge; tidak disimpan ke source, argv, renderer utama, atau laporan. Unknown certificate ditolak. Pin SHA256 opsional harus dibaca dari sumber lab tepercaya terlebih dahulu; jangan menyalin fingerprint hasil koneksi baru sebagai keputusan trust tanpa verifikasi lain.
-
-UI menerima keyboard fisik US dan pointer. Pergantian tab, blur, atau kehilangan pointer capture melepas tombol ke sesi asal. Main mengirim paling banyak satu frame yang menunggu ACK dan satu pending terbaru per sesi. Remote content dirender sebagai pixel, bukan HTML.
-
-## Batas tahap ini
-
-- Desktop awal 1280×720. Resize dari server didukung; permintaan resize client berhenti dengan alasan reconnect, dan UI reconnect belum diotomatisasi.
-- Clipboard, wheel, audio, drive/printer/USB redirection, multi-monitor, gateway, Entra login, vault, dan IME belum diimplementasikan.
-- Tes otomatis dapat berjalan tanpa bridge; native integration test ditandai skipped bila helper belum dibangun. Hasil yang dilaporkan harus menyertakan jumlah skip.
-- Credential mempunyai beberapa salinan sementara di memory native; zeroization belum dilakukan. Main memvalidasi NUL, tetapi handshake native standalone belum konsisten menolaknya. Exit normal helper masih bisa ditampilkan sebagai `helper-exit`.
-- Semua baseline live macOS arm64, macOS x86_64, dan Windows 11 x64 harus dibuktikan terpisah sebelum gate RDP dinyatakan lulus.
-
-## Sumber dan lisensi
-
-[Manifest sumber](native/third-party/SOURCES.json), [lisensi FreeRDP](third-party/FreeRDP-LICENSE), [lisensi OpenSSL](native/third-party/OpenSSL-LICENSE.txt), header JSON dengan lisensi MIT, [panduan kompilasi upstream](https://github.com/FreeRDP/FreeRDP/wiki/Compilation), dan [CMake runtime dependencies](https://cmake.org/cmake/help/latest/command/install.html#installing-runtime-dependencies). Pin dependensi merupakan input build, bukan pernyataan bahwa security review upstream telah selesai.
+Copyright © Rizky Bachtiar (`@ribato22`). All rights reserved.

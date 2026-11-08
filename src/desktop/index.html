@@ -1,5 +1,1103 @@
-<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:"><title>Remote Workspace RDP</title><link rel="stylesheet" href="style.css"></head><body>
-<header><span class="brand-icon" aria-hidden="true">▦</span><div><strong>Remote Workspace</strong><small>Desktop sessions</small></div><span id="mode">RDP</span></header>
-<div class="layout"><aside><h1>Koneksi RDP</h1><p class="intro">Buka desktop remote di dalam workspace.</p><form id="connect"><label>Host<input id="host" required placeholder="windows-lab.example" autocomplete="off"></label><div class="pair"><label>Port<input id="port" type="number" min="1" max="65535" value="3389" required></label><label>Pengguna<input id="username" required placeholder="nama pengguna" autocomplete="off"></label></div><label>SHA-256 sertifikat<span class="optional">Opsional untuk pin yang telah diverifikasi</span><input id="fingerprint" placeholder="64 karakter hexadecimal" autocomplete="off" maxlength="64"></label><button id="connect-button">Hubungkan</button></form><p id="error" role="alert"></p><div class="aside-note"><b>Trust tetap diperiksa</b><p>Sertifikat yang tidak dipercaya akan ditolak. Pin harus sesuai sertifikat lab.</p></div><div class="aside-bottom">RDP proof of concept<br><span id="platform"></span></div></aside>
-<main><nav id="tabs" aria-label="Sesi remote"></nav><div class="session-toolbar"><span id="status" role="status">Belum ada sesi</span><button id="disconnect" class="quiet" disabled>Putuskan</button></div><section id="screen"><div id="empty"><div class="desktop-icon" aria-hidden="true">▤</div><h2>Desktop Anda, satu workspace.</h2><p>Masukkan host lab untuk mulai. Setiap koneksi dibuka sebagai sesi tersendiri.</p></div></section><footer><span id="dimensions">Tidak ada layar remote</span><span>Keyboard uji: US • Klik layar untuk mengirim input</span></footer></main></div>
-<script type="module" src="../../dist/src/desktop/renderer.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <title>JalaDesk</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-tab="none">
+  <div class="edge edge-top" aria-hidden="true"></div>
+  <div id="chrome">
+    <header class="royal-topbar">
+      <div class="topbar-left">
+        <div class="royal-brand-pill" title="JalaDesk — Unified Remote Desktop, SSH &amp; Gateway Suite">
+          <img src="app-icon.png" alt="" class="brand-logo-img">
+          <strong class="brand-wordmark">JalaDesk</strong>
+        </div>
+        <div class="quick-connect-bar">
+          <input id="quick-host" type="text" placeholder="Computer Name" aria-label="Computer Name" autocomplete="off" spellcheck="false">
+          <select id="quick-protocol" aria-label="Quick Connect Protocol" title="Protocol">
+            <option value="rdp">RDP</option>
+            <option value="terminal">SSH</option>
+            <option value="vnc">VNC</option>
+            <option value="teamviewer">TV</option>
+            <option value="web">HTTPS</option>
+            <option value="sftp">SFTP</option>
+            <option value="powershell">PS</option>
+            <option value="vmware">ESXi</option>
+            <option value="hyperv">Hyper-V</option>
+          </select>
+          <button id="quick-connect-go" type="button" class="quick-go-btn" title="Connect Now (Enter)" data-tooltip="Connect Now (Enter)">▶</button>
+          <button id="quick-options-toggle" type="button" class="quiet quick-opt-btn" title="Quick Connect Options" data-tooltip="Quick Connect Options">▾</button>
+        </div>
+      </div>
+
+      <div id="toolbar" role="toolbar" aria-label="Toolbar" hidden></div>
+
+      <div class="topbar-right">
+        <button id="cmd-palette-btn" type="button" class="quiet quick-opt-btn" title="Quick Switcher &amp; Command Palette (⌘K)" data-tooltip="Quick Switcher &amp; Command Palette (⌘K)">⌘K</button>
+        <button id="lock-workspace-btn" type="button" class="quiet quick-opt-btn" title="Privacy Curtain Lock Screen (⌃⌘L)" data-tooltip="Privacy Curtain Lock Screen (⌃⌘L)">🔒</button>
+        <div class="topbar-search" role="search">
+          <input id="tree-search" type="search" placeholder="Search" aria-label="Search connections, folders, or hosts" autocomplete="off" maxlength="200">
+          <details class="search-filter-menu">
+            <summary title="Search Filters">▾</summary>
+            <div class="search-filter-popover">
+              <label class="check"><input id="tree-search-notes" type="checkbox">Include Notes</label>
+              <label class="check"><input id="tree-favorites" type="checkbox">Favorites Only</label>
+            </div>
+          </details>
+        </div>
+        <span id="mode" class="sr-only">RDP</span>
+      </div>
+    </header>
+
+    <details id="adhoc" class="quick-connect-drawer">
+      <summary class="sr-only">Quick Connect Options</summary>
+      <form id="connect" class="quick-connect-form">
+        <label>Host<input id="host" required placeholder="10.28.37.14" autocomplete="off"></label>
+        <label>Port<input id="port" type="number" min="1" max="65535" value="3389" required></label>
+        <label>Username<input id="username" required placeholder="bright" autocomplete="off"></label>
+        <label>Jump Host / Gateway<span class="optional">No VPN</span>
+          <select id="jump-host-select">
+            <option value="">Direct (LAN / VPN)</option>
+            <option value="pln-jump">pln-jump (103.172.170.196:2345)</option>
+            <option value="distribusi-jump">distribusi-jump (103.172.170.219:2602)</option>
+            <option value="mitra-jump">mitra-jump (103.172.170.219:2602)</option>
+            <option value="__custom__">Custom Jump Host…</option>
+          </select>
+        </label>
+        <label id="jump-custom-wrap" hidden>Custom Jump (user@host:port)<input id="jump-host-custom" placeholder="bright@103.172.170.196:2345" autocomplete="off"></label>
+        <label id="jump-pass-wrap" hidden>Jump Host Password<span class="optional">If no SSH key</span><input id="jump-host-pass" type="password" placeholder="Jump password" autocomplete="off"></label>
+        <label>Cert SHA-256<span class="optional">Optional</span><input id="fingerprint" placeholder="64 hex chars" autocomplete="off" maxlength="64"></label>
+        <fieldset class="clip">
+          <legend>Clipboard</legend>
+          <div class="clip-checks">
+            <label class="check"><input id="clip-from" type="checkbox">Remote → Local</label>
+            <label class="check"><input id="clip-to" type="checkbox">Local → Remote</label>
+          </div>
+        </fieldset>
+        <button id="connect-button" type="submit">Connect</button>
+      </form>
+    </details>
+  </div>
+
+  <div id="shell-notice" role="status" class="empty" aria-live="polite">
+    <span id="shell-notice-text"></span>
+    <button type="button" id="shell-notice-close" class="quiet" hidden>Close</button>
+  </div>
+
+  <div class="layout">
+    <div class="edge edge-left" aria-hidden="true"></div>
+    <aside aria-label="Navigation">
+      <section id="documents" aria-label="Documents">
+        <div class="nav-group-header">
+          <span class="nav-group-title">Connections</span>
+          <div class="nav-group-mini">
+            <button id="royal-new-doc" type="button" class="mini-btn" title="New Document (⌘N)">New</button>
+            <button id="royal-open-doc" type="button" class="mini-btn" title="Open Document (⌘O)">Open</button>
+          </div>
+        </div>
+        <p id="tree-search-status" role="status" aria-live="polite"></p>
+        <div id="tree" role="tree" tabindex="0" aria-label="Documents and Connections"></div>
+        <p id="tree-empty">No open document — click + or New</p>
+        <div id="obj-notes" role="region" aria-label="Notes" tabindex="0" hidden>
+          <b>Notes</b>
+          <p id="obj-notes-text"></p>
+        </div>
+
+        <div id="app-tree-section" class="app-tree-section">
+          <div class="nav-group-header">
+            <span class="nav-group-title">Application</span>
+          </div>
+          <ul id="app-tree" class="app-tree" role="list">
+            <li><button type="button" class="app-tree-row" data-app-action="credentials"><span class="app-tree-icon">🔑</span><span>Credentials</span></button></li>
+            <li><button type="button" class="app-tree-row" data-app-action="tasks"><span class="app-tree-icon">⚡</span><span>Tasks</span></button></li>
+            <li><button type="button" class="app-tree-row" data-app-action="templates"><span class="app-tree-icon">📋</span><span>Templates</span></button></li>
+            <li class="app-tree-group">
+              <details open>
+                <summary class="app-tree-row"><span class="app-tree-icon">📁</span><span>Default Settings</span></summary>
+                <ul class="app-tree-children" role="list">
+                  <li><button type="button" class="app-tree-row" data-default-plugin="Folder"><span class="app-tree-icon">📁</span><span>Folder</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="Remote Desktop"><span class="app-tree-icon">🖥</span><span>Remote Desktop</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="VNC"><span class="app-tree-icon">🖵</span><span>VNC</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="TeamViewer"><span class="app-tree-icon">⇄</span><span>TeamViewer</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="Terminal"><span class="app-tree-icon">❯_</span><span>Terminal</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="Web Page"><span class="app-tree-icon">🌐</span><span>Web Page</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="File Transfer"><span class="app-tree-icon">⇅</span><span>File Transfer</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="VMware"><span class="app-tree-icon">▣</span><span>VMware</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="Hyper-V"><span class="app-tree-icon">▤</span><span>Hyper-V</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="Windows Events View"><span class="app-tree-icon">📋</span><span>Windows Events View</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="Windows Services"><span class="app-tree-icon">⚙</span><span>Windows Services</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="Windows Processes"><span class="app-tree-icon">📊</span><span>Windows Processes</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="Terminal Services"><span class="app-tree-icon">👥</span><span>Terminal Services</span></button></li>
+                  <li><button type="button" class="app-tree-row" data-default-plugin="PowerShell"><span class="app-tree-icon">PS</span><span>PowerShell</span></button></li>
+                </ul>
+              </details>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <div class="sidebar-bottom-bar" role="toolbar" aria-label="Sidebar Actions">
+        <div class="sidebar-bottom-left">
+          <button id="royal-add-btn" type="button" class="icon-bar-btn" title="Add Connection, Folder, Gateway, or Task">+ ▾</button>
+          <details id="royal-actions-drawer" class="actions-popover-wrap">
+            <summary class="icon-bar-btn" title="Document &amp; Object Actions">⚙ ▾</summary>
+            <div class="actions-popover">
+              <div class="popover-section-label">Document</div>
+              <div class="popover-grid">
+                <button id="doc-new" type="button" class="quiet" data-en="New…">Baru…</button>
+                <button id="doc-open" type="button" class="quiet" data-en="Open…">Buka…</button>
+                <button id="doc-save" type="button" class="quiet" data-en="Save" disabled>Simpan</button>
+                <button id="doc-close" type="button" class="quiet" data-en="Close" disabled>Tutup</button>
+                <button id="doc-properties-open" type="button" class="quiet" data-en="Properties…" disabled>Document Properties…</button>
+                <button id="doc-password-open" type="button" class="quiet" data-en="Password…" disabled>Change Password…</button>
+                <button id="doc-conflicts" type="button" class="quiet" data-en="Conflicts" disabled>Konflik…</button>
+                <button id="doc-history" type="button" class="quiet" data-en="History…" disabled>Riwayat…</button>
+                <button id="doc-reload" type="button" class="quiet" data-en="Reload" disabled>Muat ulang</button>
+              </div>
+              <label class="popover-select-row" id="doc-autosave-row">Auto Save
+                <select id="doc-autosave" disabled>
+                  <option value="off">Off</option>
+                  <option value="close">On Close</option>
+                  <option value="edit">On Edit</option>
+                </select>
+              </label>
+              <section aria-label="Document Maintenance" class="maintenance-card">
+                <span class="sr-only">Revisi lama tetap memerlukan password lama</span>
+                <p id="document-maintenance-error" role="alert"></p>
+                <p id="document-maintenance-status" role="status" aria-live="polite"></p>
+                <div id="document-maintenance-notices" aria-live="polite"></div>
+              </section>
+              <div class="popover-section-label">Selected Object</div>
+              <div class="popover-grid">
+                <button id="obj-add-folder" type="button" class="quiet" data-en="New Folder" disabled>Folder baru</button>
+                <button id="obj-add-connection" type="button" class="quiet" data-en="New Connection" disabled>Koneksi baru</button>
+                <button id="obj-edit" type="button" class="quiet" data-en="Properties…" disabled>Properti…</button>
+                <button id="obj-duplicate" type="button" class="quiet" data-en="Duplicate" disabled>Duplikat</button>
+                <button id="obj-bulk" type="button" class="quiet" data-en="Batch / Multi…">Batch / Multi…</button>
+                <button id="obj-transfer" type="button" class="quiet" data-en="Copy / Move…">Copy / Move…</button>
+                <button id="obj-remove" type="button" class="quiet" data-en="Delete" disabled>Hapus</button>
+              </div>
+              <div class="popover-section-label">Vault &amp; Templates</div>
+              <div class="popover-grid">
+                <button id="credentials-open" type="button" class="quiet" data-en="Credentials…">Credentials…</button>
+                <button id="templates-open" type="button" class="quiet" data-en="Templates…">Templates…</button>
+              </div>
+              <div class="popover-section-label">Tree</div>
+              <div class="popover-grid">
+                <button id="tree-expand" type="button" class="quiet" data-en="Expand All" disabled>Buka semua</button>
+                <button id="tree-collapse" type="button" class="quiet" data-en="Collapse All" disabled>Tutup semua</button>
+              </div>
+            </div>
+          </details>
+        </div>
+        <div class="sidebar-bottom-right">
+          <button id="obj-favorite" type="button" class="icon-bar-btn" aria-pressed="false" data-en="☆" title="Toggle Favorite (⌘B)" disabled>Favorit</button>
+          <button id="obj-connect" type="button" class="icon-bar-btn" data-en="▷" title="Connect Selected (↩)" disabled>Hubungkan</button>
+        </div>
+      </div>
+
+      <div id="royal-add-menu" class="royal-add-menu" role="menu" aria-label="Add Object" hidden>
+        <div class="add-menu-group">Organization</div>
+        <button type="button" class="add-menu-item" data-add-plugin="Folder"><span class="add-icon">📁</span><span>Folder</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Dynamic Folder"><span class="add-icon">⚡</span><span>Dynamic Folder</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Credential"><span class="add-icon">🔑</span><span>Credential</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Information"><span class="add-icon">ℹ</span><span>Information</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="To-Do"><span class="add-icon">✓</span><span>To-Do</span></button>
+        <div class="add-menu-sep"></div>
+        <div class="add-menu-group">Remote Connections</div>
+        <button type="button" class="add-menu-item" data-add-plugin="Remote Desktop"><span class="add-icon">🖥</span><span>Remote Desktop</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="VNC"><span class="add-icon">🖵</span><span>VNC</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="TeamViewer"><span class="add-icon">⇄</span><span>TeamViewer</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Terminal"><span class="add-icon">❯_</span><span>Terminal</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Web Page"><span class="add-icon">🌐</span><span>Web Page</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="File Transfer"><span class="add-icon">⇅</span><span>File Transfer</span></button>
+        <div class="add-menu-sep"></div>
+        <div class="add-menu-group">Management Connections</div>
+        <button type="button" class="add-menu-item" data-add-plugin="Windows Events View"><span class="add-icon">📋</span><span>Windows Events View</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Windows Services"><span class="add-icon">⚙</span><span>Windows Services</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Windows Processes"><span class="add-icon">📊</span><span>Windows Processes</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Terminal Services"><span class="add-icon">👥</span><span>Terminal Services</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="VMware"><span class="add-icon">▣</span><span>VMware</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Hyper-V"><span class="add-icon">▤</span><span>Hyper-V</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="PowerShell"><span class="add-icon">PS</span><span>PowerShell</span></button>
+        <div class="add-menu-sep"></div>
+        <div class="add-menu-group">Gateways</div>
+        <button type="button" class="add-menu-item" data-add-plugin="Royal Server"><span class="add-icon">🏛</span><span>Royal Server</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Secure Gateway"><span class="add-icon">🛡</span><span>Secure Gateway</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Remote Desktop Gateway"><span class="add-icon">🌐</span><span>Remote Desktop Gateway</span></button>
+        <div class="add-menu-sep"></div>
+        <div class="add-menu-group">Tasks</div>
+        <button type="button" class="add-menu-item" data-add-plugin="Command Task"><span class="add-icon">⌘</span><span>Command Task</span></button>
+        <button type="button" class="add-menu-item" data-add-plugin="Key Sequence Task"><span class="add-icon">⌨</span><span>Key Sequence Task</span></button>
+      </div>
+    </aside>
+
+    <main>
+      <div class="workspace-top-bar">
+        <div class="tabs-strip-wrap">
+          <div class="static-overview-tab active" id="overview-tab-pill" title="Workspace Overview">⊞ Overview</div>
+          <nav id="tabs" aria-label="Active Sessions"></nav>
+          <button id="split-view-toggle" type="button" class="quiet tab-strip-tool" title="Royal TSX / Jump Desktop: Toggle Split-Screen Multi-Monitor View (Single / 2×1 Side-by-Side / 2×2 Grid)">⊞ Split: Single</button>
+          <p id="tabs-live" class="sr-only" role="status" aria-live="polite"></p>
+        </div>
+        <div class="session-toolbar">
+          <span id="status" role="status">No active session</span>
+          <span class="actions">
+            <select id="rdp-send-keys" class="session-select" aria-label="Send System Keys" title="Jump Desktop / Royal TSX: Send System Key Combination">
+              <option value="">⌨ Send Keys…</option>
+              <option value="cad">Ctrl + Alt + Del</option>
+              <option value="win">Win / Start Menu</option>
+              <option value="taskmgr">Task Manager (Ctrl+Shift+Esc)</option>
+              <option value="alttab">Switch Window (Alt+Tab)</option>
+              <option value="winr">Run Dialog (Win+R)</option>
+              <option value="winl">Lock Screen (Win+L)</option>
+            </select>
+            <button id="rdp-mac-keys" type="button" class="quiet" title="Jump Desktop: Remap Mac ⌘ Cmd shortcuts (⌘C, ⌘V, ⌘A, ⌘Z, ⌘S, ⌘F) to Windows Ctrl inside RDP">⌘⇄Ctrl: ON</button>
+            <button id="rdp-view-only" type="button" class="quiet" title="Jump Desktop: View-Only (Observe) Mode — block accidental mouse &amp; keyboard input on remote screen">👁 View-Only</button>
+            <button id="rdp-hud-toggle" type="button" class="quiet" title="Jump Desktop: Toggle Live FPS, Resolution &amp; Uptime Telemetry HUD">📊 HUD</button>
+            <button id="rdp-type-clipboard" type="button" class="quiet" title="Jump Desktop / Royal TSX: Type local clipboard text as hardware keystrokes (works on login screens)">⌨ Type Clipboard</button>
+            <button id="rdp-scale-toggle" type="button" class="quiet" title="Jump Desktop: Toggle Display Scaling (Fit / Stretch / 1:1)">⊡ Scale: Fit</button>
+            <button id="rdp-snapshot" type="button" class="quiet" title="Capture PNG Screenshot of Active Remote Screen">📷 Snapshot</button>
+            <button id="auto-reconnect-toggle" type="button" class="quiet" title="Royal TSX / Jump Desktop: Automatically reconnect dropped RDP/SSH sessions">🔄 Auto-Retry: ON</button>
+            <button id="window-full" type="button" class="quiet" title="Maximize session inside window — hide sidebar &amp; toolbars">⛶ Window Full</button>
+            <button id="fullscreen-btn" type="button" class="quiet" title="Toggle macOS Full Screen (⌃⌘F)">⤢ Full Screen</button>
+            <button id="reconnect" class="quiet" data-en="Reconnect" disabled>Hubungkan ulang</button>
+            <button id="disconnect" class="quiet" data-en="Disconnect" disabled>Putuskan</button>
+            <button id="close-tab" class="quiet" data-en="Close Tab" disabled>Tutup tab</button>
+          </span>
+        </div>
+      </div>
+
+      <div class="workspace-alerts-bar" aria-live="polite">
+        <p id="error" role="alert" title="Click to dismiss"></p>
+        <p id="doc-error" role="alert" title="Click to dismiss"></p>
+        <p id="doc-message" role="status" title="Click to dismiss"></p>
+        <p id="doc-autosave-note" class="hint" role="status"></p>
+      </div>
+
+      <section id="screen" aria-label="Workspace Stage">
+        <button id="exit-window-full" type="button" class="exit-full-pill" title="Restore Sidebar &amp; Toolbars">❐ Exit Full View</button>
+        <div id="rdp-live-hud" class="rdp-live-hud" hidden></div>
+        <div id="session-ended" class="session-ended-card" hidden>
+          <img src="app-icon.png" alt="" class="session-ended-logo">
+          <strong id="session-ended-title">Session Disconnected</strong>
+          <p id="session-ended-detail" class="muted">The remote desktop connection has ended.</p>
+          <div class="overview-actions-bar">
+            <button id="session-ended-reconnect" type="button" class="overview-pill primary">↻ Reconnect</button>
+            <button id="session-ended-close" type="button" class="overview-pill quiet">✕ Close Tab</button>
+          </div>
+        </div>
+        <div id="empty" class="royal-watermark-wrap">
+          <div class="overview-hub">
+            <div class="overview-brand-hero">
+              <div class="royal-watermark" aria-hidden="true">
+                <img src="app-icon.png" alt="" class="overview-logo-img">
+              </div>
+              <div class="overview-brand-name">JalaDesk</div>
+              <div class="overview-brand-tagline muted">Unified Remote Desktop, SSH Terminal &amp; Secure Gateway</div>
+            </div>
+            <div class="overview-actions-bar" role="toolbar" aria-label="Workspace Quick Actions">
+              <button type="button" class="overview-pill primary" data-overview-action="new-doc" title="New Document… (⌘N)" data-tooltip="New Document… (⌘N)">➕<span class="sr-only">New Document</span></button>
+              <button type="button" class="overview-pill quiet" data-overview-action="open-doc" title="Open Document… (⌘O)" data-tooltip="Open Document… (⌘O)">📂<span class="sr-only">Open Document…</span></button>
+              <button type="button" class="overview-pill quiet" data-overview-plugin="Secure Gateway" title="Jump Host &amp; Secure Gateway Tunnels" data-tooltip="Jump Host &amp; Secure Gateway Tunnels">🛡<span class="sr-only">Jump Host &amp; Tunnels</span></button>
+              <button type="button" class="overview-pill quiet" data-overview-action="credentials" title="Credentials Vault" data-tooltip="Credentials Vault">🔑<span class="sr-only">Credentials Vault</span></button>
+              <button type="button" class="overview-pill quiet" data-overview-action="templates" title="Connection Templates" data-tooltip="Connection Templates">📋<span class="sr-only">Templates</span></button>
+              <button type="button" class="overview-pill quiet" data-overview-plugin="SFTP Commander" title="Dual-Pane SFTP Commander &amp; Remote Editor" data-tooltip="Dual-Pane SFTP Commander">🗂<span class="sr-only">SFTP Commander</span></button>
+              <button type="button" class="overview-pill quiet" data-overview-plugin="SSH Config Studio" title="Visual ~/.ssh/config Studio" data-tooltip="Visual ~/.ssh/config Studio">🔧<span class="sr-only">SSH Config Studio</span></button>
+              <button type="button" class="overview-pill quiet" data-overview-plugin="Port Forward Studio" title="Port-Forwarding &amp; SOCKS5 Proxy Studio (-L / -D / -R)" data-tooltip="Port Forward &amp; SOCKS5 Studio">🚇<span class="sr-only">Port Forward Studio</span></button>
+              <button type="button" class="overview-pill quiet" data-overview-plugin="Network Scanner" title="Network Subnet &amp; Port Discovery Scanner" data-tooltip="Network Subnet Scanner">🔍<span class="sr-only">Subnet Scanner</span></button>
+              <button type="button" class="overview-pill quiet" data-overview-plugin="Batch Script Runner" title="Multi-Server Batch Script Execution Matrix" data-tooltip="Batch Script Matrix">⚡<span class="sr-only">Batch Script Matrix</span></button>
+            </div>
+            <div class="overview-proto-grid" aria-label="Quick Launch Protocols">
+              <button type="button" class="overview-proto-card" data-overview-plugin="Remote Desktop">
+                <span class="overview-tile-icon" data-icon-id="desktop" data-tint="blue">🖥</span>
+                <span class="overview-tile-text">
+                  <strong>Remote Desktop</strong>
+                  <small>RDP · 3389</small>
+                </span>
+              </button>
+              <button type="button" class="overview-proto-card" data-overview-plugin="Terminal">
+                <span class="overview-tile-icon" data-icon-id="terminal" data-tint="purple">❯_</span>
+                <span class="overview-tile-text">
+                  <strong>Terminal</strong>
+                  <small>SSH · 22</small>
+                </span>
+              </button>
+              <button type="button" class="overview-proto-card" data-overview-plugin="VNC">
+                <span class="overview-tile-icon" data-icon-id="laptop" data-tint="teal">🖵</span>
+                <span class="overview-tile-text">
+                  <strong>VNC</strong>
+                  <small>RFB · 5900</small>
+                </span>
+              </button>
+              <button type="button" class="overview-proto-card" data-overview-plugin="Web Page">
+                <span class="overview-tile-icon" data-icon-id="globe" data-tint="green">🌐</span>
+                <span class="overview-tile-text">
+                  <strong>Web Page</strong>
+                  <small>HTTPS · 443</small>
+                </span>
+              </button>
+              <button type="button" class="overview-proto-card" data-overview-plugin="File Transfer">
+                <span class="overview-tile-icon" data-icon-id="cloud" data-tint="teal">⇅</span>
+                <span class="overview-tile-text">
+                  <strong>File Transfer</strong>
+                  <small>SFTP · 22</small>
+                </span>
+              </button>
+              <button type="button" class="overview-proto-card" data-overview-plugin="PowerShell">
+                <span class="overview-tile-icon" data-icon-id="terminal" data-tint="blue">PS</span>
+                <span class="overview-tile-text">
+                  <strong>PowerShell</strong>
+                  <small>WinRM · 5985</small>
+                </span>
+              </button>
+            </div>
+            <div class="overview-toolbox-bar">
+              <select id="overview-studio-select" class="session-select overview-studio-select" aria-label="Browse 46 Built-in Enterprise Studios by Domain" title="Browse 46 Built-in Enterprise Studios by Domain">
+                <option value="">🧰 Browse Enterprise Engineering, Security &amp; SRE Studios (46 Built-in Tools)…</option>
+                <optgroup label="🌐 Network, Routing &amp; Deep Diagnostics">
+                  <option value="Network Path Studio">🌐 Network Path, MTR &amp; DNS Propagation</option>
+                  <option value="Packet Sniffer Studio">📡 Live Packet Sniffer (tcpdump / BPF)</option>
+                  <option value="Subnet IPAM Studio">🧮 Subnet CIDR Calculator &amp; IPAM Matrix</option>
+                  <option value="Threat Intel Studio">🌍 GeoIP, BGP ASN &amp; Threat Intel Lookup</option>
+                  <option value="Topology Map">🕸 Interactive Network Topology Map</option>
+                  <option value="VPN Mesh Studio">🔐 WireGuard &amp; IPsec Site-to-Site VPN</option>
+                  <option value="WoL & Port Knock">📡 Wake-on-LAN &amp; Port Knocking</option>
+                </optgroup>
+                <optgroup label="🛡 Zero-Trust Security &amp; Compliance">
+                  <option value="TOTP Authenticator">🔐 Built-in TOTP 2FA / MFA Vault</option>
+                  <option value="SSH CA Studio">🔑 SSH Certificate Authority (Zero-Trust CA)</option>
+                  <option value="SSH Key Studio">🔑 SSH Key Pair Generator &amp; Deployer</option>
+                  <option value="Secret Env Studio">🔐 HashiCorp Vault &amp; .env Secret Sealer</option>
+                  <option value="CIS Benchmark Studio">🔒 CIS Benchmark &amp; SSH Hardening Audit</option>
+                  <option value="FIM Auditd Studio">🛡 SHA-256 File Integrity (FIM) &amp; Auditd</option>
+                  <option value="Cert Auditor">🔐 SSL/TLS Certificate Expiry Auditor</option>
+                  <option value="Firewall Auditor">🛡 Firewall &amp; Port Security Matrix</option>
+                  <option value="Intrusion Studio">🚨 Fail2Ban &amp; PAM Intrusion Guard</option>
+                  <option value="Known Hosts Manager">🛡 SSH Known Hosts &amp; Cert Pin Manager</option>
+                  <option value="Clipboard Scrubber">📋 Smart Clipboard Secret Scrubber</option>
+                  <option value="Safety Guard">🛡 Production Freeze &amp; Safety Guard</option>
+                </optgroup>
+                <optgroup label="⚙ Fleet, Virtualization &amp; Cloud DevOps">
+                  <option value="Hypervisor Studio">🖥 Proxmox, ESXi &amp; Hyper-V Fleet Studio</option>
+                  <option value="Container Studio">🐳 Docker, Podman &amp; Container Studio</option>
+                  <option value="K8s Manifest Studio">☸ Kubernetes Manifest &amp; Helm Studio</option>
+                  <option value="AD & DNS Studio">🏢 Active Directory, DNS &amp; Windows Admin</option>
+                  <option value="Service Controller Studio">🔄 Systemd &amp; Windows Service Controller</option>
+                  <option value="User Session Auditor">👥 Linux User, Sudoers &amp; Login Auditor</option>
+                  <option value="OS Patch Studio">📦 OS Package &amp; Patch CVE Auditor</option>
+                  <option value="IaC Exporter">⚙ Ansible, Terraform &amp; /etc/hosts Exporter</option>
+                  <option value="Cron Scheduler">⏱ Scheduled Task &amp; Cron Runner</option>
+                  <option value="Runbook Studio">📖 Operational Runbooks &amp; SOP Playbooks</option>
+                  <option value="Drift Comparator">📊 Multi-Server Baseline Drift Comparator</option>
+                </optgroup>
+                <optgroup label="📊 SRE Observability, HA, DR &amp; ITIL">
+                  <option value="Resource Profiler">📈 CPU, RAM &amp; Disk I/O Resource Profiler</option>
+                  <option value="Storage Studio">💽 Disk, LVM, ZFS &amp; SMART Health Studio</option>
+                  <option value="Kernel Limits Studio">🧬 Kernel sysctl &amp; Open FD Limits Studio</option>
+                  <option value="HTTP Endpoint Studio">🌐 HTTP / REST &amp; Webhook Health Probe</option>
+                  <option value="Load Benchmark Studio">⚡ HTTP Concurrency &amp; Latency Benchmark</option>
+                  <option value="Prometheus Studio">📊 Prometheus /metrics Telemetry Scraper</option>
+                  <option value="Reverse Proxy Studio">⚖ Nginx / HAProxy / Traefik Proxy Studio</option>
+                  <option value="Database Studio">🗄 Postgres / MySQL / MSSQL / Redis Studio</option>
+                  <option value="DB Backup Studio">🗄 Automated DB Backup &amp; PITR Restore</option>
+                  <option value="Config Backup Vault">💾 Remote /etc Config Backup Vault</option>
+                  <option value="Time Sync Studio">🕰 NTP / Chrony Clock Skew Auditor</option>
+                  <option value="HA Cluster Studio">⚡ Keepalived VRRP &amp; Pacemaker HA Studio</option>
+                  <option value="Log Streamer">📜 Live Multi-Server Log Streamer</option>
+                  <option value="Alert Relay Studio">📨 Webhook, Slack &amp; Telegram Alert Tester</option>
+                  <option value="Health Monitor">🔔 Live Uptime Watchdog &amp; SLA Monitor</option>
+                  <option value="Incident Reporter">📸 1-Click Incident Evidence Generator</option>
+                  <option value="Change RFC Studio">📋 ITIL v4 Request for Change (RFC) Studio</option>
+                  <option value="Team Vault Sync">☁️ Team Vault Encrypted Git &amp; S3 Sync</option>
+                  <option value="Session Cast Studio">🎬 Session Cast Replay (Asciicast v2)</option>
+                  <option value="Config Bundle">📦 Portable Workspace Config Bundle</option>
+                  <option value="Audit Log">📜 Session Audit Trail &amp; History</option>
+                </optgroup>
+              </select>
+              <button type="button" id="overview-studio-search-btn" class="quiet overview-pill" title="Open Quick Switcher &amp; Search All 46 Studios (⌘K)" data-tooltip="Search All 46 Studios (⌘K)">⌘K</button>
+            </div>
+            <div id="folder-dashboard" class="folder-dashboard" hidden></div>
+          </div>
+        </div>
+        <div id="plugin-stage" class="plugin-stage" hidden></div>
+      </section>
+
+      <footer>
+        <span id="dimensions">Ready</span>
+        <div class="footer-right">
+          <span id="platform"></span>
+          <label class="zoom-control" aria-label="Zoom">
+            <input id="canvas-zoom" type="range" min="75" max="150" value="100">
+            <span class="zoom-icon" aria-hidden="true">🔍</span>
+          </label>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Object Properties Dialog (#props) -->
+  <dialog id="props" aria-labelledby="props-title">
+    <form id="props-form" novalidate>
+      <h2 id="props-title">Properties</h2>
+      <p id="props-error" role="alert"></p>
+      <label>Display Name<input id="p-name" maxlength="256" autocomplete="off"></label>
+      <div id="p-rdp">
+        <div class="pair">
+          <label>Connection Type
+            <select id="p-plugin-type">
+              <optgroup label="Remote Connections">
+                <option value="Remote Desktop">Remote Desktop (RDP)</option>
+                <option value="VNC">VNC</option>
+                <option value="TeamViewer">TeamViewer</option>
+                <option value="Terminal">Terminal (SSH)</option>
+                <option value="Web Page">Web Page (HTTPS)</option>
+                <option value="File Transfer">File Transfer (SFTP)</option>
+              </optgroup>
+              <optgroup label="Management Connections">
+                <option value="Windows Events View">Windows Events View</option>
+                <option value="Windows Services">Windows Services</option>
+                <option value="Windows Processes">Windows Processes</option>
+                <option value="Terminal Services">Terminal Services</option>
+                <option value="VMware">VMware</option>
+                <option value="Hyper-V">Hyper-V</option>
+                <option value="PowerShell">PowerShell</option>
+              </optgroup>
+              <optgroup label="Gateways">
+                <option value="Royal Server">Royal Server</option>
+                <option value="Secure Gateway">Secure Gateway</option>
+                <option value="Remote Desktop Gateway">Remote Desktop Gateway</option>
+              </optgroup>
+              <optgroup label="Tasks &amp; Notes">
+                <option value="Command Task">Command Task</option>
+                <option value="Key Sequence Task">Key Sequence Task</option>
+                <option value="Information">Information</option>
+                <option value="To-Do">To-Do</option>
+              </optgroup>
+            </select>
+          </label>
+          <label>Port<input id="p-port" type="number" min="1" max="65535"></label>
+        </div>
+        <div class="pair-equal">
+          <label><span id="p-host-label-text">Computer Name / Host</span><input id="p-host" autocomplete="off" placeholder="10.28.37.14"></label>
+          <label id="p-user-label-wrap"><span id="p-user-label-text">Username</span><input id="p-username" autocomplete="off" placeholder="bright"></label>
+        </div>
+
+        <!-- Protocol Section: Remote Desktop (RDP / Terminal Services / RD Gateway) -->
+        <div id="p-section-rdp" class="proto-section">
+          <div class="pair-equal">
+            <label>Jump Host / Gateway (No VPN)
+              <select id="p-rdp-jump">
+                <option value="">Direct LAN / VPN</option>
+                <option value="pln-jump">pln-jump (103.172.170.196:2345)</option>
+                <option value="distribusi-jump">distribusi-jump (103.172.170.219:2602)</option>
+                <option value="mitra-jump">mitra-jump (103.172.170.219:2602)</option>
+              </select>
+            </label>
+            <label>Certificate SHA-256<span class="optional">Auto-pinned if blank</span><input id="p-pin" maxlength="64" autocomplete="off" placeholder="Leave blank for auto-pin"></label>
+          </div>
+          <fieldset class="clip">
+            <legend>Clipboard Redirection<span class="optional">Text only</span></legend>
+            <div class="clip-checks">
+              <label class="check"><input id="p-clip-from" type="checkbox">Remote → Local</label>
+              <label class="check"><input id="p-clip-to" type="checkbox">Local → Remote</label>
+            </div>
+          </fieldset>
+        </div>
+
+        <!-- Protocol Section: SSH Terminal & SFTP File Transfer -->
+        <div id="p-section-ssh" class="proto-section" hidden>
+          <div class="pair-equal">
+            <label>Authentication Method
+              <select id="p-ssh-auth">
+                <option value="auto">SSH Key / Agent (Auto, fallback Password)</option>
+                <option value="password">Password Only (Prompt Password on Connect)</option>
+                <option value="key">Specific SSH Private Key</option>
+              </select>
+            </label>
+            <label id="p-ssh-key-wrap">SSH Private Key
+              <select id="p-ssh-key">
+                <option value="">Default (~/.ssh/config or ssh-agent)</option>
+                <option value="~/.ssh/id_ed25519">~/.ssh/id_ed25519</option>
+                <option value="~/.ssh/id_ed25519_distribusi">~/.ssh/id_ed25519_distribusi</option>
+                <option value="~/.ssh/mitra_deploy_ed25519">~/.ssh/mitra_deploy_ed25519</option>
+                <option value="~/.ssh/id_ed25519_csirt_plnbatam">~/.ssh/id_ed25519_csirt_plnbatam</option>
+                <option value="~/.ssh/id_ed25519_siempark">~/.ssh/id_ed25519_siempark</option>
+              </select>
+            </label>
+          </div>
+          <div class="pair-equal">
+            <label>Jump Host / Secure Gateway (No VPN)
+              <select id="p-ssh-jump">
+                <option value="">Direct Connection (No Jump Host)</option>
+                <option value="pln-jump">pln-jump (bright@103.172.170.196:2345)</option>
+                <option value="distribusi-jump">distribusi-jump (bright@103.172.170.219:2602)</option>
+                <option value="mitra-jump">mitra-jump (bright@103.172.170.219:2602)</option>
+              </select>
+            </label>
+            <label><span id="p-ssh-path-label">Startup Command / Remote Path</span>
+              <input id="p-ssh-path" autocomplete="off" placeholder="/root">
+            </label>
+          </div>
+        </div>
+
+        <!-- Protocol Section: Web Page (HTTP / HTTPS) -->
+        <div id="p-section-web" class="proto-section" hidden>
+          <div class="pair-equal">
+            <label>URL Path / Endpoint
+              <input id="p-web-path" autocomplete="off" placeholder="/dashboard or /">
+            </label>
+            <label>TLS / HTTPS Inspection
+              <select id="p-web-tls">
+                <option value="https">HTTPS + Live X.509 Certificate Audit</option>
+                <option value="http">HTTP Plaintext</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <!-- Protocol Section: VNC & TeamViewer -->
+        <div id="p-section-vnc" class="proto-section" hidden>
+          <div class="pair-equal">
+            <label>Framebuffer Session Mode
+              <select id="p-vnc-mode">
+                <option value="interactive">RFB 3.8 Interactive Desktop</option>
+                <option value="viewonly">View-Only (Monitor Mode)</option>
+              </select>
+            </label>
+            <label>Jump Host / Secure Gateway
+              <select id="p-vnc-jump">
+                <option value="">Direct Connection</option>
+                <option value="pln-jump">pln-jump (103.172.170.196:2345)</option>
+                <option value="distribusi-jump">distribusi-jump (103.172.170.219:2602)</option>
+                <option value="mitra-jump">mitra-jump (103.172.170.219:2602)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <!-- Protocol Section: Infrastructure & Windows Management -->
+        <div id="p-section-mgmt" class="proto-section" hidden>
+          <div class="pair-equal">
+            <label>Management Transport
+              <select id="p-mgmt-transport">
+                <option value="winrm">WinRM / PowerShell Remoting (5985/5986)</option>
+                <option value="ssh">SSH Telemetry Subsystem (22)</option>
+                <option value="https">Hypervisor HTTPS API (443)</option>
+              </select>
+            </label>
+            <label>Jump Host / Secure Gateway
+              <select id="p-mgmt-jump">
+                <option value="">Direct LAN / VPN</option>
+                <option value="pln-jump">pln-jump (103.172.170.196:2345)</option>
+                <option value="distribusi-jump">distribusi-jump (103.172.170.219:2602)</option>
+                <option value="mitra-jump">mitra-jump (103.172.170.219:2602)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <!-- Pre-Connect Hook: Wake-on-LAN (WoL) & Port Knocking Sequence -->
+        <div class="pair-equal">
+          <label>Pre-Connect Wake-on-LAN MAC<span class="optional">Optional Magic Packet</span>
+            <input id="p-wol-mac" autocomplete="off" placeholder="AA:BB:CC:DD:EE:FF">
+          </label>
+          <label>Pre-Connect Port Knock Sequence<span class="optional">Optional TCP/UDP ports</span>
+            <input id="p-knock-seq" autocomplete="off" placeholder="e.g. 7000, 8000, 9000">
+          </label>
+        </div>
+      </div>
+      <div id="p-meta">
+        <div class="dialog-grid-2">
+          <fieldset class="look">
+            <legend>Color (Standard, Royal &amp; Custom)</legend>
+            <div id="p-colors" class="picks"></div>
+            <div class="custom-color-bar">
+              <label class="custom-color-label">Custom Palette<input type="color" id="p-custom-color" value="#2f6fb5" aria-label="Pick custom color"></label>
+              <span id="p-color-badge" class="color-badge-pill">Default</span>
+            </div>
+          </fieldset>
+          <fieldset class="look"><legend>Icon</legend><div id="p-icons" class="picks"></div></fieldset>
+        </div>
+        <fieldset id="p-folder-gateway" class="look" hidden>
+          <legend id="p-folder-gateway-legend">Inherited Jump Host &amp; Credentials (Applies to All Child Folders &amp; Connections)</legend>
+          <div class="pair-equal">
+            <label>Default Jump Host / Secure Gateway
+              <select id="p-folder-jump">
+                <option value="">Inherit from Parent / Document</option>
+                <option value="__direct__">Direct LAN / VPN (No Jump Host)</option>
+                <option value="pln-jump">pln-jump (103.172.170.196:2345)</option>
+                <option value="distribusi-jump">distribusi-jump (103.172.170.219:2602)</option>
+                <option value="mitra-jump">mitra-jump (103.172.170.219:2602)</option>
+              </select>
+            </label>
+            <label>Default Domain \ Username (Inherited)
+              <input id="p-folder-user" autocomplete="off" placeholder="Optional (e.g. plnbatam\adminit or root)">
+            </label>
+          </div>
+          <div class="pair-equal">
+            <label>Default SSH Private Key (Inherited)
+              <select id="p-folder-ssh-key">
+                <option value="">Inherit / Default (~/.ssh/config or ssh-agent)</option>
+                <option value="~/.ssh/id_ed25519">~/.ssh/id_ed25519</option>
+                <option value="~/.ssh/id_ed25519_distribusi">~/.ssh/id_ed25519_distribusi</option>
+                <option value="~/.ssh/mitra_deploy_ed25519">~/.ssh/mitra_deploy_ed25519</option>
+                <option value="~/.ssh/id_ed25519_csirt_plnbatam">~/.ssh/id_ed25519_csirt_plnbatam</option>
+                <option value="~/.ssh/id_ed25519_siempark">~/.ssh/id_ed25519_siempark</option>
+              </select>
+            </label>
+            <label>Royal TSX Folder Mode
+              <select id="p-folder-mode">
+                <option value="standard">Standard Folder (Connect All Children)</option>
+                <option value="dashboard">Folder Dashboard + Multi-Connect</option>
+                <option value="dynamic">Dynamic Folder (Live Host Discovery)</option>
+              </select>
+            </label>
+          </div>
+        </fieldset>
+        <label>Notes<span id="p-notes-count" class="optional" aria-live="polite"></span><textarea id="p-notes" rows="3" maxlength="4000"></textarea></label>
+        <fieldset id="p-sort" class="look">
+          <legend>Folder Sort Order</legend>
+          <div class="sortrow">
+            <select id="p-sort-by-1" aria-label="Sort by"><option value="">Manual order</option><option value="name">Name</option><option value="type">Type</option></select>
+            <select id="p-sort-dir-1" aria-label="First sort direction"><option value="asc">Ascending</option><option value="desc">Descending</option></select>
+          </div>
+          <div class="sortrow">
+            <select id="p-sort-by-2" aria-label="Then by"><option value="">None</option><option value="name">Name</option><option value="type">Type</option></select>
+            <select id="p-sort-dir-2" aria-label="Second sort direction"><option value="asc">Ascending</option><option value="desc">Descending</option></select>
+          </div>
+          <label class="check" id="p-sort-sub-row"><input id="p-sort-sub" type="checkbox">Apply to <span id="p-sort-sub-count"></span> subfolders</label>
+        </fieldset>
+      </div>
+      <div class="buttons dialog-actions">
+        <button type="button" id="p-cancel" class="quiet">Cancel</button>
+        <button id="p-ok">Apply</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Conflicts Dialog (#conflicts) -->
+  <dialog id="conflicts" aria-labelledby="conflicts-title">
+    <div id="conflicts-form">
+      <h2 id="conflicts-title">Conflicts</h2>
+      <p id="conflicts-summary" role="status"></p>
+      <p class="hint">Select which version to keep for each conflict, then click Apply.</p>
+      <p id="conflicts-error" role="alert"></p>
+      <ol id="conflicts-list"></ol>
+      <div id="conflicts-confirm" role="group" aria-labelledby="conflicts-confirm-text" hidden>
+        <p id="conflicts-confirm-text"></p>
+        <div class="buttons">
+          <button type="button" id="conflicts-confirm-no" class="quiet">Cancel</button>
+          <button type="button" id="conflicts-confirm-yes">Yes, Apply</button>
+        </div>
+      </div>
+      <div class="buttons spread dialog-actions">
+        <button type="button" id="conflicts-all-mine" class="quiet">Keep All Mine</button>
+        <button type="button" id="conflicts-all-theirs" class="quiet">Keep All Theirs</button>
+        <span class="grow"></span>
+        <button type="button" id="conflicts-close" class="quiet">Close</button>
+        <button type="button" id="conflicts-apply">Apply Choices</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Revision History Dialog (#history) -->
+  <dialog id="history" aria-labelledby="history-title">
+    <div id="history-form">
+      <h2 id="history-title">Revision History</h2>
+      <p id="hist-error" role="alert"></p>
+      <div class="history-body">
+        <div class="history-side">
+          <h3>Revisions</h3>
+          <div id="hist-list"></div>
+        </div>
+        <div class="history-main">
+          <p id="hist-summary" role="status"></p>
+          <div id="hist-tree" role="tree" tabindex="0" aria-label="Revision Contents"></div>
+        </div>
+      </div>
+      <div class="buttons spread dialog-actions">
+        <button type="button" id="hist-restore-all" class="quiet" disabled>Replace Whole Document…</button>
+        <span class="grow"></span>
+        <button type="button" id="hist-close" class="quiet">Close</button>
+        <button type="button" id="hist-restore" disabled>Restore Selected Object</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Customize Toolbar Dialog (#toolbar-dialog) -->
+  <dialog id="toolbar-dialog" aria-labelledby="toolbar-title">
+    <div id="toolbar-form">
+      <h2 id="toolbar-title">Customize Toolbar</h2>
+      <p class="hint">Choose which commands appear on the toolbar and reorder them.</p>
+      <p id="toolbar-error" role="alert"></p>
+      <ul id="toolbar-list"></ul>
+      <div class="buttons spread dialog-actions">
+        <button type="button" id="toolbar-reset" class="quiet">Restore Default</button>
+        <button type="button" id="toolbar-separator" class="quiet">Add Separator</button>
+        <span class="grow"></span>
+        <button type="button" id="toolbar-close">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Keyboard Shortcuts Dialog (#shortcuts-dialog) -->
+  <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-title">
+    <div id="shortcuts-form">
+      <h2 id="shortcuts-title">Keyboard Shortcuts</h2>
+      <p id="shortcuts-note" class="hint"></p>
+      <div id="shortcuts-scroll" tabindex="0" role="region" aria-label="Shortcuts List">
+        <table id="shortcuts-table">
+          <thead><tr><th scope="col">Command</th><th scope="col">Shortcut</th></tr></thead>
+          <tbody id="shortcuts-body"></tbody>
+          <tbody id="shortcuts-tree-body"></tbody>
+          <tbody id="shortcuts-tab-body"></tbody>
+        </table>
+      </div>
+      <div class="buttons dialog-actions">
+        <button type="button" id="shortcuts-close">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Document Properties Dialog (#doc-properties-dialog) -->
+  <dialog id="doc-properties-dialog" class="config-dialog" aria-labelledby="doc-properties-title">
+    <div class="config-body">
+      <h2 id="doc-properties-title">Document Properties</h2>
+      <p class="hint">Changes apply to the open document in memory; use Save Document to write to disk.</p>
+      <p id="doc-properties-error" role="alert"></p>
+      <p id="doc-properties-loading" role="status" aria-live="polite"></p>
+      <fieldset>
+        <legend>Document Metadata</legend>
+        <label>Name<input id="doc-properties-name" maxlength="256"></label>
+        <div class="meta-timestamps">
+          <span class="sr-only">Dibuat (UTC)</span>
+          <p>Created (UTC): <output id="doc-properties-created"></output></p>
+          <p>Updated (UTC): <output id="doc-properties-updated"></output></p>
+        </div>
+        <div class="pair-equal">
+          <label>Primary Root Sort<select id="doc-properties-sort-by-1"><option value="">Manual</option><option value="name">Name</option><option value="type">Type</option></select></label>
+          <label>Direction<select id="doc-properties-sort-dir-1"><option value="asc">Ascending</option><option value="desc">Descending</option></select></label>
+        </div>
+        <div class="pair-equal">
+          <label>Secondary Root Sort<select id="doc-properties-sort-by-2"><option value="">None</option><option value="name">Name</option><option value="type">Type</option></select></label>
+          <label>Direction<select id="doc-properties-sort-dir-2"><option value="asc">Ascending</option><option value="desc">Descending</option></select></label>
+        </div>
+        <button type="button" id="doc-properties-save">Apply Name &amp; Sort</button>
+      </fieldset>
+      <div class="dialog-grid-2">
+        <fieldset class="look">
+          <legend>Document Color (Standard, Royal &amp; Custom)</legend>
+          <div id="doc-prop-colors" class="picks"></div>
+          <div class="custom-color-bar">
+            <label class="custom-color-label">Custom Palette<input type="color" id="doc-prop-custom-color" value="#2f6fb5" aria-label="Pick custom document color"></label>
+            <span id="doc-prop-color-badge" class="color-badge-pill">Default</span>
+          </div>
+        </fieldset>
+        <fieldset class="look">
+          <legend>Document Icon</legend>
+          <div id="doc-prop-icons" class="picks"></div>
+        </fieldset>
+      </div>
+      <fieldset class="look">
+        <legend>Document Jump Host &amp; Default Credentials (Inherited by All Folders &amp; Connections)</legend>
+        <div class="pair-equal">
+          <label>Default Jump Host / Secure Gateway
+            <select id="doc-prop-jump">
+              <option value="">Direct Connection (No Document Jump Host)</option>
+              <option value="pln-jump">pln-jump (103.172.170.196:2345)</option>
+              <option value="distribusi-jump">distribusi-jump (103.172.170.219:2602)</option>
+              <option value="mitra-jump">mitra-jump (103.172.170.219:2602)</option>
+            </select>
+          </label>
+          <label>Default Domain \ Username (Inherited)
+            <input id="doc-prop-default-user" autocomplete="off" placeholder="Optional (e.g. plnbatam\adminit or root)">
+          </label>
+        </div>
+        <div class="pair-equal">
+          <label>Default SSH Private Key (Inherited)
+            <select id="doc-prop-ssh-key">
+              <option value="">Default (~/.ssh/config or ssh-agent)</option>
+              <option value="~/.ssh/id_ed25519">~/.ssh/id_ed25519</option>
+              <option value="~/.ssh/id_ed25519_distribusi">~/.ssh/id_ed25519_distribusi</option>
+              <option value="~/.ssh/mitra_deploy_ed25519">~/.ssh/mitra_deploy_ed25519</option>
+              <option value="~/.ssh/id_ed25519_csirt_plnbatam">~/.ssh/id_ed25519_csirt_plnbatam</option>
+              <option value="~/.ssh/id_ed25519_siempark">~/.ssh/id_ed25519_siempark</option>
+            </select>
+          </label>
+          <div class="buttons">
+            <button type="button" id="doc-prop-apply-appearance">Apply Icon, Color &amp; Jump Host</button>
+          </div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Document Default Group</legend>
+        <label>Group<select id="doc-properties-default-group"></select></label>
+        <p id="doc-properties-default-current"></p>
+        <label class="check"><input type="checkbox" id="doc-properties-default-unset">No default (unset)</label>
+        <p id="doc-properties-default-capability"></p>
+        <div id="doc-properties-default-public">
+          <div class="pair-equal">
+            <label>Value Kind<select id="doc-properties-default-value-kind"><option value="string">Text</option><option value="number">Number</option><option value="true">true</option><option value="false">false</option><option value="null">null</option></select></label>
+            <label>Default Value<input id="doc-properties-default-value"></label>
+          </div>
+        </div>
+        <div id="doc-properties-default-credential" hidden>
+          <label>Credential Mode<select id="doc-properties-default-mode"><option value="none">No credential</option><option value="inline">Document private value</option><option value="id">By ID</option><option value="name">By name and scope</option></select></label>
+          <div id="doc-properties-default-id-fields"><label>Replacement Identity<select id="doc-properties-default-identity"></select></label></div>
+          <div id="doc-properties-default-name-fields"><label>Identity Name<input id="doc-properties-default-name" maxlength="256"></label><label>Source Scope<select id="doc-properties-default-scopes" multiple></select></label></div>
+        </div>
+        <div id="doc-properties-default-protected" hidden>
+          <label class="check"><input type="checkbox" id="doc-properties-default-false">Default false (disabled)</label>
+        </div>
+        <button type="button" id="doc-properties-default-inline" hidden>Edit Private Value…</button>
+        <button type="button" id="doc-properties-apply-default">Apply Group Default</button>
+      </fieldset>
+      <div class="dialog-actions">
+        <button type="button" id="doc-properties-reload" class="quiet">Reload</button>
+        <button type="button" id="doc-properties-close">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Credentials & Vault Dialog (#credentials-dialog) -->
+  <dialog id="credentials-dialog" class="config-dialog" aria-labelledby="cred-title">
+    <div class="config-body">
+      <h2 id="cred-title">Vault, Credentials &amp; Inheritance</h2>
+      <p id="cred-error" role="alert"></p>
+      <p id="cred-loading" role="status" aria-live="polite"></p>
+      <section aria-labelledby="cred-vault-title">
+        <h3 id="cred-vault-title">Private Vault</h3>
+        <div class="pair-equal">
+          <label>Open Source<select id="cred-source"></select></label>
+          <label>New Vault, Folder, or Credential Name<input id="cred-new-name" maxlength="256"></label>
+        </div>
+        <div class="buttons">
+          <button id="cred-create-vault" type="button">New Vault…</button>
+          <button id="cred-add-folder" type="button" class="quiet">New Folder</button>
+          <button id="cred-add" type="button">New Credential…</button>
+        </div>
+        <div id="cred-list"></div>
+        <label class="check"><input id="cred-analyze-consent" type="checkbox">Allow local credential hygiene analysis on this source</label>
+        <button id="cred-analyze" type="button" class="quiet">Analyze Selected Source</button>
+        <pre id="cred-analysis" aria-live="polite"></pre>
+      </section>
+      <section aria-labelledby="eff-title">
+        <h3 id="eff-title">Effective Values &amp; Inheritance</h3>
+        <div class="pair-equal">
+          <label>Target Folder or Connection<select id="eff-target"></select></label>
+          <label>Property Group<select id="eff-group"></select></label>
+        </div>
+        <p id="eff-current" role="status"></p>
+        <p id="eff-source"></p>
+        <button id="eff-edit-source" type="button" class="quiet">Edit Source</button>
+        <label>Destination<select id="eff-destination"><option value="shared">Shared Document</option><option value="private">My Private Override</option></select></label>
+        <label class="check"><input id="eff-inherit" type="checkbox">Inherit from parent</label>
+        <div id="eff-public">
+          <label>Value Kind<select id="eff-value-kind"><option value="string">Text</option><option value="number">Number</option><option value="true">Yes</option><option value="false">No</option><option value="null">Empty</option><option value="unset">Remove local value</option></select></label>
+          <label>Value<textarea id="eff-value" rows="2" maxlength="65536"></textarea></label>
+        </div>
+        <div id="eff-credential">
+          <label>Credential Mode<select id="eff-mode"><option value="none">No credential</option><option value="parent">From parent</option><option value="inline">Inline in this document…</option><option value="id">Select identity by ID</option><option value="name">Match exact name</option></select></label>
+          <label>Allowed Sources<select id="eff-scopes" multiple size="3"></select></label>
+          <label>Identity<select id="eff-identity"></select></label>
+          <label>Exact Name<input id="eff-name" maxlength="256"></label>
+          <button id="eff-lookup" type="button" class="quiet">Check Name / Disambiguate</button>
+          <p id="eff-matches" role="status"></p>
+        </div>
+        <div id="eff-protected">
+          <label class="check"><input id="eff-clear-protected" type="checkbox">Clear local protected value</label>
+        </div>
+        <p id="eff-capability" class="hint"></p>
+        <div class="buttons">
+          <button id="eff-apply" type="button">Apply Group</button>
+          <button id="eff-reload" type="button" class="quiet">Reload Values</button>
+        </div>
+        <fieldset>
+          <legend>Connection MFA</legend>
+          <div class="pair-equal">
+            <label>Mode<select id="eff-mfa"><option value="none">Off</option><option value="prompt">Prompt on connect</option><option value="generate">Generate from identity TOTP</option></select></label>
+            <label>Combine Into<select id="eff-mfa-field"><option value="password">Password</option><option value="username">Username</option></select></label>
+          </div>
+          <label>Order<select id="eff-mfa-pattern"><option value="ValueMfaCode">Value then code</option><option value="MfaCodeValue">Code then value</option></select></label>
+          <button id="eff-mfa-apply" type="button" class="quiet">Apply MFA</button>
+        </fieldset>
+      </section>
+      <section aria-labelledby="ov-title">
+        <h3 id="ov-title">Encrypted Private Overrides</h3>
+        <p id="ov-state" role="status"></p>
+        <div class="buttons">
+          <button id="ov-create" type="button">Create…</button>
+          <button id="ov-unlock" type="button">Unlock…</button>
+          <button id="ov-lock" type="button" class="quiet">Lock</button>
+          <button id="ov-save" type="button">Save</button>
+          <button id="ov-clear" type="button" class="quiet">Clear Group Override</button>
+          <button id="ov-disable" type="button" class="quiet">Disable Overrides…</button>
+        </div>
+        <div id="ov-conflicts"></div>
+      </section>
+      <div class="buttons dialog-actions">
+        <button id="cred-reload" type="button" class="quiet">Reload List</button>
+        <button id="cred-close" type="button">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Templates Dialog (#templates-dialog) -->
+  <dialog id="templates-dialog" class="config-dialog" aria-labelledby="tpl-title">
+    <div class="config-body">
+      <h2 id="tpl-title">Templates &amp; Default Settings</h2>
+      <p id="tpl-error" role="alert"></p>
+      <div class="pair-equal">
+        <label>Saved Templates<select id="tpl-list"></select></label>
+        <label>New Name<input id="tpl-name" maxlength="256"></label>
+      </div>
+      <label class="check"><input id="tpl-copy-references" type="checkbox">Copy credential references after source confirmation</label>
+      <div class="buttons">
+        <button id="tpl-capture" type="button">Save Tree Selection as Template</button>
+        <button id="tpl-apply" type="button">Create from Template</button>
+        <button id="tpl-adhoc" type="button">Connect Ad-Hoc</button>
+        <button id="tpl-remove" type="button" class="quiet">Delete Template…</button>
+      </div>
+      <details>
+        <summary>Public Token Expressions &amp; Values</summary>
+        <div class="dialog-grid-2">
+          <fieldset>
+            <legend>Field Expressions</legend>
+            <label>Display Name<input id="tpl-expr-Name" maxlength="65536" autocomplete="off"></label>
+            <label>Host<input id="tpl-expr-Host" maxlength="65536" autocomplete="off"></label>
+            <label>Port<input id="tpl-expr-Port" maxlength="65536" autocomplete="off"></label>
+            <label>Username<input id="tpl-expr-UserName" maxlength="65536" autocomplete="off"></label>
+            <label>Notes<input id="tpl-expr-Description" maxlength="65536" autocomplete="off"></label>
+          </fieldset>
+          <fieldset>
+            <legend>Token Values</legend>
+            <label>Host<input id="tpl-token-Host" maxlength="65536" autocomplete="off"></label>
+            <label>Port<input id="tpl-token-Port" type="number" min="1" max="65535"></label>
+            <label>Username<input id="tpl-token-UserName" maxlength="65536" autocomplete="off"></label>
+            <label>Domain<input id="tpl-token-Userdomain" maxlength="65536" autocomplete="off"></label>
+            <label>Description<input id="tpl-token-Description" maxlength="65536" autocomplete="off"></label>
+          </fieldset>
+        </div>
+      </details>
+      <p id="tpl-status" role="status"></p>
+      <div class="buttons dialog-actions">
+        <button id="tpl-close" type="button">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Transfer Dialog (#transfer-dialog) -->
+  <dialog class="config-dialog" id="transfer-dialog" aria-labelledby="transfer-title">
+    <div class="config-body">
+      <h2 id="transfer-title">Copy / Move to Document</h2>
+      <p id="transfer-error" role="alert"></p>
+      <p id="transfer-status" role="status" aria-live="polite"></p>
+      <div class="pair-equal">
+        <label>Source Document<select id="transfer-source"></select></label>
+        <label>Destination Document<select id="transfer-destination"></select></label>
+      </div>
+      <label>Source Objects<select id="transfer-objects" multiple size="6"></select></label>
+      <div class="pair-equal">
+        <label>Destination Parent<select id="transfer-parent"></select></label>
+        <label>Operation<select id="transfer-mode"><option value="copy">Copy</option><option value="move">Move (remove source after verification)</option></select></label>
+      </div>
+      <label class="check"><input type="checkbox" id="transfer-copy-private">Include encrypted secrets and private metadata after confirmation</label>
+      <div class="buttons">
+        <button type="button" id="transfer-preview" class="quiet">Preview</button>
+        <button type="button" id="transfer-apply" disabled>Apply Transfer</button>
+      </div>
+      <pre id="transfer-preview-summary" aria-live="polite"></pre>
+      <pre id="transfer-result" aria-live="polite"></pre>
+      <div class="dialog-actions">
+        <button type="button" id="transfer-reload" class="quiet">Reload Sources</button>
+        <button type="button" id="transfer-cancel">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Bulk / Batch Operations Dialog (#bulk-dialog) -->
+  <dialog class="config-dialog" id="bulk-dialog" aria-labelledby="bulk-title">
+    <div class="config-body">
+      <h2 id="bulk-title">Batch Edit &amp; Multi-Connect</h2>
+      <p id="bulk-error" role="alert"></p>
+      <p id="bulk-status" role="status" aria-live="polite"></p>
+      <div class="pair-equal">
+        <label>Operation<select id="bulk-mode"><option value="edit">Edit Selected Connections</option><option value="create">Add to Selected Documents</option></select></label>
+        <label>Filter Targets<input id="bulk-search" type="search" placeholder="Search targets"></label>
+      </div>
+      <div id="bulk-targets" aria-label="Documents and Targets"></div>
+      <fieldset id="bulk-create-options" hidden>
+        <legend>Batch Create</legend>
+        <div class="pair-equal">
+          <label>Kind<select id="bulk-create-kind"><option value="folder">Folder</option><option value="connection">Connection</option><option value="template">Template</option></select></label>
+          <label>Template<select id="bulk-template"></select></label>
+        </div>
+        <label>Names (one per line)<textarea id="bulk-create-names" rows="3"></textarea></label>
+        <label class="check"><input id="bulk-copy-references" type="checkbox">Copy credential references after confirmation</label>
+      </fieldset>
+      <fieldset>
+        <legend>Fields to Apply</legend>
+        <div class="config-row"><label class="check"><input type="checkbox" id="bulk-field-name">Name</label><label>Action<select id="bulk-operation-name"><option value="set">Set</option><option value="unset">Clear</option></select></label><label>Value<input id="bulk-value-name" type="text" placeholder="Unchanged"></label></div>
+        <div class="config-row"><label class="check"><input type="checkbox" id="bulk-field-host">Host</label><label>Action<select id="bulk-operation-host"><option value="set">Set</option><option value="unset">Clear</option></select></label><label>Value<input id="bulk-value-host" type="text" placeholder="Unchanged"></label></div>
+        <div class="config-row"><label class="check"><input type="checkbox" id="bulk-field-port">Port</label><label>Action<select id="bulk-operation-port"><option value="set">Set</option><option value="unset">Clear</option></select></label><label>Value<input id="bulk-value-port" type="number" placeholder="Unchanged" min="1" max="65535"></label></div>
+        <div class="config-row"><label class="check"><input type="checkbox" id="bulk-field-username">Username</label><label>Action<select id="bulk-operation-username"><option value="set">Set</option><option value="unset">Clear</option></select></label><label>Value<input id="bulk-value-username" type="text" placeholder="Unchanged"></label></div>
+        <div class="config-row"><label class="check"><input type="checkbox" id="bulk-field-notes">Notes</label><label>Action<select id="bulk-operation-notes"><option value="set">Set</option><option value="unset">Clear</option></select></label><label>Value<input id="bulk-value-notes" type="text" placeholder="Unchanged"></label></div>
+        <div class="config-row"><label class="check"><input type="checkbox" id="bulk-field-color">Color</label><label>Action<select id="bulk-operation-color"><option value="set">Set</option><option value="unset">Clear</option></select></label><label>Value<input id="bulk-value-color" type="text" placeholder="Unchanged"></label></div>
+        <div class="config-row"><label class="check"><input type="checkbox" id="bulk-field-clipboardToRemote">Clipboard → Remote</label><label>Action<select id="bulk-operation-clipboardToRemote"><option value="set">Set</option><option value="unset">Clear</option></select></label><label>Value<select id="bulk-value-clipboardToRemote"><option value="false">No</option><option value="true">Yes</option></select></label></div>
+        <div class="config-row"><label class="check"><input type="checkbox" id="bulk-field-clipboardFromRemote">Clipboard ← Remote</label><label>Action<select id="bulk-operation-clipboardFromRemote"><option value="set">Set</option><option value="unset">Clear</option></select></label><label>Value<select id="bulk-value-clipboardFromRemote"><option value="false">No</option><option value="true">Yes</option></select></label></div>
+      </fieldset>
+      <label class="check"><input type="checkbox" id="bulk-save">Save each document to disk after applying</label>
+      <div class="buttons">
+        <button type="button" id="bulk-preview" class="quiet">Preview Changes</button>
+        <button type="button" id="bulk-apply" disabled>Apply Preview</button>
+      </div>
+      <pre id="bulk-summary" aria-live="polite"></pre>
+      <pre id="bulk-result" aria-live="polite"></pre>
+      <fieldset>
+        <legend>Multi-Connect</legend>
+        <div class="buttons">
+          <button type="button" id="bulk-connect-start">Connect Selected Targets</button>
+          <button type="button" id="bulk-connect-retry" class="quiet">Retry Failed</button>
+          <button type="button" id="bulk-connect-disconnect" class="quiet">Disconnect Checked</button>
+        </div>
+        <label>Connection Job<select id="bulk-connect-job"></select></label>
+        <div id="bulk-connect-results" aria-live="polite"></div>
+      </fieldset>
+      <div class="dialog-actions">
+        <button type="button" id="bulk-progress" class="quiet">Refresh Progress</button>
+        <button type="button" id="bulk-reload" class="quiet">Reload Sources</button>
+        <button type="button" id="bulk-cancel">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="cmd-palette-dialog" aria-labelledby="cmd-palette-title">
+    <div class="dialog-body cmd-palette-body">
+      <div class="cmd-palette-head">
+        <h2 id="cmd-palette-title">⌘K Quick Switcher &amp; Command Palette</h2>
+        <button type="button" id="cmd-palette-close" class="quiet">Esc</button>
+      </div>
+      <input id="cmd-palette-input" type="search" placeholder="Type server name, IP, protocol, or command (e.g. 10.28, mitra-jump, split, audit, lock)…" autocomplete="off" spellcheck="false">
+      <div id="cmd-palette-list" class="cmd-palette-list" role="listbox" aria-label="Quick Switcher Results"></div>
+    </div>
+  </dialog>
+
+  <div id="privacy-curtain" class="privacy-curtain" hidden>
+    <div class="session-ended-card">
+      <img src="app-icon.png" alt="" class="session-ended-logo">
+      <strong>🔒 JalaDesk Privacy Curtain Active</strong>
+      <p class="muted">Active remote desktop, terminal, and gateway screens are masked while you are away.</p>
+      <div class="overview-actions-bar">
+        <button id="privacy-unlock-btn" type="button" class="overview-pill primary">🔓 Resume Workspace</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="../../dist/src/desktop/renderer.js"></script>
+</body>
+</html>

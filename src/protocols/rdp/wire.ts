@@ -1,10 +1,16 @@
 export type Frame = {width:number;height:number;rgba:Uint8Array};
-export type Input = {type:'pointer';x:number;y:number;buttons:number} | {type:'key';scanCode:number;down:boolean} | {type:'resize';width:number;height:number} | {type:'close'};
-export type RdpTarget = {host:string;port:number;username:string;certificateSha256?:string};
+export type Input = {type:'pointer';x:number;y:number;buttons:number} | {type:'wheel';x:number;y:number;delta:number} | {type:'hwheel';x:number;y:number;delta:number} | {type:'key';scanCode:number;down:boolean} | {type:'resize';width:number;height:number} | {type:'close'};
+// A wheel turn is one signed count of 1/120 notches (WHEEL_DELTA, positive = away from the user = scroll up; for the horizontal wheel, a type of its own, positive = to the right,
+// as WM_MOUSEHWHEEL); native/rdp/control.hpp WHEEL_MAX_DELTA is the same limit. A helper without the horizontal wheel refuses the type and ends the session, so app and helper must be paired.
+export const WHEEL_LIMIT = 4800;
+export type Clipboard = {toRemote:boolean;fromRemote:boolean};
+export type RdpTarget = {host:string;port:number;username:string;certificateSha256?:string;width?:number;height?:number;clipboard?:Clipboard};
 export type Secret = {password:string;domain:string};
 export type State = 'connecting'|'connected'|'closed'|'failed';
-export type Sink = {frame(frame:Frame):void;state(state:State,reason?:string):void};
+export type Sink = {frame(frame:Frame):void;state(state:State,reason?:string,lastError?:number):void;clipboard?(text:string):void};
 export const FRAME_BUDGET = 128 * 1024 * 1024;
+// Largest desktop one frame can carry; a bigger one would end the session on its first repaint.
+export const MAX_FRAME_AREA = (FRAME_BUDGET - 8) / 4;
 function dimensions(width:number,height:number) {
   if (!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||width>8192||height>8192) throw new Error('frame dimensions');
 }
@@ -45,6 +51,7 @@ export class FrameStream {
     return out;
   }
   finish():void {if(this.filled)throw new Error('truncated frame');}
+  reset():void {this.filled=0;this.packet=undefined;}
 }
 function object(value:unknown):Record<string,unknown> {
   if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('invalid object');
@@ -62,6 +69,13 @@ export function validateTarget(value:unknown):RdpTarget {
     if(typeof v.certificateSha256!=='string'||!/^[a-fA-F0-9]{64}$/.test(v.certificateSha256))throw new Error('invalid fingerprint');
     out.certificateSha256=v.certificateSha256.toLowerCase();
   }
+  // Initial desktop stays within what the RDP core handshake accepts; display control can grow it later.
+  if(v.width!==undefined||v.height!==undefined){out.width=integer(v.width,200,4096);out.height=integer(v.height,200,2048);}
+  if(v.clipboard!==undefined) {
+    const c=object(v.clipboard);
+    if(Object.keys(c).some(k=>k!=='toRemote'&&k!=='fromRemote')||typeof c.toRemote!=='boolean'||typeof c.fromRemote!=='boolean')throw new Error('invalid clipboard');
+    if(c.toRemote||c.fromRemote)out.clipboard={toRemote:c.toRemote,fromRemote:c.fromRemote};
+  }
   return out;
 }
 export function validateInput(value:unknown):Input {
@@ -69,8 +83,9 @@ export function validateInput(value:unknown):Input {
   switch(v.type) {
     case 'close':return {type:'close'};
     case 'pointer':return {type:'pointer',x:integer(v.x,0,8191),y:integer(v.y,0,8191),buttons:integer(v.buttons,0,7)};
+    case 'wheel': case 'hwheel': {const delta=integer(v.delta,-WHEEL_LIMIT,WHEEL_LIMIT);if(delta===0)throw new Error('invalid integer');return {type:v.type,x:integer(v.x,0,8191),y:integer(v.y,0,8191),delta};}
     case 'key':if(typeof v.down!=='boolean')throw new Error('invalid key');return {type:'key',scanCode:integer(v.scanCode,1,511),down:v.down};
-    case 'resize':return {type:'resize',width:integer(v.width,1,8192),height:integer(v.height,1,8192)};
+    case 'resize': {const width=integer(v.width,200,8192),height=integer(v.height,200,8192);if(width*height>MAX_FRAME_AREA)throw new Error('invalid size');return {type:'resize',width,height};}
     default:throw new Error('invalid input');
   }
 }

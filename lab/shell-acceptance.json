@@ -1,0 +1,386 @@
+{
+  "package": "02-B1 documents in the window (outputs/PLAN-02B-DESKTOP-SHELL.md) and 02-B2a editing foundation (outputs/PLAN-02B2A-EDITING-FOUNDATION.md) and 02-B2b organisation and search (outputs/PLAN-02B2B-ORGANISATION-AND-SEARCH.md) and 02-B2c data safety (outputs/PLAN-02B2C-DATA-SAFETY.md) and 02-B3 application shell (outputs/PLAN-02B3-APPLICATION-SHELL.md) and 02-B3b advanced shell (outputs/PLAN-02B3B-ADVANCED-SHELL.md)",
+  "statuses": [
+    "planned",
+    "implemented-unverified",
+    "fixture-tested",
+    "lab-passed",
+    "blocked-with-reason"
+  ],
+  "platforms": [
+    "mac-arm64",
+    "mac-x86_64",
+    "windows-x64"
+  ],
+  "rows": [
+    {
+      "id": "C01",
+      "name": "UI (keyboard operation of the tree; menu, toolbar, theme)",
+      "covered": [
+        "tree keys: arrows, Home, End, Enter, Delete; focus follows the selection",
+        "ARIA attributes of the drawn rows: treeitem, aria-level, aria-expanded, aria-selected (and the three below); role=tree and role=toolbar are in the HTML but are not asserted by a test",
+        "moving and copying objects from the keyboard: Alt+arrows (up, down, out of the folder, into the folder above) and Ctrl/Cmd+D; a held key is one action and quick keys are counted in order",
+        "the drawn rows of the virtualised tree say where they stand (aria-level, aria-setsize, aria-posinset) and the active row is named by aria-activedescendant",
+        "search and favourites from the keyboard: Ctrl/Cmd+F from the tree (and only from the tree or the search box, so no key meant for a remote session is taken), Esc clears the box and returns to the tree, arrow down goes from the box to the tree, Ctrl/Cmd+B toggles the favourite of the selected object",
+        "every mark on a row (colour, note, sort, favourite) is also said in words in hidden text for a screen reader (the mark itself is aria-hidden and has a tooltip), and the search status has role=status; none of this has been read by a real screen reader",
+        "the Konflik and Riwayat dialogs can be used from the keyboard (Esc closes, the focus stays inside, real radio buttons, arrows and Home/End in the tree of a version); the question before \"everything for one side\" is a named group and the focus returns to what asked it; the version that is shown has aria-current; the reason that saving by itself is off is on the page; marks on rows are also said in words (for a screen reader; not read by a real one)",
+        "a native menu in Indonesian built from one list of 63 commands (the default Electron menu, Reload and the developer tools are gone); its items follow the window: one rule for the menu and the toolbar, an item is off when its button is off",
+        "the themes Otomatis, Terang and Gelap: both palettes are written out in a test, and every pair of text or mark meets the WCAG contrast in both palettes, the marks of objects on the four kinds of row included",
+        "a toolbar (role=toolbar, one tab stop, arrows, Home and End) that can be used from the keyboard and customised (shown or hidden, order, separators, defaults) and that keeps the focus where it was",
+        "the full screen from the menu (the call to the window is recorded and the words of the item follow its state; the transition itself is not exercised by the scripts)",
+        "every key reaches a session that holds the keyboard except the few that stay the application's, which are taken before the page (checked with keys sent through before-input-event)",
+        "the About and shortcuts dialogs, and a floating notice in a live region (role=status); a notice that stays is put back when one that goes by itself has gone",
+        "a page whose process died (made to crash on purpose) leaves the menu saying that nothing of the window can be done; the menu is on again when a page reports",
+        "context menus built by the main process from the same list of commands as the menu (tree, tab, toolbar), and an editing menu on the boxes that can be typed in, also in the window that asks for a password; the menus of the system are not opened (the call is recorded: Task 13)",
+        "the extended full screen (a setting): the side panel, the title with the toolbar and the footer give way to the screen and come back at a strip at the edge or with the keyboard; the events of the full screen are made, the real one is not entered",
+        "a Settings window of its own (Cmd+, or Ctrl+,): the theme, the toolbar, the colour of tabs, the extended full screen, remembering keys and the list of recent documents; channels that only it can use, and the commands of the application window are off while it has the focus",
+        "Buka Terbaru in the File menu: ten places that are always in the menu (hidden when empty), opened by their place in the list; Bersihkan Daftar; tabs moved from the menu (Pindahkan Tab ke Kiri and Kanan)"
+      ],
+      "not_covered": [
+        "the full screen itself (the call is recorded and the menu follows its state; the transition is not exercised: Task 14)",
+        "language other than Indonesian (there is no language setting)",
+        "scaling",
+        "screen reader (only the ARIA attributes are asserted, nothing is read aloud)",
+        "Touch Bar (02-B3c); the real context menu of the system, the real full screen and the physical keys of the menu (Task 13)"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "implemented-unverified"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02B.md",
+        "../../STATUS-PAKET-02B2A.md",
+        "../../STATUS-PAKET-02B2B.md",
+        "../../STATUS-PAKET-02B2C.md",
+        "../../STATUS-PAKET-02B3.md",
+        "../../STATUS-PAKET-02B3B.md"
+      ],
+      "limits": [
+        "fixture-tested means automated tests against the real app (GUI scenarios, loopback RDP server) and unit tests; no lab host is involved",
+        "the keys of the tree (Cmd/Ctrl+D, +B, Delete, Enter, Alt+arrows) are the tree's own and work only with the focus in the tree; the other keys are keys of the menu, and a session that holds the keyboard receives every key except those that stay the application's (checked with keys sent through before-input-event; physical keys are Task 14)",
+        "drag and drop and the keys were exercised with the events that Playwright synthesises on the real Electron app: a physical pointer, Escape during a drag and dragend are for the owner (plan 02-B2a, Task 10b)",
+        "Enter, Alt+arrows, Ctrl/Cmd+D and Delete were exercised with keys sent by Playwright on macOS only (not a physical keyboard, not Windows); a clash with a system shortcut or an input method is not observed",
+        "Ctrl/Cmd+F and Ctrl/Cmd+B were exercised only with keys sent by Playwright on macOS: other keyboard layouts and Windows have not been tried (plan 02-B2b, Task 10); an input method was exercised only with synthetic events (the Enter of a composition does not leave the search box), never with a real one",
+        "the keys of the new dialogs were exercised with keys sent by Playwright on macOS only (Windows: Task 14 of plan 02-B2c); no screen reader",
+        "the physical keys of the menu of the system, VoiceOver and Narrator were not exercised; Windows and Linux were not run; the full screen is recorded and never entered; the toolbar's full screen button has no pressed state; input boxes have a border of 1.65 to 1 (decoration, not tested)",
+        "Cmd+H, Alt+Cmd+H and Cmd+M of the system stay in the menu and are not taken by the application: whether they work from the screen of a session is not observed (Task 14)",
+        "a page that died is not offered a reload (a decision of the owner: the sessions that are open in the main process would be left without a window); a failure before the window loads its page leaves the default menu of Electron until the process ends"
+      ]
+    },
+    {
+      "id": "C02",
+      "name": "Panels (tree and selection only)",
+      "covered": [
+        "tree of documents, folders and connections; open and close folders",
+        "selection stays correct after add, remove and close (falls to the parent)",
+        "moving objects: into a folder, among the siblings, to the top level (by drag and drop and by Alt+arrows); never into itself or into its own folder tree; never into another document",
+        "a document of 90,000 objects opens (570-913 ms from the click on OK to the first rows) and every folder opens (Buka semua 28-47 ms) with 17-26 elements in the page: only the rows in view are elements, and the selected row and the dragged row always are; whether this is comfortable has not been judged by a person",
+        "notes (a panel below the tree, plain text, shown as text and never as markup) and colours (nine named colours: a coloured icon and a tinted row, set in Properti)",
+        "a selection that the search hides falls to the document, so no button acts on a row that cannot be seen",
+        "the colour of a tab follows the colour of its connection (the nine words of the palette, both themes, contrast tested); a tab of the quick connection has none; Hubungkan ulang puts the new tab where the old one was, with the same colour"
+      ],
+      "not_covered": [
+        "autohide",
+        "colour inherited from a parent folder (02-C)"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "implemented-unverified"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02B.md",
+        "../../STATUS-PAKET-02B2A.md",
+        "../../STATUS-PAKET-02B2B.md",
+        "../../STATUS-PAKET-02B3B.md"
+      ],
+      "limits": [
+        "measured in the window up to 90,000 objects (the model limit is 100,000, not measured) on macOS arm64, six runs in two campaigns on a shared machine (load average 11-45), documents made with scrypt logN 14 (production logN 17 adds about 0.26 s to opening): the first rows after 570-913 ms (23.9 MiB once), Buka semua 28-47 ms, 17-26 elements in the page; moving an object to the first place of a folder that holds everything sends one delta as big as the siblings in front of it (23.75 MiB at 90,000, nearly the whole document; 5.26 MiB at 20,000)"
+      ]
+    },
+    {
+      "id": "C03",
+      "name": "Tabs (from stored objects only)",
+      "covered": [
+        "a stored connection opens an RDP session in a tab named after the object; the name survives a reconnect",
+        "a connection that cannot be opened (empty host, port stored as text, not RDP) says why and connects to nothing",
+        "sessions are not mixed up: each tab keeps its own copy of the request",
+        "a tab is chosen from the menu (numbers 1 to 9, next and previous around the ends, last) and the tab in front is marked in the menu; tested with up to three loopback sessions (with three tabs the next and the previous go different ways)",
+        "tabs are reordered with the pointer, with Alt and the arrows, from the menu and from the context menu; the order is the one used by the menu, the report of the window and the choice of the tab after a closing; a tab that cannot go further says so to a screen reader; Hubungkan ulang puts the new tab where the old one was"
+      ],
+      "not_covered": [
+        "split",
+        "dashboard",
+        "overview",
+        "duplicating or detaching a tab (02-B3c)"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "implemented-unverified"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02B.md",
+        "../../STATUS-PAKET-02B3.md",
+        "../../STATUS-PAKET-02B3B.md"
+      ],
+      "limits": [
+        "sessions were made against the loopback test server; no password of a lab host was typed",
+        "deleting an object does not touch a tab that is already open (decision D14)",
+        "the order is not kept: a tab is a session and goes when the app is closed; dragging is exercised with the events that Playwright synthesises (a physical pointer is for the owner, Task 13; touch and pen input are not covered and no step is planned for them); the strip is not scrolled while dragging (the wheel of the mouse does)"
+      ]
+    },
+    {
+      "id": "C09-ui",
+      "name": "Documents (open, save and close in the window)",
+      "covered": [
+        "several documents open at once; each keeps its own changes and its own save",
+        "new, open, save, close; the same document is never open twice (a link to a file is the file)",
+        "unsaved changes: a marker, and a question before closing the document, the window or the application",
+        "a save held back by a conflict is reported next to the buttons and writes nothing, also when it is asked for again; a version of the file that cannot be merged is never written over",
+        "an edit made while the file is being written is kept and stays unsaved, and the window says so",
+        "closing the window with several unsaved documents tries every one, and names those that could not be saved and why",
+        "errors stay visible next to the buttons until the next action; a main process that does not answer, and a list of documents that cannot be loaded, are reported",
+        "the order of siblings never is a field conflict in a merge: what one side changed is taken, mine when both did, an object that one side moved to another folder takes the order that side gave it there, the siblings are numbered again, and a sibling that was only shifted by another object does not count as edited against a delete on the other side (the delete wins)",
+        "a document of up to 90,000 objects can be opened and edited: an edit sends only what changed (about 465 bytes for a rename; 4,347 bytes for a move to the first place of a folder of 100; 82,859 bytes for a copy of a folder of 100) and the window applies deltas, asks for the whole document again when it missed one, and says so when it cannot get it",
+        "a save that took another writer's changes in and then failed still tells the window that it is behind",
+        "a save that took another writer's changes in says so (\"perubahan dari program lain digabungkan\"), and the first change after any merge restarts the window from everything there is (also an edit made while the merged version is still being written, also when that write then fails)",
+        "a close of the window that did not finish (one document cannot be saved) tells the window, which takes the documents again: what the close saved or merged is on screen without another action",
+        "a rename sends the name only: a window that is behind does not write back settings it has not seen",
+        "sort per folder: name or type, ascending or descending, one or two criteria, and \"apply to the folders below\" as one operation in one step of the sequence; a sorted folder ignores positions (what is added or dropped goes where the sort puts it, a move inside it is refused)",
+        "Properti sends a patch of what the person changed, not a copy of the window's properties: a window that is behind cannot write over a note, a colour, an icon or a setting it has not seen, and a connection whose stored settings have the wrong type, or that is not marked as RDP, is repaired by OK; the dialog stays open until the main process answers, and says a refusal or a failure inside it",
+        "saving by itself per document (off, when it is closed, after the last edit: 5 s quiet, at most 60 s after the first edit that was not saved; it stops while a conflict holds the save back; a failure or a held-back save is said once); a window that cannot be told after the file was written does not turn that save into a failed one",
+        "the Konflik dialog for all four kinds (also for objects of a hidden kind): what each side holds, one choice at a time or one side for everything after a question that says what it does to each kind; what is decided is saved; the dialog is announced (group with a name), the focus goes back to what asked and stays inside; Escape and Tutup wait while a request is under way",
+        "the Riwayat dialog: the list of earlier versions, a read-only tree with the marks \"tidak ada lagi\" and \"berbeda\", the version that is shown named in the summary and marked for a screen reader, restoring an object into a new folder or putting the whole document back (the question says when there is unsaved work that is thrown away and says when nothing changed)",
+        "Muat ulang (one request at a time, after a question of the main process); the pushes documents:delta and documents:event from the main process; closing the window saves the documents that save by themselves without a question (one that cannot be saved is told why and then asked about like any other) and asks once for the others; closing a tab does the same for one document"
+      ],
+      "not_covered": [
+        "migration of older files (in the window)",
+        "opening files made on another operating system (in the window)",
+        "sort at the top level and by dates (schema v2)"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "implemented-unverified"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02B.md",
+        "../../STATUS-PAKET-02B2A.md",
+        "../../STATUS-PAKET-02B2B.md",
+        "../../STATUS-PAKET-02B2C.md"
+      ],
+      "limits": [
+        "the operating system's file and message dialogs are replaced by stubs in the GUI scenarios (a script cannot click them); the real ones have not been seen in this package: only the owner, or a Windows run (Task 10), can",
+        "a close with a conflict that is not decided asks the usual question; 'Jangan simpan' throws away what is not saved as usual",
+        "saving through a link to a document is tested on macOS only (making a link needs a privilege on Windows)",
+        "the main process pushes documents:delta (what a save by a timer left) and documents:event (a save by itself failed or was held back); a failed action that finds the window behind starts the refresh but the next queued action does not wait for it",
+        "the order that two writers give the same folder is the one of one side (D18); merge numbers ties by id, not by name",
+        "saving by itself works only on this computer and only while the app runs, and there is no watcher for changes made outside; the list of earlier versions is not refreshed while its dialog is open; an earlier version is put back only into a new top-level folder, or as the whole document; the real file and message dialogs are stubs in the scenarios",
+        "what was decided is remembered by the next choices only until the file is written, taken in again or merged again; a second Escape closes a dialog that waits for an answer, and what comes after is said on the line of the document"
+      ]
+    },
+    {
+      "id": "C10-ui",
+      "name": "Protection (password prompts in the window)",
+      "covered": [
+        "password asked in the app's own window; a new document asks twice and needs 8 characters; a wrong password is said so and asked again",
+        "the file shows no name, host or user in clear text",
+        "the window is given folders and connections only (never a path, a password, a key or a credential), and every documents channel refuses a page that is not the app window",
+        "the eleven channels were rewritten in 02-B2a with the same checks: every one refuses a page that is not the app window, validates its payload before the library, and never answers with a path, password, key or object of a hidden kind",
+        "the twelfth channel, documents:favorite, checks its sender and its payload like the others and is not registered when the preferences cannot be opened; objects of a hidden kind are refused as if they did not exist for every way of changing them",
+        "the seven channels of package 02-B2c (conflicts, resolve, reload, revisions, revision, restore, autosave) check their sender and validate their payload like the others, before the library is touched; an object of a hidden kind never reaches the window through a conflict, a revision or a restore (its kind is said, never its name, value or id); what throws work away (a reload, the whole document put back, a window close) is asked in a dialog of the main process whose Enter and Escape answer \"no\"",
+        "the four channels of package 02-B3 (shell:report, shell:settings, shell:set-toolbar, shell:run) check their sender and validate their payload before anything is touched; the file of settings holds no secret, path or document id; the password window carries neither the shell bridge nor the application menu",
+        "the key of a document (not its password) can be kept by the keystore of the system: sealed, bound to the path of the file and the fingerprint of its key, off by default, the keystore is not asked anything before the person allows it, forgotten per document and altogether, a stale or damaged key is removed; a recent document is opened only after the click of the person, and the list holds paths and nothing else"
+      ],
+      "not_covered": [
+        "lockdown",
+        "biometric unlock"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "implemented-unverified"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02B.md",
+        "../../STATUS-PAKET-02B2A.md",
+        "../../STATUS-PAKET-02B2B.md",
+        "../../STATUS-PAKET-02B2C.md",
+        "../../STATUS-PAKET-02B3.md",
+        "../../STATUS-PAKET-02B3B.md"
+      ],
+      "limits": [
+        "a password lives as a JavaScript string until the garbage collector drops it, in the prompt window and in the main process (same limit as package 02-A)",
+        "the check that a prompt window has no menu on Windows and Linux was not run there (Task 14)",
+        "exercised with a stand-in for the keystore of the system on macOS arm64: the real Keychain and DPAPI and a Keychain that denies access are for the owner (Task 13); Linux basic_text is not covered and no step is planned for it (no Linux machine); a remembered key is bound to the path of the file (a moved file asks for its password again); safeStorage is the synchronous API, expected to be deprecated in Electron 46 (not observed); the count of remembered keys counts files"
+      ]
+    },
+    {
+      "id": "C11",
+      "name": "Organization (drag and drop, duplicate, favourites, icons, colours, search)",
+      "covered": [
+        "drag and drop that keeps parent and id: into a folder, among the siblings, to the top level; a mark shows where it will land and a closed folder opens when an object rests on it",
+        "duplicate of an object, or of a folder with everything in it, with new ids, named \"<name> salinan\", \"<name> salinan 2\" and so on",
+        "favourites (a star on the row, the Favorit button, Ctrl/Cmd+B and \"Hanya favorit\"), sixteen icons drawn by the app, nine colours, and search with a filter (every word must be found, in the name or the host, in the notes when asked; the folders above a match stay and are opened without changing which folders are open)",
+        "drag and drop honours a sorted folder: from outside it goes where the sort puts it, inside it is refused with the reason",
+        "a new object or a copy is shown with every folder above it open, also when a search ended and the folders were closed before it"
+      ],
+      "not_covered": [
+        "To-Do",
+        "custom fields",
+        "icon library and icons from files",
+        "Folder Expansion State"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "implemented-unverified"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02B2A.md",
+        "../../STATUS-PAKET-02B2B.md"
+      ],
+      "limits": [
+        "fixture-tested means automated tests against the real app and unit tests; no lab host is involved",
+        "drag and drop with a physical pointer, Escape during a drag and the pointer leaving the window are for the owner (plan 02-B2a, Task 10b)"
+      ]
+    },
+    {
+      "id": "C08-ui",
+      "name": "Overrides (local favourites only)",
+      "covered": [
+        "favourites are local preferences per user and per document id (preferences.json in the application's data folder, ids only), never part of the shared document and never written into it",
+        "a damaged preferences file is set aside (kept beside it) and favourites start empty; one that cannot be opened, or that a newer version of the app wrote, turns favourites off with a notice and is left as it is; the rest of the app runs",
+        "a file that changes under the app (another copy) is read again before every change, so two copies on one profile do not erase each other's favourites",
+        "the choice of how a document saves (off, when it is closed, after an edit) is a local preference per user in preferences.json, never written into the shared document"
+      ],
+      "not_covered": [
+        "per-connection overrides",
+        "tokens",
+        "precedence"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "implemented-unverified"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02B2B.md",
+        "../../STATUS-PAKET-02B2C.md",
+        "../../STATUS-PAKET-02B3.md"
+      ],
+      "limits": [
+        "fixture-tested means automated tests against the real app and unit tests; no lab host is involved",
+        "a second copy of the app on the same data folder is refused by the single-instance lock (02-B3); there is still no file lock, so another program can overwrite the file within the time of one write",
+        "the atomic write retries a rename that Windows refuses for a moment (EPERM, EBUSY, EACCES) three times; that was exercised on macOS with a stand-in file system only",
+        "the file of the choices is the file of the favourites: version 1 while no document has a choice, version 2 when one has; the 02-B2b app reads version 2 as a newer file and leaves it alone"
+      ]
+    },
+    {
+      "id": "C22",
+      "name": "Lifecycle (single instance only)",
+      "covered": [
+        "one copy of the app per data folder: a second copy opens no window, brings the first forward (restored, shown, focused) and ends with code 0"
+      ],
+      "not_covered": [
+        "updates",
+        "log export",
+        "restart",
+        "sleep and wake"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "implemented-unverified"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02B3.md"
+      ],
+      "limits": [
+        "fixture-tested means automated tests against the real app and unit tests; exercised on macOS arm64 only (the second copy is a real process on the same data folder; the first window is brought forward through stubbed show, restore and focus calls); a data folder on a network drive is untested"
+      ]
+    }
+  ],
+  "secrets_in_evidence": false,
+  "notes": {
+    "scope": "plans 02-B1, 02-B2a, 02-B2b, 02-B2c, 02-B3 and 02-B3b; 02-B3c and 02-C are outlines",
+    "no_lab_host": "nothing in packages 02-B1 and 02-B2a connects to a lab server; GUI scenarios use the loopback test server, synthetic documents in a temporary folder and made-up passwords",
+    "gui_scenarios": "work/ui-live-20261016/docs.mjs (23 scenarios), organise.mjs (11, package 02-B2b), loopback.mjs (16), safety.mjs (13, package 02-B2c) shell.mjs (25, package 02-B3) and shell2.mjs (31, package 02-B3b); outside the repository, not part of npm test; they run on a data folder of their own (RW_USER_DATA) since 02-B2b",
+    "windows": "windows-x64 stays implemented-unverified until the tests and the app have run on Windows (Task 10 of the plans of 02-B1, 02-B2a and 02-B2b and Task 14 of the plans of 02-B2c and 02-B3 and Task 13 of the plan of 02-B3b, to be run together with the owner present); mac-x86_64 has not been run at all (no Intel Mac)",
+    "review": "after execution two independent read-only reviews (tests; silent failures) were triaged in plan Task 9a: what was real was fixed test-first with a mutant each, the rest is listed there as not changed, with the reason",
+    "review_b2a": "before execution three independent read-only reviews (code, silent failures, tests) read the spike of 02-B2a: two real data-consistency defects and several smaller ones were fixed test-first with a mutant each (table in the plan, \"Fakta terverifikasi\"); after execution three more (code and integration, silent failures, claims against evidence; 36 items) read the repository: seven real defects (a sibling that was only shifted counted as edited against a delete; a window left behind by a save that failed after a merge when an edit came in meanwhile; a window left behind by a close that did not finish, and Properti then writing stale settings; order merged apart from the folder; a merged save that said nothing; two dialogs taking each other over; a tree window that was empty for a moment) were fixed test-first with a mutant each, the claims that were too strong were corrected, and what was not changed is listed with its reason (STATUS-PAKET-02B2A.md, table of Task 8); real pointer, Escape and dragend during a drag cannot be produced by the GUI harness and are for the owner",
+    "measured": "a single edit of a document of 90,000 objects takes 20.5-46.7 ms (rename) and sends about 465 bytes (02-B1, measured on another day: 340 ms and the whole document, 23.9 MiB, per reply); 21 of 21 performance gates passed in six runs (two campaigns, load average 11-45); numbers, units and gates in STATUS-PAKET-02B2A.md",
+    "review_b2b": "02-B2b: before execution three independent read-only reviews of the spike (code, silent failures, tests and claims; 29 items in 17 groups, among them a regression of 02-B2a in Properti and a defect of 02-B2a in merge.ts) and three of the plan as a document (23 + 15 + 14 items) were fixed test-first with a mutant each; after execution three more read the repository (plan Task 8, Step 2; table in STATUS-PAKET-02B2B.md)",
+    "counts_b2b": {
+      "unit_tests": 371,
+      "unit_tests_new_in_b2b": 114,
+      "electron_tests": 269,
+      "electron_tests_preferences": 21,
+      "gui_scenarios_organise": 11,
+      "gui_scenarios_docs": 23,
+      "gui_scenarios_loopback": 16,
+      "mutants_unit": 375,
+      "mutants_gui": 211,
+      "perf_gates_passed": 42,
+      "files_changed": 14,
+      "files_new": 15
+    },
+    "measured_b2b": "on a document of 90,000 objects a rename takes 18.8-27.5 ms and sends 465 bytes, a note 18.3-22.3 ms and 662 bytes; the first word of a search takes 27.7-28.7 ms in the model and 79.6-83.8 ms in the real window (the next letters 41.6-49.8 ms, median); 42 of 42 performance gates passed in three runs (load average at the start of the runs 3.39, 4.49, 4.34); numbers, units and gates in STATUS-PAKET-02B2B.md",
+    "counts_b2c": {
+      "unit_tests": 582,
+      "unit_tests_new_in_b2c": 211,
+      "electron_tests": 432,
+      "electron_tests_preferences": 30,
+      "gui_scenarios_safety": 13,
+      "gui_scenarios_organise": 11,
+      "gui_scenarios_docs": 23,
+      "gui_scenarios_loopback": 16,
+      "mutants_unit": 704,
+      "mutants_gui": 297,
+      "perf_gates_passed": 63,
+      "files_changed": 14,
+      "files_new": 22
+    },
+    "measured_b2c": "on a document of 90,000 objects a save held back by 200 conflicts takes 842.3-926.5 ms; the list of conflicts told to the window 0.3-0.4 ms and 46,873 bytes; deciding 100 conflicts 139.7-157.5 ms and sending the whole document (23.9 MiB); a reload from the file 330.1-382.2 ms; putting a folder of 100 objects back 335.2-379.3 ms and 27,827 bytes sent, the whole oldest revision back 496.5-534.9 ms; 63 of 63 performance gates passed in three runs (load average at the start of the runs 5.29, 7.15, 5.50; the first run of the 02-B2b measurement stopped by itself and was repeated afterwards, at 7.31); numbers, units and gates in STATUS-PAKET-02B2C.md",
+    "review_b2c": "02-B2c: before execution four independent read-only reviews of the spike (37 items in 33 groups) and three audits of the plan as a document were fixed test-first with a mutant each; after execution four more read the repository (plan Task 12, Step 2; table in STATUS-PAKET-02B2C.md): 30 numbered findings (28 different ones) and 56 suggested mutants, each checked against the code first; the real ones were fixed red-then-green and given mutants, the others rejected with the reason; no new agent session was opened",
+    "counts_b3": {
+      "unit_tests": 764,
+      "unit_tests_new_in_b3": 182,
+      "electron_tests": 545,
+      "electron_tests_desktop": 99,
+      "gui_scenarios_shell": 25,
+      "gui_scenarios_safety": 13,
+      "gui_scenarios_organise": 11,
+      "gui_scenarios_docs": 23,
+      "gui_scenarios_loopback": 16,
+      "mutants_unit": 482,
+      "mutants_gui": 426,
+      "perf_gates_passed": 78,
+      "files_changed": 5,
+      "files_new": 29
+    },
+    "measured_b3": "All 78 gates passed (three rounds of perf-shell.mjs for package 02-B3 and of the scripts of 02-B1 to 02-B2c, which are run again so that the shell cannot shift the speed of the window and the tree on big documents). One gate of 02-B2c (library reload from the file at 90,000 objects, limit 1,200 ms) failed once in the first three rounds at a one-minute load average of 8 to 9 from other work on the same machine (1,303 ms; the other two rounds 326.8 and 518.5 ms) and passed on three new rounds of perf-safety.mjs at load 9 to 11 (513.9, 689.3 and 850.3 ms). Shell gates, worst of three rounds: a menu built from a report and made into text 0.04 ms; a thousand reports that say the same 1.02 ms with one installation of the menu; a thousand reports that all differ 67.72 ms; the start to the toolbar and the first report in the menu 1446.17 ms; choosing a theme 39.02 ms; a toolbar of 40 items drawn 17.59 ms; the dialog of the toolbar 23.55 ms.",
+    "review_b3": "Four independent readers (ordinary read-only subagents, at most 28 tool calls each) read the code in the repository after execution and reported 34 numbered findings, 3 things that cannot be checked from reading and 54 mutants that they expected to survive. Of the 34, 21 were fixed test-first in the repository (unit tests shown failing first, GUI scenarios shown failing against the old code one by one and then passing), 6 were fixed in part, 3 were rejected with a reason and 4 were accepted as limits. Every mutant that the readers named was added to the lists (now 482 unit mutants and 426 GUI mutants caught); a first pass over the unit mutants left 20 of 482 uncaught and every one was closed with a test. The files fixed after the review differ from the plan (listed in outputs/STATUS-PAKET-02B3.md); the plan and the spike were not rebuilt.",
+    "counts_b3b": {
+      "unit_tests": 966,
+      "unit_tests_new_in_b3b": 202,
+      "electron_tests": 661,
+      "electron_tests_desktop": 240,
+      "gui_scenarios_shell2": 31,
+      "gui_scenarios_shell": 25,
+      "gui_scenarios_safety": 13,
+      "gui_scenarios_organise": 11,
+      "gui_scenarios_docs": 23,
+      "gui_scenarios_loopback": 16,
+      "mutants_unit": 916,
+      "mutants_gui": 617,
+      "perf_gates_passed": 100,
+      "files_changed": 28,
+      "files_new": 32
+    },
+    "measured_b3b": "All 100 gates passed in three clean rounds (perf-quiet.py: the machine untouched for 60 s before the start and during the rounds, one-minute load average 2.6 to 3.0 at the start of each round) of perf-shell2.mjs for package 02-B3b and of the scripts of 02-B1 to 02-B3, which are run again so that the settings window, the list of recent documents and the dragging of tabs cannot shift the speed of the window and the tree on big documents. 22 gates are new; the worst values are far below the gates (start 386 ms of 2000, 500 remembered keys forgotten 23 ms of 100). One move of the pointer while a tab is dragged among 200 tabs measures 8.4 ms, which is one frame of the page (the script waits for the frame after each move), not the cost of the code.",
+    "review_b3b": "Four independent readers (ordinary read-only subagents, at most 28 tool calls each) read the code in the repository after execution and reported 27 numbered findings and 54 mutants that they expected to survive; none was serious and none broke a rule of the owner. Of the 27, 10 were fixed test-first (unit tests shown failing first; two changes of the window shown failing against the old code in the real window and passing after it), 7 added tests and mutants for behaviour that was right but not pinned, and 10 were accepted or left for Task 13 with the reason in STATUS-PAKET-02B3B.md. 47 of the 54 mutants were written (the rest are equivalent or cannot be seen from a test process on a Mac); 57 unit mutants and 28 GUI mutants were added, 11 were aimed again at changed lines and one GUI mutant (AA52) was retired as equivalent at that level (its successors are two unit mutants of the page and AA178). The review before execution (of the spike) found 41 findings and 57 mutants, all handled in the spike."
+  }
+}

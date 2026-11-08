@@ -1,0 +1,261 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'"><title>JalaDesk Settings &amp; Preferences</title><link rel="stylesheet" href="style.css"></head>
+<body class="settings">
+<div class="settings-shell">
+  <aside class="settings-sidebar" aria-label="Settings Categories">
+    <div class="settings-brand">
+      <img src="app-icon.png" alt="" class="brand-logo-img">
+      <div>
+        <h1>Settings</h1>
+        <small class="muted">JalaDesk Enterprise</small>
+      </div>
+    </div>
+    <nav class="settings-nav" role="tablist" aria-label="Preferences Sections">
+      <button type="button" class="settings-nav-btn active" data-pref-tab="appearance">🎨 Appearance &amp; UI</button>
+      <button type="button" class="settings-nav-btn" data-pref-tab="rdp">🖥 RDP &amp; VNC Engine</button>
+      <button type="button" class="settings-nav-btn" data-pref-tab="terminal">❯_ Terminal &amp; SFTP</button>
+      <button type="button" class="settings-nav-btn" data-pref-tab="security">🛡 Security &amp; Vault</button>
+      <button type="button" class="settings-nav-btn" data-pref-tab="sync">☁️ Sync &amp; Audit</button>
+      <button type="button" class="settings-nav-btn" data-pref-tab="mobile">📱 Mobile (iOS / Android)</button>
+    </nav>
+    <div class="settings-sidebar-foot">
+      <span class="color-badge-pill" data-pref-status="saved">All changes auto-saved</span>
+    </div>
+  </aside>
+
+  <main class="settings-content">
+    <p id="st-error" role="alert"></p>
+
+    <section class="settings-pane" data-pref-pane="appearance">
+      <div class="settings-pane-head">
+        <h2>Appearance, Toolbar &amp; Workspace Layout</h2>
+        <p class="muted">Customize color theme, icon-only toolbar density, colorized tabs, and multi-monitor full screen behavior.</p>
+      </div>
+
+      <fieldset role="radiogroup" aria-labelledby="st-theme-title"><legend id="st-theme-title">Theme</legend>
+        <label class="check"><input type="radio" name="st-theme" id="st-theme-system" value="system">System (Automatic — follows macOS / OS appearance)</label>
+        <label class="check"><input type="radio" name="st-theme" id="st-theme-light" value="light">Light (High-Contrast Daylight Palette)</label>
+        <label class="check"><input type="radio" name="st-theme" id="st-theme-dark" value="dark">Dark (Sapphire-Gold NOC Midnight Palette)</label>
+      </fieldset>
+
+      <fieldset><legend>Appearance &amp; Toolbar</legend>
+        <label class="check"><input type="checkbox" id="st-toolbar">Show toolbar</label>
+        <label class="check"><input type="checkbox" id="st-colorize">Colorize tabs by object color</label>
+        <label class="check"><input type="checkbox" data-pref-key="ui.instantTooltips" checked>Show instant floating tooltips on icon-only toolbar buttons</label>
+        <label class="check"><input type="checkbox" data-pref-key="ui.pingDots" checked>Show live TCP reachability indicator dots in connection tree</label>
+      </fieldset>
+
+      <fieldset><legend>Full Screen &amp; Split-View Defaults</legend>
+        <label class="check"><input type="checkbox" id="st-extended" aria-describedby="st-extended-hint">Extended full screen</label>
+        <p class="hint" id="st-extended-hint">In full screen, the sidebar, title bar, and toolbar are hidden to maximize remote session space. Move pointer to the left or top edge to reveal them.</p>
+        <div class="settings-grid-row">
+          <label>Default Split-View Layout
+            <select data-pref-key="ui.defaultSplit">
+              <option value="single">Single Active Session View</option>
+              <option value="2x1">2×1 Side-by-Side Dual Pane</option>
+              <option value="2x2">2×2 NOC Quad Matrix</option>
+            </select>
+          </label>
+          <label>Default Overview Hub Mode
+            <select data-pref-key="ui.overviewMode">
+              <option value="compact">Compact Progressive Disclosure (Recommended)</option>
+              <option value="folder-grid">Auto-Open Folder Dashboard on Selection</option>
+            </select>
+          </label>
+        </div>
+      </fieldset>
+    </section>
+
+    <section class="settings-pane" data-pref-pane="rdp" hidden>
+      <div class="settings-pane-head">
+        <h2>Remote Desktop (RDP) &amp; VNC Engine (Jump Desktop Parity)</h2>
+        <p class="muted">Configure display scaling, frame pacing, macOS keyboard shortcut mapping, and automatic session recovery.</p>
+      </div>
+
+      <fieldset><legend>Display Scaling &amp; Frame Pacing</legend>
+        <div class="settings-grid-row">
+          <label>Default Remote Screen Scaling
+            <select data-pref-key="rdp.scale">
+              <option value="fit">Fit to Window (Preserve Aspect Ratio)</option>
+              <option value="stretch">Stretch to Fill Window</option>
+              <option value="actual">Actual Size (1:1 Native Pixels)</option>
+            </select>
+          </label>
+          <label>Target Frame Rate Profile
+            <select data-pref-key="rdp.fps">
+              <option value="60">60 FPS Ultra-Low Latency (LAN / Fiber)</option>
+              <option value="30">30 FPS Balanced (VPN / Branch WAN)</option>
+              <option value="15">15 FPS Low-Bandwidth Saver</option>
+            </select>
+          </label>
+        </div>
+        <label class="check"><input type="checkbox" data-pref-key="rdp.hidpi" checked>Enable Retina / HiDPI crisp canvas rendering</label>
+        <label class="check"><input type="checkbox" data-pref-key="rdp.hud">Show live FPS, resolution &amp; uptime telemetry HUD by default</label>
+      </fieldset>
+
+      <fieldset><legend>Keyboard, Pointer &amp; Session Recovery</legend>
+        <label class="check"><input type="checkbox" data-pref-key="rdp.macKeys" checked>Remap macOS Command (⌘) shortcuts to Windows Ctrl (⌘C/⌘V/⌘A/⌘Z ⇄ Ctrl)</label>
+        <label class="check"><input type="checkbox" data-pref-key="rdp.autoReconnect" checked>Automatically reconnect RDP session when transient network drop occurs</label>
+        <label class="check"><input type="checkbox" data-pref-key="rdp.viewOnlyDefault">Open remote desktop sessions in View-Only (Observe) mode by default</label>
+      </fieldset>
+    </section>
+
+    <section class="settings-pane" data-pref-pane="terminal" hidden>
+      <div class="settings-pane-head">
+        <h2>SSH Terminal, Bastion Gateway &amp; SFTP (Termius Parity)</h2>
+        <p class="muted">Configure terminal color palette, typography, SSH keep-alive heartbeat, and dual-pane SFTP defaults.</p>
+      </div>
+
+      <fieldset><legend>Terminal Color Scheme &amp; Typography</legend>
+        <div class="settings-grid-row">
+          <label>Default Terminal Theme
+            <select data-pref-key="term.theme">
+              <option value="termius-dark">Termius Midnight Dark</option>
+              <option value="dracula">Dracula Pro</option>
+              <option value="tokyo-night">Tokyo Night Storm</option>
+              <option value="nord">Nord Polar</option>
+              <option value="solarized-dark">Solarized Dark</option>
+              <option value="monokai">Monokai Classic</option>
+              <option value="matrix">Phosphor Matrix Green</option>
+              <option value="solarized-light">Solarized Daylight</option>
+            </select>
+          </label>
+          <label>Default Terminal Font Size
+            <select data-pref-key="term.fontSize">
+              <option value="sm">Small (12 px — High Density)</option>
+              <option value="md" selected>Medium (13 px — Default)</option>
+              <option value="lg">Large (14.5 px — Comfortable)</option>
+              <option value="xl">Extra Large (16 px — Presentation)</option>
+            </select>
+          </label>
+        </div>
+        <div class="settings-grid-row">
+          <label>Scrollback Buffer Lines
+            <select data-pref-key="term.scrollback">
+              <option value="5000">5,000 lines</option>
+              <option value="10000" selected>10,000 lines (Recommended)</option>
+              <option value="50000">50,000 lines (Deep Audit)</option>
+            </select>
+          </label>
+          <label>SSH Keep-Alive Heartbeat
+            <select data-pref-key="term.keepAlive">
+              <option value="15">Every 15 seconds</option>
+              <option value="30" selected>Every 30 seconds (Recommended)</option>
+              <option value="60">Every 60 seconds</option>
+            </select>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset><legend>Bastion Jump Host &amp; SFTP Commander</legend>
+        <label class="settings-stack-label">Default Bastion Jump Host (ProxyJump / ssh -J)
+          <input type="text" data-pref-key="term.defaultJump" placeholder="e.g. root@103.172.170.196:2219 or mitra-jump">
+        </label>
+        <label class="check"><input type="checkbox" data-pref-key="sftp.showHidden" checked>Show hidden dotfiles (.env, .ssh, .bashrc) in SFTP Commander</label>
+        <label class="check"><input type="checkbox" data-pref-key="term.snippetsBar" checked>Show quick command snippet bar above interactive SSH terminal</label>
+      </fieldset>
+    </section>
+
+    <section class="settings-pane" data-pref-pane="security" hidden>
+      <div class="settings-pane-head">
+        <h2>Zero-Trust Security, System Keychain &amp; Privacy Guard</h2>
+        <p class="muted">Manage OS Keychain encryption keys, idle privacy curtain lock, clipboard scrubbing, and production freeze guards.</p>
+      </div>
+
+      <fieldset><legend>Security &amp; System Keychain</legend>
+        <label class="check"><input type="checkbox" id="st-keys" aria-describedby="st-keys-note">Remember document keys on this computer</label>
+        <p class="hint" id="st-keys-note"></p>
+        <div class="field-row"><button type="button" id="st-forget" class="quiet" aria-describedby="st-keys-count">Forget All Keys…</button><span id="st-keys-count" role="status"></span></div>
+      </fieldset>
+
+      <fieldset><legend>Privacy Curtain &amp; Zero-Trust Guardrails</legend>
+        <div class="settings-grid-row">
+          <label>Idle Privacy Curtain Lock (⌃⌘L)
+            <select data-pref-key="sec.autoLockMins">
+              <option value="0">Manual Only (Press ⌃⌘L)</option>
+              <option value="5">After 5 minutes of inactivity</option>
+              <option value="15" selected>After 15 minutes of inactivity</option>
+              <option value="30">After 30 minutes of inactivity</option>
+            </select>
+          </label>
+          <label>Clipboard Secret Auto-Clear
+            <select data-pref-key="sec.clipboardClearSecs">
+              <option value="0">Keep in clipboard</option>
+              <option value="30" selected>Clear copied passwords after 30s</option>
+              <option value="60">Clear copied passwords after 60s</option>
+            </select>
+          </label>
+        </div>
+        <label class="check"><input type="checkbox" data-pref-key="sec.strictHostKey" checked>Warn on SSH Known-Host fingerprint or TLS certificate pin mismatch</label>
+        <label class="check"><input type="checkbox" data-pref-key="sec.prodSafetyGuard" checked>Enforce Production Safety Guard confirmation on critical infrastructure hosts</label>
+      </fieldset>
+    </section>
+
+    <section class="settings-pane" data-pref-pane="sync" hidden>
+      <div class="settings-pane-head">
+        <h2>Recent Documents, Team Vault Sync &amp; Audit Retention</h2>
+        <p class="muted">Manage recent document history, automated workspace snapshots, and session audit retention.</p>
+      </div>
+
+      <fieldset><legend>Recent Documents</legend>
+        <div class="field-row"><button type="button" id="st-clear" class="quiet" aria-describedby="st-recent-count">Clear Recent List</button><span id="st-recent-count" role="status"></span></div>
+      </fieldset>
+
+      <fieldset><legend>Team Vault Synchronization &amp; Audit Log</legend>
+        <div class="settings-grid-row">
+          <label>Default Team Vault Provider
+            <select data-pref-key="sync.provider">
+              <option value="git">Git Repository (Encrypted .rtsz / .jaladesk)</option>
+              <option value="s3">S3 / MinIO Object Storage (SHA-256 Verified)</option>
+            </select>
+          </label>
+          <label>Session Audit &amp; Log Retention
+            <select data-pref-key="sync.auditRetentionDays">
+              <option value="30">Keep last 30 days</option>
+              <option value="90" selected>Keep last 90 days (ISO 27001 Default)</option>
+              <option value="365">Keep last 365 days (Full Compliance)</option>
+            </select>
+          </label>
+        </div>
+        <label class="check"><input type="checkbox" data-pref-key="sync.autoSnapshot" checked>Automatically snapshot configuration before applying batch changes</label>
+      </fieldset>
+    </section>
+
+    <section class="settings-pane" data-pref-pane="mobile" hidden>
+      <div class="settings-pane-head">
+        <h2>JalaDesk Mobile Companion (iOS, iPadOS &amp; Android)</h2>
+        <p class="muted">Pair your iPhone, iPad, or Android device for on-call RDP, VNC, SSH Terminal, SFTP, and TOTP 2FA synchronization.</p>
+      </div>
+
+      <fieldset><legend>Zero-Trust Mobile Pairing &amp; Sync Token</legend>
+        <div class="settings-grid-row">
+          <label>Mobile Bastion / Relay Endpoint
+            <input type="text" data-pref-key="mobile.relayEndpoint" value="wss://mitra-jump.plnbatam.local:8443/jaladesk-mobile">
+          </label>
+          <label>Mobile Vault Sync Scope
+            <select data-pref-key="mobile.syncScope">
+              <option value="all">Full Workspace (Connections + Keys + TOTP)</option>
+              <option value="conns-only">Connection Inventory Only (Prompt Password)</option>
+              <option value="totp-only">TOTP 2FA Authenticator &amp; Read-Only Health</option>
+            </select>
+          </label>
+        </div>
+        <div class="field-row">
+          <button type="button" class="quiet" data-pref-action="gen-mobile-pair">🔄 Generate Pairing URI</button>
+          <button type="button" class="quiet" data-pref-action="copy-mobile-pair">📋 Copy Mobile Pairing URI</button>
+        </div>
+        <pre class="settings-pair-code" data-pref-mobile-preview="uri">Click "Generate Pairing URI" to issue a 5-minute ephemeral AES-256-GCM pairing token for JalaDesk Mobile (iOS / Android).</pre>
+      </fieldset>
+
+      <fieldset><legend>Supported Mobile Platforms (outputs/mobile — Flutter iOS &amp; Android)</legend>
+        <p class="hint">• iOS &amp; iPadOS 16+: Multi-Touch RDP/VNC Canvas, Apple Pencil Precision Pointer, Magic Keyboard ⌘⇄Ctrl, SSH/SFTP &amp; Biometric FaceID Vault.</p>
+        <p class="hint">• Android 12+ &amp; Samsung DeX: Hardware-Accelerated RDP/VNC, Termius-Style Extended Key Toolbar (Esc/Tab/Ctrl/F1–F12), Background SSH &amp; Fingerprint Lock.</p>
+      </fieldset>
+    </section>
+
+    <div class="buttons settings-footer">
+      <button type="button" class="quiet" data-pref-action="reset-defaults">Restore Defaults</button>
+      <button type="button" id="st-close">Close</button>
+    </div>
+  </main>
+</div>
+<script type="module" src="../../dist/src/desktop/settings-ui.js"></script></body></html>

@@ -1,0 +1,139 @@
+{
+  "package": "02-A documents and vault (outputs/PLAN-02-DOCUMENTS-VAULT.md)",
+  "statuses": [
+    "planned",
+    "implemented-unverified",
+    "fixture-tested",
+    "lab-passed",
+    "blocked-with-reason"
+  ],
+  "platforms": [
+    "mac-arm64",
+    "mac-x86_64",
+    "windows-x64"
+  ],
+  "rows": [
+    {
+      "id": "C09",
+      "name": "Documents",
+      "covered": [
+        "save (atomic, previous versions, detection of another writer)",
+        "recovery (revisions, damaged file kept aside)",
+        "migration (pure schema chain, newer schema refused)",
+        "open across OSes (golden-v1.rwdoc written on macOS opens on Windows; crossos-win32.rwdoc written on Windows opens on macOS)",
+        "revision retention: the 20 newest revisions or 256 MiB, whichever is smaller (the three newest always stay); a save asked for by a person always keeps the file it replaces, a save by a timer only when the newest revision is 10 minutes old, and the first save after a decision that throws something away always does; a revision stamped in the future (the clock was set back) counts as the oldest, and the one a save has just made is never let go of",
+        "a revision is copied under another name and renamed, so that a copy cut short by a crash is never taken for a revision; the leftover is cleaned under the lock",
+        "a revision is opened with the key of the open document (no password) and is told as rekeyed when it was sealed with another key (the handle knows which key it holds), as damaged otherwise; it is compared with the document and put back as an unsaved edit (chosen objects into a new top-level folder, or the whole document)",
+        "reload from the file as it is (the working copy and what was held back are thrown away, the handle goes back when the file cannot be used)"
+      ],
+      "not_covered": [
+        "many files at once",
+        "sorting"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "fixture-tested"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02.md",
+        "../../STATUS-PAKET-02B.md",
+        "../../STATUS-PAKET-02B2C.md"
+      ],
+      "limits": [
+        "fixture-tested means automated tests with synthetic documents on that OS; no lab host is involved",
+        "mac-x86_64: the same JavaScript, not run on an Intel Mac",
+        "windows-x64: the eight document test files (38 tests) passed under Node 26.10.0 and under Electron 44.7.2 on the OPC host (Windows Server 2022), 19 Oct 2026; no lab server was connected",
+        "defect found 19 Oct 2026 after the package was reported (an edit made while a save is being written was lost: DocumentSession.save overwrote the working copy) is fixed in package 02-B1: tests/documents-session-race.test.ts and mutants E1-E7, see ../../STATUS-PAKET-02B.md",
+        "windows-x64: the run of 19 Oct 2026 predates the rewrite of store.ts, session.ts and library.ts by packages 02-B1, 02-B2a, 02-B2b and 02-B2c; it has to be repeated (Task 14)",
+        "the history may be longer than 20 revisions or 256 MiB while the old revision files cannot be deleted (a scanner, a sync client, read-only files): the pruning that fails after a save does not fail the save, and nothing says so"
+      ]
+    },
+    {
+      "id": "C10",
+      "name": "Protection",
+      "covered": [
+        "encrypted payload (AES-256-GCM, scrypt, random document key)",
+        "wrong key and tamper (every flipped bit, truncation, trailing bytes)",
+        "OS keystore (safeStorage seal of the cached document key; real safeStorage round trip seen on macOS arm64 and, with DPAPI, on Windows Server 2022)"
+      ],
+      "not_covered": [
+        "lockdown",
+        "biometric unlock (02-C)"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "fixture-tested"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02.md"
+      ],
+      "limits": [
+        "Argon2id and ChaCha20-Poly1305 are not available in Electron 44.7.2; scrypt is used (decision D2)",
+        "the keystore cache is a convenience, not protection against other apps of the same user (decision D4: off by default)",
+        "Windows DPAPI: one round trip inside one process; a cached key surviving a restart, another Windows user or a profile move is not tested"
+      ]
+    },
+    {
+      "id": "C07",
+      "name": "Sharing (mechanism only)",
+      "covered": [
+        "concurrent edit: three-way merge by field, conflicts reported and never resolved by last-writer-wins",
+        "another writer detected by file digest",
+        "password change by another writer reported as rekeyed",
+        "conflicts of all four kinds (field, delete-edit, orphan, cycle) are decided by a person, one by one or one side for everything, atomically: a set of choices that would leave an invalid document is refused whole; never last-writer-wins",
+        "what was chosen to be kept, and what was put in a folder by choosing their parent, is remembered by the choices that follow (a person decides a few at a time): the folder that is decided next does not take it with it",
+        "an object of a kind the window never sees is decided only as a kind of conflict, never with its name or value"
+      ],
+      "not_covered": [
+        "duplicate ids across documents",
+        "moving objects between documents",
+        "document store and teams (package 08)"
+      ],
+      "status": {
+        "mac-arm64": "fixture-tested",
+        "mac-x86_64": "implemented-unverified",
+        "windows-x64": "fixture-tested"
+      },
+      "evidence": [
+        "../../STATUS-PAKET-02.md",
+        "../../STATUS-PAKET-02B2C.md"
+      ],
+      "limits": [
+        "two writers on one machine only; no two-machine or cloud-sync test",
+        "windows-x64: same two-writers-on-one-machine tests, run on the OPC host",
+        "since package 02-B2a the sibling order is not a field conflict (decision D18): what one side changed is taken, mine when both did; every other field still conflicts and is never resolved by last-writer-wins",
+        "the Windows run of package 02-A (19 Oct 2026) predates the changes of packages 02-B1, 02-B2a, 02-B2b and 02-B2c to model.ts, session.ts, merge.ts, store.ts and library.ts; it has to be repeated (Task 10, Task 14)",
+        "the decisions are tested with two libraries on one file on one machine, not with two machines"
+      ]
+    },
+    {
+      "id": "C08",
+      "name": "Overrides (not started)",
+      "covered": [
+        "document kind 'vault' exists in the model so shared documents need not carry private values"
+      ],
+      "not_covered": [
+        "local overrides",
+        "precedence",
+        "partial override objects (02-C)"
+      ],
+      "status": {
+        "mac-arm64": "planned",
+        "mac-x86_64": "planned",
+        "windows-x64": "planned"
+      },
+      "evidence": [],
+      "limits": []
+    }
+  ],
+  "secrets_in_evidence": false,
+  "notes": {
+    "format": "own format .rwdoc (magic RWDX, version 1); Royal TSX formats (.rtsz, .rtsx) are neither read nor claimed (decision D9)",
+    "golden_file": "tests/fixtures/documents/golden-v1.rwdoc, 709 bytes, written once on macOS arm64 by scripts/make-golden.mjs",
+    "no_lab_host": "nothing in package 02-A connects to a lab server; the Windows run only used the OPC machine to execute the tests (no password typed, no network)",
+    "windows_run": "docs-test-r1-win32-x64.zip (34318 bytes, sha256 91ce906079c8fb3906a6bb8ecd005083fb618cacdcc788cd8ba68a6a8eda5feb) copied to OPC through a read-only Windows App folder redirection (redirection removed afterwards and checked; the extracted files stay on OPC); results of 19 Oct 2026: Node 26.10.0 38/38, Electron 44.7.2 38/38, safeStorage DPAPI round trip true",
+    "cross_os": "Windows to macOS: crossos-win32.rwdoc (705 bytes, sha256 c28efc75ebb5f94e21cb6bd2ad6f44c09e0bdf08492b6e84317fc30347b3c34c) was read back from the OPC console as hex, rebuilt on the Mac with the same sha256 and opened by scripts/check-crossos-file.mjs on macOS arm64 (Node 26.12.0); the Windows App clipboard did not return text from OPC to the Mac; a read-only copy is kept at work/plan02-exec-20261019/evidence/crossos-win32.rwdoc"
+  }
+}

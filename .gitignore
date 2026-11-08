@@ -3,3 +3,14 @@ dist/
 native/bin/
 lab/private/
 .DS_Store
+native/test-server/build/
+mobile/.dart_tool/
+mobile/build/
+mobile/.idea/
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/ios/Flutter/ephemeral/
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/*.iml
+mobile/android/*.iml

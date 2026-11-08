@@ -1,1 +1,2 @@
+window.credential.onTarget(({label,clipboard})=>{document.querySelector('#target').textContent=label;document.querySelector('#clip').textContent=clipboard;});
 document.querySelector('#credential').addEventListener('submit',event=>{event.preventDefault();window.credential.submit({domain:document.querySelector('#domain').value,password:document.querySelector('#password').value});document.querySelector('#password').value='';});
