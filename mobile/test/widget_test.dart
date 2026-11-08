@@ -3,12 +3,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:jaladesk_mobile/main.dart';
 
 void main() {
-  testWidgets('JalaDesk Mobile renders all 4 enterprise navigation tabs and executes SSH/RDP actions',
+  testWidgets('JalaDesk Mobile renders Sapphire-Gold brand UI and executes RDP/SSH/Vault actions',
       (WidgetTester tester) async {
     await tester.pumpWidget(const JalaDeskMobileApp());
 
-    // 1. Verify Connections Vault Tab
-    expect(find.text('JalaDesk Mobile'), findsOneWidget);
+    // 1. Verify JalaDesk Brand Header & Connections Vault Tab
+    expect(find.text('JalaDesk'), findsOneWidget);
+    expect(find.text('MOBILE PRO'), findsOneWidget);
+    expect(find.text('JalaDesk Enterprise Vault'), findsOneWidget);
     expect(find.text('brightad1 (Windows 11 Pro)'), findsOneWidget);
     expect(find.text('mitra-jump (Bastion Gateway)'), findsOneWidget);
 
@@ -19,7 +21,7 @@ void main() {
     expect(find.text('Direct Touch'), findsOneWidget);
     expect(find.text('Ctrl+Alt+Del'), findsOneWidget);
 
-    // 3. Switch to SSH & SFTP Tab and run a command
+    // 3. Switch to SSH & SFTP Tab and run a command + toggle SFTP
     await tester.tap(find.text('SSH & SFTP'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('uptime'));
