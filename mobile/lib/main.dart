@@ -435,51 +435,59 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 children: [
                   _buildJalaBrandLogo(size: 32, radius: 8),
                   const SizedBox(width: 10),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Row(
-                        children: [
-                          const Text(
-                            'JalaDesk',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w800,
-                              fontSize: 16,
-                              letterSpacing: -0.3,
-                              color: JalaPalette.text,
-                            ),
-                          ),
-                          const SizedBox(width: 7),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                            decoration: BoxDecoration(
-                              color: JalaPalette.brandGold.withValues(alpha: 0.14),
-                              borderRadius: BorderRadius.circular(5),
-                              border: Border.all(
-                                color: JalaPalette.brandGold.withValues(alpha: 0.45),
-                                width: 0.8,
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Row(
+                          children: [
+                            const Flexible(
+                              child: Text(
+                                'JalaDesk',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 16,
+                                  letterSpacing: -0.3,
+                                  color: JalaPalette.text,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            child: const Text(
-                              'MOBILE PRO',
-                              style: TextStyle(
-                                fontSize: 9.5,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 0.4,
-                                color: JalaPalette.brandGold,
+                            const SizedBox(width: 7),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                              decoration: BoxDecoration(
+                                color: JalaPalette.brandGold.withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(5),
+                                border: Border.all(
+                                  color: JalaPalette.brandGold.withValues(alpha: 0.45),
+                                  width: 0.8,
+                                ),
+                              ),
+                              child: const Text(
+                                'MOBILE PRO',
+                                style: TextStyle(
+                                  fontSize: 9.5,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.4,
+                                  color: JalaPalette.brandGold,
+                                ),
                               ),
                             ),
-                          ),
-                        ],
-                      ),
-                      const Text(
-                        'Sapphire-Gold Zero-Trust Workspace',
-                        style: TextStyle(fontSize: 10.5, color: JalaPalette.muted),
-                      ),
-                    ],
+                          ],
+                        ),
+                        const Text(
+                          'Sapphire-Gold Zero-Trust Workspace',
+                          style: TextStyle(fontSize: 10.5, color: JalaPalette.muted),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
                   ),
-                  const Spacer(),
+                  const SizedBox(width: 8),
                   IconButton(
                     tooltip: 'Pair with JalaDesk Desktop (QR / URI)',
                     onPressed: _showQrPairDialog,
@@ -901,35 +909,49 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           child: Row(
             children: [
               const Icon(Icons.desktop_windows_rounded, size: 16, color: JalaPalette.brandGold),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               Expanded(
                 child: Text(
                   '${_activeRdpHost.name} (${_activeRdpHost.address})',
-                  style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              SegmentedButton<bool>(
-                style: SegmentedButton.styleFrom(
-                  selectedBackgroundColor: JalaPalette.selected,
-                  selectedForegroundColor: JalaPalette.brandGold,
-                  visualDensity: VisualDensity.compact,
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  color: JalaPalette.header,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: JalaPalette.lineInput),
                 ),
-                segments: const [
-                  ButtonSegment(value: true, label: Text('Trackpad', style: TextStyle(fontSize: 11))),
-                  ButtonSegment(value: false, label: Text('Direct Touch', style: TextStyle(fontSize: 11))),
-                ],
-                selected: {_trackpadMode},
-                onSelectionChanged: (sel) => setState(() => _trackpadMode = sel.first),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildTouchModeOption('Trackpad', true),
+                    _buildTouchModeOption('Direct Touch', false),
+                  ],
+                ),
               ),
               const SizedBox(width: 4),
-              IconButton(
-                tooltip: _viewOnly ? 'View-Only Locked' : 'Interactive Mode',
-                onPressed: () => setState(() => _viewOnly = !_viewOnly),
-                icon: Icon(
-                  _viewOnly ? Icons.lock_rounded : Icons.lock_open_rounded,
-                  size: 18,
-                  color: _viewOnly ? JalaPalette.amber : JalaPalette.ok,
+              InkWell(
+                borderRadius: BorderRadius.circular(7),
+                onTap: () => setState(() => _viewOnly = !_viewOnly),
+                child: Container(
+                  width: 28,
+                  height: 28,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: JalaPalette.header,
+                    borderRadius: BorderRadius.circular(7),
+                    border: Border.all(color: JalaPalette.lineInput),
+                  ),
+                  child: Icon(
+                    _viewOnly ? Icons.lock_rounded : Icons.lock_open_rounded,
+                    size: 15,
+                    color: _viewOnly ? JalaPalette.amber : JalaPalette.ok,
+                  ),
                 ),
               ),
             ],
@@ -1158,6 +1180,29 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     if (_winLocked) mods.add('Win+');
     if (_shiftLocked) mods.add('Shift+');
     return mods.isEmpty ? '' : mods.join();
+  }
+
+  Widget _buildTouchModeOption(String label, bool isTrackpad) {
+    final active = _trackpadMode == isTrackpad;
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: () => setState(() => _trackpadMode = isTrackpad),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        decoration: BoxDecoration(
+          color: active ? JalaPalette.selected : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 9.5,
+            fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+            color: active ? JalaPalette.brandGold : JalaPalette.muted,
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildModifierChip(String label, bool active, ValueChanged<bool> onSelected) {
@@ -1399,6 +1444,58 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     return ListView(
       padding: const EdgeInsets.all(14),
       children: [
+        Container(
+          padding: const EdgeInsets.all(13),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [JalaPalette.chip, JalaPalette.surface],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            children: [
+              _buildJalaBrandLogo(size: 38, radius: 10),
+              const SizedBox(width: 11),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Zero-Trust Hardware Enclave',
+                      style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'AES-256-GCM • PBKDF2 210k • Secure Enclave Active',
+                      style: TextStyle(fontSize: 11, color: JalaPalette.brandGold),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: JalaPalette.ok.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(99),
+                  border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.45)),
+                ),
+                child: const Text(
+                  'SEALED',
+                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: JalaPalette.ok),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(14),
@@ -1406,18 +1503,18 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.key_rounded, size: 17, color: JalaPalette.brandGold),
-                        SizedBox(width: 8),
-                        Text(
-                          'RFC 6238 TOTP 2FA Authenticator',
-                          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
-                        ),
-                      ],
+                    const Icon(Icons.key_rounded, size: 17, color: JalaPalette.brandGold),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'RFC 6238 TOTP 2FA Authenticator',
+                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
+                    const SizedBox(width: 8),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                       decoration: BoxDecoration(
@@ -1426,8 +1523,8 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                         border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
                       ),
                       child: Text(
-                        'Refreshes in ${_secondsRemaining}s',
-                        style: const TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w600),
+                        '${_secondsRemaining}s',
+                        style: const TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
                       ),
                     ),
                   ],
@@ -1500,33 +1597,52 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   Widget _buildTotpRow(String label, String meta, String digits) {
     final formatted = '${digits.substring(0, 3)} ${digits.substring(3)}';
     return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(label, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: JalaPalette.text)),
+              Text(
+                label,
+                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: JalaPalette.text),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
               const SizedBox(height: 2),
-              Text(meta, style: const TextStyle(fontSize: 10.5, color: JalaPalette.muted)),
+              Text(
+                meta,
+                style: const TextStyle(fontSize: 10.5, color: JalaPalette.muted),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ],
           ),
         ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-          decoration: BoxDecoration(
-            color: JalaPalette.header,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
-          ),
-          child: SelectableText(
-            formatted,
-            style: const TextStyle(
-              fontFamily: 'monospace',
-              fontSize: 16.5,
-              fontWeight: FontWeight.w800,
-              color: JalaPalette.brandGold,
-              letterSpacing: 1.5,
+        const SizedBox(width: 10),
+        InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () {
+            Clipboard.setData(ClipboardData(text: digits));
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('✓ Copied 2FA code for $label')),
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: JalaPalette.header,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
+            ),
+            child: Text(
+              formatted,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 15.5,
+                fontWeight: FontWeight.w800,
+                color: JalaPalette.brandGold,
+                letterSpacing: 1.2,
+              ),
             ),
           ),
         ),
