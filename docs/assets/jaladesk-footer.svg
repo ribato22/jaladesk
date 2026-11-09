@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 72" width="100%" height="72">
+  <defs>
+    <linearGradient id="footGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0E141A"/>
+      <stop offset="50%" stop-color="#1F2833"/>
+      <stop offset="100%" stop-color="#0E141A"/>
+    </linearGradient>
+    <linearGradient id="goldLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2F6F9C"/>
+      <stop offset="50%" stop-color="#EDBA6E"/>
+      <stop offset="100%" stop-color="#2F6F9C"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="72" rx="12" fill="url(#footGrad)" stroke="#2F3B49" stroke-width="1"/>
+  <rect x="0" y="0" width="1200" height="3" fill="url(#goldLine)"/>
+  <text x="600" y="34" text-anchor="middle" fill="#E3EAF2" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="700" letter-spacing="0.5">
+    JalaDesk • Sapphire-Gold Zero-Trust Remote Desktop &amp; SRE Suite
+  </text>
+  <text x="600" y="54" text-anchor="middle" fill="#EDBA6E" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">
+    Architected &amp; Maintained by Rizky Bachtiar (@ribato22)
+  </text>
+</svg>

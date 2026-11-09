@@ -1,32 +1,26 @@
 <div align="center">
 
-<!-- Animated Sapphire-Gold Header Banner -->
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0E141A,55:2F6F9C,100:EDBA6E&height=210&section=header&text=JalaDesk&fontSize=48&fontColor=E3EAF2&animation=fadeIn&fontAlignY=36&desc=Unified%20Multi-Protocol%20Remote%20Desktop%20%E2%80%A2%20SSH%20%26%20SFTP%20%E2%80%A2%20Zero-Trust%20Vault%20%E2%80%A2%2046%20SRE%20%26%20SecOps%20Studios&descSize=14&descAlignY=58&descAlign=50" width="100%" alt="JalaDesk Banner"/>
+<!-- Sapphire-Gold Hero Banner (Hosted locally in docs/assets for 100% reliability) -->
+<img src="docs/assets/jaladesk-banner.svg" width="100%" alt="JalaDesk — Sapphire-Gold Zero-Trust Workspace"/>
 
-<br/>
+<br/><br/>
 
 <img src="docs/assets/jaladesk-logo.png" width="112" height="112" alt="JalaDesk Simpul Jala Emas-Safir Logo"/>
 
 <br/><br/>
 
-<!-- Typing SVG -->
-[![Typing SVG](https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=19&pause=1200&color=EDBA6E&center=true&vCenter=true&random=false&width=720&lines=Native+C%2B%2B17+FreeRDP+3.x+%26+VNC+Remote+Desktop+Engine;Interactive+SSH+Terminal%2C+Bastion+Jump+Host+%26+Dual-Pane+SFTP;Zero-Trust+AES-256-GCM+Vault+%2B+RFC+6238+TOTP+2FA+Authenticator;46+Built-In+Network%2C+Security%2C+Cloud+%26+SRE+Observability+Studios;Flutter+Mobile+Companion+for+iOS%2C+iPadOS+%26+Android)](https://github.com/ribato22/jaladesk)
-
-<br/>
-
 <!-- Badges -->
 [![Desktop](https://img.shields.io/badge/Desktop-macOS_%26_Windows-2F6F9C?style=for-the-badge&labelColor=0E141A&logo=electron&logoColor=5AA2D4)](https://github.com/ribato22/jaladesk)
 [![Mobile](https://img.shields.io/badge/Mobile-iOS_%26_Android-EDBA6E?style=for-the-badge&labelColor=0E141A&logo=flutter&logoColor=EDBA6E)](./mobile)
-[![Native RDP](https://img.shields.io/badge/FreeRDP_3.x-C%2B%2B17_Native_Bridge-5AA2D4?style=for-the-badge&labelColor=0E141A&logo=cplusplus&logoColor=5AA2D4)](./native/rdp)
+[![Native RDP](https://img.shields.io/badge/FreeRDP_3.x-Native_Bridge-5AA2D4?style=for-the-badge&labelColor=0E141A)](./native/rdp)
 [![Studios](https://img.shields.io/badge/Built--in_Studios-46_SRE_%26_SecOps-80D3A3?style=for-the-badge&labelColor=0E141A)](#46-built-in-engineering-security--sre-studios)
-[![Tests](https://img.shields.io/badge/Tests-1%2C428_Passing-80D3A3?style=for-the-badge&labelColor=0E141A&logo=checkmarx&logoColor=80D3A3)](#getting-started)
+[![Tests](https://img.shields.io/badge/Tests-1%2C428_Passing-80D3A3?style=for-the-badge&labelColor=0E141A)](#getting-started)
 [![License](https://img.shields.io/badge/License-Apache_2.0_Open--Core-EDBA6E?style=for-the-badge&labelColor=0E141A)](./LICENSE)
 
 <br/>
 
 [**Overview**](#overview) •
 [**Visual Showcase**](#visual-showcase) •
-[**Why JalaDesk?**](#why-jaladesk) •
 [**System Architecture**](#system-architecture) •
 [**46 Built-in Studios**](#46-built-in-engineering-security--sre-studios) •
 [**Mobile Companion**](#jaladesk-mobile-ios-ipados--android) •
@@ -42,13 +36,13 @@
 
 **JalaDesk** (*Simpul Jala Emas-Safir*) is an enterprise-grade, multi-protocol remote desktop, infrastructure management, and zero-trust operations platform built for System Administrators, Site Reliability Engineers (SREs), DevSecOps teams, and Cloud Architects.
 
-Instead of juggling separate applications for remote desktop (**Royal TSX / Jump Desktop**), SSH & SFTP (**Termius**), 2FA vaults (**1Password / Authy**), and network/security diagnostics (**Wireshark / Nmap / K9s**), **JalaDesk** unifies the entire operational workflow into a single zero-trust workspace across **macOS, Windows, iOS, iPadOS, and Android**:
+**JalaDesk** unifies remote desktop streaming, interactive terminal & file transfer workflows, hardware-backed credential security, and deep infrastructure observability into a single cohesive workspace across **macOS, Windows, iOS, iPadOS, and Android**:
 
 - 🖥️ **Native Multi-Protocol Remote Desktop (`RDP` & `VNC`)**: Powered by a custom **C++17 FreeRDP 3.x / OpenSSL 3.x** native helper bridge (`native/rdp/`) featuring Network Level Authentication (`NLA / CredSSP`), TLS certificate SHA-256 pinning, dynamic display channel (`disp`) live resolution resizing without reconnect, high-precision vertical/horizontal scroll & trackpad pinch-zoom forwarding, opt-in 32 KiB directional UTF-8 clipboard (`cliprdr`), and macOS `⌘ Cmd ⇄ Ctrl` modifier remapping.
 - ⚡ **Interactive SSH Terminal, Bastion Gateway & Dual-Pane SFTP**: Full VT100/xterm interactive shell, `ProxyJump` (`ssh -J`) multi-hop bastion chaining, Local (`-L`) / Remote (`-R`) / Dynamic SOCKS5 (`-D`) port-forwarding studio, multi-host Broadcast Input, and a dual-pane SFTP file commander.
 - 🔐 **Zero-Trust Encrypted Vault (`.rwdoc` / `.rtsz` / `.jaladesk`)**: Authenticated `AES-256-GCM` document encryption with `scrypt` key derivation, 30-group folder-to-connection hierarchical inheritance, 3-way field-level conflict merge, OS Keychain integration (`macOS Keychain` / `Windows DPAPI`), and a built-in **RFC 6238 TOTP 2FA Authenticator** (`SHA-1` / `SHA-256` / `SHA-512`).
 - 🛠️ **46 Built-in Engineering, Security & SRE Studios**: Instant in-tab diagnostic and automation studios accessible via the **Command Palette (`⌘K`)** or **Overview Launchpad** across Network Routing, Zero-Trust Compliance, Virtualization/Cloud DevOps, and SRE Observability.
-- 📱 **JalaDesk Mobile (`iOS`, `iPadOS` & `Android`)**: Companion Flutter application featuring **Sapphire-Gold NOC Midnight** identity, **Jump Desktop-style Fluid Touch RDP/VNC Canvas** (precision virtual trackpad + direct touch + extended `Ctrl`/`Alt`/`⌘`/`F1–F12` modifier strip), **Termius-style Mobile SSH & SFTP**, hardware biometric lock (`FaceID` / `TouchID`), and **Zero-Trust QR Vault Pairing** (`jaladesk://pair?v=1&...`).
+- 📱 **JalaDesk Mobile (`iOS`, `iPadOS` & `Android`)**: Companion Flutter application featuring the **Sapphire-Gold NOC Midnight** identity, **Fluid Touch RDP/VNC Canvas** (precision virtual trackpad + direct touch + extended `Ctrl`/`Alt`/`⌘`/`F1–F12` modifier strip), **Mobile SSH & SFTP Console**, hardware biometric lock (`FaceID` / `TouchID`), and **Zero-Trust QR Vault Pairing** (`jaladesk://pair?v=1&...`).
 
 ---
 
@@ -58,7 +52,7 @@ Instead of juggling separate applications for remote desktop (**Royal TSX / Jump
 
 <div align="center">
   <img src="docs/assets/desktop-overview.jpg" width="96%" alt="JalaDesk Desktop Workspace & 46 Built-In Studios"/>
-  <p><em>JalaDesk Desktop — Compact Icon Toolbar with Tooltips, Hierarchical Connection Sidebar, Quick-Connect Bar, and 46 Built-in Engineering, Security & SRE Studios.</em></p>
+  <p><em>JalaDesk Desktop — Compact Icon Toolbar with Tooltips, Hierarchical Connection Sidebar, Quick-Connect Bar, and Built-in Engineering, Security & SRE Studios.</em></p>
 </div>
 
 ### 📱 JalaDesk Mobile Companion (`iOS Simulator` & `Android Emulator`)
@@ -90,52 +84,11 @@ Instead of juggling separate applications for remote desktop (**Royal TSX / Jump
 
 ---
 
-## Why JalaDesk?
-
-| Capability | 🛡️ **JalaDesk** | Royal TSX | Jump Desktop | Termius |
-| :--- | :---: | :---: | :---: | :---: |
-| **Native FreeRDP 3.x + VNC Remote Desktop** | ✅ Built-in (C++17 Bridge) | ⚠️ Plugin-based | ✅ Built-in | ❌ No |
-| **Interactive SSH, Bastion (`-J`) & Dual-Pane SFTP** | ✅ Built-in | ⚠️ Plugin-based | ❌ No | ✅ Built-in |
-| **Encrypted Document Vault (`.rtsz` / `.rwdoc`)** | ✅ `AES-256-GCM` + `scrypt` | ✅ `.rtsz` | ❌ Cloud-only | ⚠️ Cloud-first |
-| **30-Group Folder Property Inheritance** | ✅ Full Provenance | ✅ Yes | ❌ No | ⚠️ Partial |
-| **Built-in RFC 6238 TOTP 2FA Generator** | ✅ `SHA-1` / `256` / `512` | ⚠️ External/Basic | ❌ No | ⚠️ Paid Tier |
-| **46 Built-in Network, SecOps & SRE Studios** | ✅ **46 Native Studios** | ❌ No | ❌ No | ❌ No |
-| **Production Command Safety Guard (`rm -rf`, `DROP`)** | ✅ Real-Time Interceptor | ❌ No | ❌ No | ❌ No |
-| **Mobile Companion (`iOS`, `iPadOS`, `Android`)** | ✅ Touch RDP + SSH + 2FA | ❌ Desktop-First | ✅ RDP/VNC Only | ✅ SSH/SFTP Only |
-| **Strict Zero-`innerHTML` CSP & Secret Isolation** | ✅ Enforced by 1,428 Tests | ❌ Legacy UI | ❌ Proprietary | ❌ Proprietary |
-| **Licensing Model** | ✅ **Apache-2.0 Open-Core** | ❌ Proprietary | ❌ Proprietary | ❌ Subscription |
-
----
-
 ## System Architecture
 
-```mermaid
-flowchart TB
-    subgraph Desktop["JalaDesk Desktop (Electron + Strict TypeScript ESM)"]
-        UI["Strict-CSP Renderer Shell\n(Zero innerHTML • Sapphire-Gold Theme • 46 Studios)"]
-        IPC["Context-Isolated Preload Bridge\n(Typed IPC Channels • Zero Raw Path Exposure)"]
-        Main["Electron Main Process\n(Session Owner • Safety Guard • Audit Ledger)"]
-        Vault["Zero-Trust Vault & Document Engine\n(AES-256-GCM • scrypt • 3-Way Merge • RFC 6238 TOTP)"]
-        Keychain["OS Hardware Keystore\n(macOS Keychain / Windows DPAPI)"]
-    end
-
-    subgraph NativeBridge["Isolated Native Helper Layer"]
-        RDP["C++17 FreeRDP 3.x Helper (native/rdp)\n• NLA / CredSSP + TLS SHA-256 Pinning\n• Dynamic Display Resize (disp)\n• 32 KiB Directional Clipboard (cliprdr)\n• POSIX 0700 / Windows Protected DACL"]
-        SSH["OpenSSH / SFTP / Bastion Engine\n• ProxyJump (-J) Multi-Hop\n• Local / Remote / SOCKS5 Tunnels\n• Dual-Pane SFTP Stream"]
-    end
-
-    subgraph Mobile["JalaDesk Mobile (Flutter 3.x • iOS / iPadOS / Android)"]
-        M_UI["Sapphire-Gold Mobile Workspace\n• Touch RDP/VNC Trackpad Canvas\n• Mobile SSH & SFTP Console\n• Biometric Enclave & TOTP 2FA"]
-    end
-
-    UI <-->|"Typed ContextBridge"| IPC
-    IPC <-->|"Validated IPC"| Main
-    Main <--> Vault
-    Vault <--> Keychain
-    Main <-->|"Bounded Frame & Input Pipe"| RDP
-    Main <-->|"PTY & SFTP Streams"| SSH
-    Main <-.->|"Zero-Trust QR Pairing (jaladesk://pair)\nLAN mDNS / E2EE Relay"| M_UI
-```
+<div align="center">
+  <img src="docs/assets/jaladesk-architecture.svg" width="100%" alt="JalaDesk Zero-Trust System Architecture Diagram"/>
+</div>
 
 ---
 
@@ -212,10 +165,10 @@ Located in [`mobile/`](./mobile), the **JalaDesk Mobile Companion** brings deskt
    - Real-time active fleet count, average LAN RTT (`ms`), and `AES-256-GCM` vault status banner.
    - Instant search and protocol filter strip (`ALL`, `RDP`, `SSH`, `VNC`, `SFTP`, `HYPERVISOR`).
    - One-tap **Zero-Trust QR / URI Pairing** (`jaladesk://pair?v=1&relay=lan-direct&...`) with JalaDesk Desktop.
-2. **Jump Desktop-Style Touch RDP / VNC Canvas Tab**:
+2. **Fluid Touch RDP / VNC Canvas Tab**:
    - Instant toggle between **Precision Virtual Trackpad Mode** (relative cursor movement with live `x,y` coordinate HUD) and **Direct Touch Mode** (absolute tap-to-click).
    - Interactive pinch-to-zoom (`1.0x` – `4.0x` via `InteractiveViewer`), View-Only safety lock, and a scrollable sticky modifier & function key bar (`Ctrl`, `Alt`, `⌘/Win`, `Shift`, `Esc`, `Tab`, `Ctrl+Alt+Del`, `Win+D`, arrow keys, `F1`–`F12`).
-3. **Termius-Style Mobile SSH & Dual-Pane SFTP Tab**:
+3. **Interactive Mobile SSH & Dual-Pane SFTP Tab**:
    - Interactive monospace SSH console with quick-action command chips (`uptime`, `docker ps`, `kubectl get pods`, `uname -a`, `df -h`, `clear`) and one-tap switch to the **Mobile SFTP File Browser**.
 4. **Zero-Trust Hardware Enclave & RFC 6238 2FA Tab**:
    - Sealed enclave banner, live 30-second countdown TOTP authenticator with tap-to-copy tokens, **Biometric Enclave Unlock (`FaceID` / `TouchID`)**, **Zero-Knowledge LAN mDNS Vault Sync**, and **30-second Automatic Clipboard Secret Scrubber**.
@@ -263,7 +216,7 @@ JalaDesk is engineered from the ground up with strict security boundaries verifi
 │   ├── ios/               # Xcode iOS / iPadOS runner (Deployment Target iOS 16.0+)
 │   ├── android/           # Gradle Kotlin Android runner
 │   └── test/              # Automated Flutter widget tests (verified at 320x680 & 360x780 viewports)
-├── docs/assets/           # Brand logo and desktop/mobile showcase screenshots
+├── docs/assets/           # Brand logo, architecture SVG & desktop/mobile showcase screenshots
 ├── scripts/               # Build, native bootstrap, packaging & verification scripts
 └── tests/                 # 1,428 automated Node.js, Electron, CSP, WCAG theme & security tests
 ```
@@ -326,8 +279,6 @@ flutter build appbundle --release
 
 <div align="center">
 
-**Architected & Maintained by [Rizky Bachtiar (`@ribato22`)](https://github.com/ribato22)**
-
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0E141A,55:2F6F9C,100:EDBA6E&height=90&section=footer" width="100%" alt="Footer"/>
+<img src="docs/assets/jaladesk-footer.svg" width="100%" alt="JalaDesk Footer"/>
 
 </div>

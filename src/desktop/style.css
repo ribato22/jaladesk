@@ -572,6 +572,8 @@ body[data-rdp-scale=actual] #screen > canvas{max-width:none;max-height:none;widt
 .overview-studio-select{flex:1;height:32px;min-height:32px;font-size:12.5px;font-weight:600;padding:4px 10px;margin:0;border-radius:7px;background:var(--surface);border:1px solid var(--line-input);color:var(--text)}
 [data-tooltip]{position:relative}
 [data-tooltip]:hover:not(:disabled)::after,[data-tooltip]:focus-visible::after{content:attr(data-tooltip);position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);z-index:80;padding:4px 9px;border-radius:6px;background:var(--header);color:var(--header-text);border:1px solid var(--line-input);box-shadow:0 6px 16px var(--shadow);font-size:11.5px;font-weight:600;line-height:1.25;white-space:nowrap;pointer-events:none}
+#screen,#placeholder,aside,.settings-content{scrollbar-width:none;-ms-overflow-style:none}
+#screen::-webkit-scrollbar,#placeholder::-webkit-scrollbar,aside::-webkit-scrollbar,.settings-content::-webkit-scrollbar{display:none;width:0;height:0}
 
 @media(max-width:950px){
   .layout{grid-template-columns:224px 1fr}

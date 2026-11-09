@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Jaladesk Mobile</string>
+	<string>JalaDesk</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +13,13 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>jaladesk_mobile</string>
+	<string>JalaDesk</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>JalaDesk uses Face ID to unlock your encrypted Zero-Trust credential vault and 2FA tokens.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>JalaDesk connects to RDP, VNC, and SSH servers and synchronizes encrypted vaults on your local network.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
