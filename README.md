@@ -97,4 +97,8 @@ flutter build appbundle
 
 ## License
 
+**JalaDesk** is distributed under an **Open-Core Dual Licensing Model**:
+- **Open-Source Core (`Apache-2.0`)**: The core desktop workspace, multi-protocol client engine (`src/protocols/`, `native/rdp/`), local encrypted vault (`src/documents/`, `src/credentials/`), and Flutter mobile companion (`mobile/`) are licensed under the [Apache License 2.0](./LICENSE).
+- **Enterprise Edition ([`LICENSE-ENTERPRISE.md`](./LICENSE-ENTERPRISE.md))**: Enterprise SSO/SAML/OIDC, Zero-Trust Team Vault Relay, and centralized compliance audit modules are governed by the JalaDesk Enterprise Commercial License.
+
 Copyright © Rizky Bachtiar (`@ribato22`). All rights reserved.
