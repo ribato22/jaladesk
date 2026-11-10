@@ -1,8 +1,11 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/addin.h>
 #include <freerdp/channels/channels.h>
+#include <freerdp/channels/disp.h>
 #include <freerdp/client/channels.h>
 #include <freerdp/client/cmdline.h>
+#include <freerdp/client/disp.h>
+#include <freerdp/event.h>
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/input.h>
 #include <freerdp/settings.h>
@@ -10,6 +13,7 @@
 #include <winpr/synch.h>
 #include <winpr/wlog.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -32,7 +36,7 @@
 namespace {
 
 struct InputEventItem {
-  int kind = 0; // 1 = mouse, 2 = key scancode, 3 = unicode key, 4 = sync
+  int kind = 0; // 1 = mouse, 2 = key scancode, 3 = unicode key, 4 = sync, 5 = resize (w, h, scale)
   int a = 0;
   int b = 0;
   int c = 0;
@@ -46,6 +50,7 @@ struct JalaRdpSession {
   std::string password;
   int reqWidth = 1280;
   int reqHeight = 800;
+  int reqScale = 100;
   std::string configDir;
 
   std::mutex mtx;
@@ -60,7 +65,9 @@ struct JalaRdpSession {
   std::deque<InputEventItem> inputQueue;
 
   std::atomic<bool> closing{false};
+  std::atomic<bool> pendingResizeReconnect{false};
   freerdp* instance = nullptr;
+  DispClientContext* dispContext = nullptr;
   std::thread worker;
 };
 
@@ -71,6 +78,42 @@ struct JalaRdpContext {
 
 static JalaRdpSession* getSession(rdpContext* ctx) {
   return reinterpret_cast<JalaRdpContext*>(ctx)->session;
+}
+
+static void onChannelConnected(void* context, const ChannelConnectedEventArgs* e) {
+  if (!context || !e || !e->name) return;
+  auto* ctx = static_cast<rdpContext*>(context);
+  JalaRdpSession* s = getSession(ctx);
+  if (!s) return;
+  if (std::strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0 ||
+      std::strcmp(e->name, DISP_CHANNEL_NAME) == 0) {
+    std::lock_guard<std::mutex> lock(s->mtx);
+    s->dispContext = reinterpret_cast<DispClientContext*>(e->pInterface);
+  }
+}
+
+static void onChannelDisconnected(void* context, const ChannelDisconnectedEventArgs* e) {
+  if (!context || !e || !e->name) return;
+  auto* ctx = static_cast<rdpContext*>(context);
+  JalaRdpSession* s = getSession(ctx);
+  if (!s) return;
+  if (std::strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0 ||
+      std::strcmp(e->name, DISP_CHANNEL_NAME) == 0) {
+    std::lock_guard<std::mutex> lock(s->mtx);
+    s->dispContext = nullptr;
+  }
+}
+
+static BOOL onPreConnect(freerdp* inst) {
+  if (!inst || !inst->context) return FALSE;
+  if (inst->context->pubSub) {
+    PubSub_SubscribeChannelConnected(inst->context->pubSub, onChannelConnected);
+    PubSub_SubscribeChannelDisconnected(inst->context->pubSub, onChannelDisconnected);
+  }
+  if (inst->context->channels && inst->context->settings) {
+    freerdp_client_load_addins(inst->context->channels, inst->context->settings);
+  }
+  return TRUE;
 }
 
 static BOOL onBeginPaint(rdpContext* ctx) {
@@ -122,7 +165,14 @@ static BOOL onDesktopResize(rdpContext* ctx) {
   const uint32_t w = freerdp_settings_get_uint32(ctx->settings, FreeRDP_DesktopWidth);
   const uint32_t h = freerdp_settings_get_uint32(ctx->settings, FreeRDP_DesktopHeight);
   if (w < 64 || h < 64 || w > 8192 || h > 8192) return FALSE;
-  return gdi_resize(ctx->gdi, w, h);
+  if (!gdi_resize(ctx->gdi, w, h)) return FALSE;
+  onEndPaint(ctx);
+  JalaRdpSession* s = getSession(ctx);
+  if (s) {
+    std::lock_guard<std::mutex> lock(s->mtx);
+    s->statusText = "Connected via FreeRDP 3.x (" + std::to_string(w) + "x" + std::to_string(h) + ")";
+  }
+  return TRUE;
 }
 
 static BOOL onPostConnect(freerdp* inst) {
@@ -134,7 +184,6 @@ static BOOL onPostConnect(freerdp* inst) {
 
   JalaRdpSession* s = getSession(inst->context);
   if (s) {
-    // Capture initial surface immediately
     onEndPaint(inst->context);
     {
       std::lock_guard<std::mutex> lock(s->mtx);
@@ -148,8 +197,19 @@ static BOOL onPostConnect(freerdp* inst) {
 }
 
 static void onPostDisconnect(freerdp* inst) {
-  if (inst && inst->context && inst->context->gdi) {
-    gdi_free(inst);
+  if (inst && inst->context) {
+    JalaRdpSession* s = getSession(inst->context);
+    if (s) {
+      std::lock_guard<std::mutex> lock(s->mtx);
+      s->dispContext = nullptr;
+    }
+    if (inst->context->pubSub) {
+      PubSub_UnsubscribeChannelConnected(inst->context->pubSub, onChannelConnected);
+      PubSub_UnsubscribeChannelDisconnected(inst->context->pubSub, onChannelDisconnected);
+    }
+    if (inst->context->gdi) {
+      gdi_free(inst);
+    }
   }
 }
 
@@ -207,8 +267,19 @@ static bool configureInstance(freerdp* inst, JalaRdpSession* s, bool enableNla) 
     freerdp_settings_set_string(settings, FreeRDP_Domain, s->domain.c_str());
   }
 
-  freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, static_cast<UINT32>(s->reqWidth));
-  freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, static_cast<UINT32>(s->reqHeight));
+  int targetW = 1280;
+  int targetH = 800;
+  int targetScale = 100;
+  {
+    std::lock_guard<std::mutex> lock(s->mtx);
+    targetW = s->reqWidth;
+    targetH = s->reqHeight;
+    targetScale = s->reqScale;
+  }
+  freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, static_cast<UINT32>(targetW));
+  freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, static_cast<UINT32>(targetH));
+  freerdp_settings_set_uint32(settings, FreeRDP_DesktopScaleFactor, static_cast<UINT32>(targetScale));
+  freerdp_settings_set_uint32(settings, FreeRDP_DeviceScaleFactor, 100);
   freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
   freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
@@ -216,6 +287,11 @@ static bool configureInstance(freerdp* inst, JalaRdpSession* s, bool enableNla) 
   freerdp_settings_set_bool(settings, FreeRDP_FastPathInput, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_FrameMarkerCommandEnabled, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_SurfaceFrameMarkerEnabled, TRUE);
+  freerdp_settings_set_bool(settings, FreeRDP_SupportDynamicChannels, TRUE);
+  freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, TRUE);
+  const char* dispParams[] = {"disp"};
+  (void)freerdp_client_add_dynamic_channel(settings, 1, dispParams);
+
   freerdp_settings_set_bool(settings, FreeRDP_ExternalCertificateManagement, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_AutoAcceptCertificate, TRUE);
@@ -252,6 +328,7 @@ static void runSessionThread(JalaRdpSession* s) {
       return nullptr;
     }
     reinterpret_cast<JalaRdpContext*>(inst->context)->session = s;
+    inst->PreConnect = onPreConnect;
     inst->PostConnect = onPostConnect;
     inst->PostDisconnect = onPostDisconnect;
     inst->AuthenticateEx = onAuthenticateEx;
@@ -263,6 +340,7 @@ static void runSessionThread(JalaRdpSession* s) {
     {
       std::lock_guard<std::mutex> lock(s->mtx);
       s->instance = inst;
+      s->dispContext = nullptr;
       s->statusText = useNla
           ? "Negotiating CredSSP / NLA & TLS with " + s->host + ":" + std::to_string(s->port) + "..."
           : "Negotiating TLS / Standard RDP with " + s->host + ":" + std::to_string(s->port) + "...";
@@ -274,6 +352,7 @@ static void runSessionThread(JalaRdpSession* s) {
       {
         std::lock_guard<std::mutex> lock(s->mtx);
         s->instance = nullptr;
+        s->dispContext = nullptr;
       }
       freerdp_context_free(inst);
       freerdp_free(inst);
@@ -282,92 +361,125 @@ static void runSessionThread(JalaRdpSession* s) {
     return inst;
   };
 
-  UINT32 lastErr = 0;
-  // First attempt: with NLA enabled if username/password are provided, otherwise TLS first
-  const bool tryNlaFirst = !s->username.empty() && !s->password.empty();
-  freerdp* inst = createAndConnect(tryNlaFirst, lastErr);
+  while (!s->closing.load()) {
+    s->pendingResizeReconnect.store(false);
+    UINT32 lastErr = 0;
+    const bool tryNlaFirst = !s->username.empty() && !s->password.empty();
+    freerdp* inst = createAndConnect(tryNlaFirst, lastErr);
 
-  // Automatic fallback: if NLA failed due to server policy / hybrid mismatch (and not explicit wrong password),
-  // or if we tried TLS-first and server required NLA, try the alternate security mode!
-  if (!inst && !s->closing.load()) {
-    const bool isAuthWrong = (lastErr == FREERDP_ERROR_AUTHENTICATION_FAILED ||
-                              lastErr == FREERDP_ERROR_CONNECT_LOGON_FAILURE ||
-                              lastErr == FREERDP_ERROR_CONNECT_WRONG_PASSWORD ||
-                              lastErr == FREERDP_ERROR_CONNECT_ACCESS_DENIED ||
-                              lastErr == FREERDP_ERROR_CONNECT_ACCOUNT_LOCKED_OUT);
-    if (!isAuthWrong) {
-      UINT32 fallbackErr = 0;
-      inst = createAndConnect(!tryNlaFirst, fallbackErr);
-      if (fallbackErr != 0) lastErr = fallbackErr;
-    }
-  }
-
-  if (!inst) {
-    const char* errName = freerdp_get_last_error_name(lastErr);
-    const char* errStr = freerdp_get_last_error_string(lastErr);
-    std::lock_guard<std::mutex> lock(s->mtx);
-    s->statusText = std::string("RDP Connect Failed: ") +
-                    (errStr ? errStr : "Unable to establish session") +
-                    " (" + (errName ? errName : "ERR") + ")";
-    s->state.store(-1);
-    return;
-  }
-
-  while (!s->closing.load() && !freerdp_shall_disconnect_context(inst->context)) {
-    HANDLE handles[64];
-    const DWORD count = freerdp_get_event_handles(inst->context, handles, 64);
-    if (!count || WaitForMultipleObjects(count, handles, FALSE, 16) == WAIT_FAILED) {
-      break;
-    }
-    if (!freerdp_check_event_handles(inst->context)) {
-      break;
-    }
-
-    std::deque<InputEventItem> pending;
-    {
-      std::lock_guard<std::mutex> lock(s->mtx);
-      pending.swap(s->inputQueue);
-    }
-    for (const auto& ev : pending) {
-      if (!inst->context->input) continue;
-      if (ev.kind == 1) {
-        freerdp_input_send_mouse_event(
-            inst->context->input,
-            static_cast<UINT16>(ev.c),
-            static_cast<UINT16>(ev.a),
-            static_cast<UINT16>(ev.b));
-      } else if (ev.kind == 2) {
-        freerdp_input_send_keyboard_event(
-            inst->context->input,
-            static_cast<UINT16>(ev.a),
-            static_cast<UINT8>(ev.b));
-      } else if (ev.kind == 3) {
-        freerdp_input_send_unicode_keyboard_event(
-            inst->context->input,
-            static_cast<UINT16>(ev.a),
-            static_cast<UINT16>(ev.b));
-      } else if (ev.kind == 4) {
-        freerdp_input_send_synchronize_event(
-            inst->context->input,
-            static_cast<UINT32>(ev.a));
+    if (!inst && !s->closing.load()) {
+      const bool isAuthWrong = (lastErr == FREERDP_ERROR_AUTHENTICATION_FAILED ||
+                                lastErr == FREERDP_ERROR_CONNECT_LOGON_FAILURE ||
+                                lastErr == FREERDP_ERROR_CONNECT_WRONG_PASSWORD ||
+                                lastErr == FREERDP_ERROR_CONNECT_ACCESS_DENIED ||
+                                lastErr == FREERDP_ERROR_CONNECT_ACCOUNT_LOCKED_OUT);
+      if (!isAuthWrong) {
+        UINT32 fallbackErr = 0;
+        inst = createAndConnect(!tryNlaFirst, fallbackErr);
+        if (fallbackErr != 0) lastErr = fallbackErr;
       }
     }
-  }
 
-  const UINT32 errInfo = freerdp_error_info(inst);
-  {
-    std::lock_guard<std::mutex> lock(s->mtx);
-    s->instance = nullptr;
-    if (s->state.load() == 1) {
-      s->statusText = errInfo
-          ? ("Session ended by server (code " + std::to_string(errInfo) + ")")
-          : "Session disconnected.";
-      s->state.store(2);
+    if (!inst) {
+      const char* errName = freerdp_get_last_error_name(lastErr);
+      const char* errStr = freerdp_get_last_error_string(lastErr);
+      std::lock_guard<std::mutex> lock(s->mtx);
+      s->statusText = std::string("RDP Connect Failed: ") +
+                      (errStr ? errStr : "Unable to establish session") +
+                      " (" + (errName ? errName : "ERR") + ")";
+      s->state.store(-1);
+      return;
+    }
+
+    while (!s->closing.load() &&
+           !s->pendingResizeReconnect.load() &&
+           !freerdp_shall_disconnect_context(inst->context)) {
+      HANDLE handles[64];
+      const DWORD count = freerdp_get_event_handles(inst->context, handles, 64);
+      if (!count || WaitForMultipleObjects(count, handles, FALSE, 16) == WAIT_FAILED) {
+        break;
+      }
+      if (!freerdp_check_event_handles(inst->context)) {
+        break;
+      }
+
+      std::deque<InputEventItem> pending;
+      DispClientContext* activeDisp = nullptr;
+      {
+        std::lock_guard<std::mutex> lock(s->mtx);
+        pending.swap(s->inputQueue);
+        activeDisp = s->dispContext;
+      }
+      for (const auto& ev : pending) {
+        if (ev.kind == 5) {
+          const int newW = ev.a;
+          const int newH = ev.b;
+          const int newScale = ev.c;
+          if (activeDisp && activeDisp->SendMonitorLayout) {
+            DISPLAY_CONTROL_MONITOR_LAYOUT layout{};
+            layout.Flags = DISPLAY_CONTROL_MONITOR_PRIMARY;
+            layout.Left = 0;
+            layout.Top = 0;
+            layout.Width = static_cast<UINT32>(newW);
+            layout.Height = static_cast<UINT32>(newH);
+            layout.PhysicalWidth = std::max<UINT32>(10u, (static_cast<UINT32>(newW) * 254u) / 960u);
+            layout.PhysicalHeight = std::max<UINT32>(10u, (static_cast<UINT32>(newH) * 254u) / 960u);
+            layout.Orientation = 0;
+            layout.DesktopScaleFactor = static_cast<UINT32>(newScale);
+            layout.DeviceScaleFactor = 100;
+            (void)activeDisp->SendMonitorLayout(activeDisp, 1, &layout);
+          } else {
+            // Server does not expose MS-RDPEDISP DVC: perform seamless fast-reconnect at new resolution
+            s->pendingResizeReconnect.store(true);
+            break;
+          }
+          continue;
+        }
+        if (!inst->context->input) continue;
+        if (ev.kind == 1) {
+          freerdp_input_send_mouse_event(
+              inst->context->input,
+              static_cast<UINT16>(ev.c),
+              static_cast<UINT16>(ev.a),
+              static_cast<UINT16>(ev.b));
+        } else if (ev.kind == 2) {
+          freerdp_input_send_keyboard_event(
+              inst->context->input,
+              static_cast<UINT16>(ev.a),
+              static_cast<UINT8>(ev.b));
+        } else if (ev.kind == 3) {
+          freerdp_input_send_unicode_keyboard_event(
+              inst->context->input,
+              static_cast<UINT16>(ev.a),
+              static_cast<UINT16>(ev.b));
+        } else if (ev.kind == 4) {
+          freerdp_input_send_synchronize_event(
+              inst->context->input,
+              static_cast<UINT32>(ev.a));
+        }
+      }
+    }
+
+    const UINT32 errInfo = freerdp_error_info(inst);
+    {
+      std::lock_guard<std::mutex> lock(s->mtx);
+      s->instance = nullptr;
+      s->dispContext = nullptr;
+      if (!s->pendingResizeReconnect.load() && s->state.load() == 1) {
+        s->statusText = errInfo
+            ? ("Session ended by server (code " + std::to_string(errInfo) + ")")
+            : "Session disconnected.";
+        s->state.store(2);
+      }
+    }
+    freerdp_disconnect(inst);
+    freerdp_context_free(inst);
+    freerdp_free(inst);
+
+    if (!s->pendingResizeReconnect.load()) {
+      break;
     }
   }
-  freerdp_disconnect(inst);
-  freerdp_context_free(inst);
-  freerdp_free(inst);
 }
 
 } // namespace
@@ -387,8 +499,10 @@ JALA_EXPORT void* jaladesk_rdp_create(
   s->domain = domain ? domain : "";
   s->username = username ? username : "";
   s->password = password ? password : "";
-  s->reqWidth = (width >= 320 && width <= 4096) ? width : 1280;
-  s->reqHeight = (height >= 240 && height <= 4096) ? height : 800;
+  const int alignedW = ((std::clamp(width, 320, 4096) + 3) / 4) * 4;
+  const int alignedH = ((std::clamp(height, 240, 4096) + 1) / 2) * 2;
+  s->reqWidth = alignedW;
+  s->reqHeight = alignedH;
   s->configDir = config_dir ? config_dir : "";
 
   // Automatically split DOMAIN\username or username@domain if domain wasn't passed separately
@@ -408,6 +522,32 @@ JALA_EXPORT void* jaladesk_rdp_create(
 
   s->worker = std::thread(runSessionThread, s);
   return s;
+}
+
+JALA_EXPORT void jaladesk_rdp_request_resolution(
+    void* handle,
+    int width,
+    int height,
+    int desktop_scale_factor) {
+  if (!handle) return;
+  auto* s = static_cast<JalaRdpSession*>(handle);
+  const int alignedW = ((std::clamp(width, 320, 4096) + 3) / 4) * 4;
+  const int alignedH = ((std::clamp(height, 240, 4096) + 1) / 2) * 2;
+  const int clampedScale = std::clamp(desktop_scale_factor, 100, 500);
+
+  std::lock_guard<std::mutex> lock(s->mtx);
+  if (alignedW == s->frameWidth && alignedH == s->frameHeight && clampedScale == s->reqScale) {
+    return;
+  }
+  s->reqWidth = alignedW;
+  s->reqHeight = alignedH;
+  s->reqScale = clampedScale;
+  // Remove any older queued resize requests so only the latest viewport size is applied
+  s->inputQueue.erase(
+      std::remove_if(s->inputQueue.begin(), s->inputQueue.end(),
+                     [](const InputEventItem& item) { return item.kind == 5; }),
+      s->inputQueue.end());
+  s->inputQueue.push_back({5, alignedW, alignedH, clampedScale});
 }
 
 JALA_EXPORT int jaladesk_rdp_get_state(

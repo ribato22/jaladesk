@@ -379,6 +379,32 @@ class RemoteSftpEntry {
   });
 }
 
+/// Jump Desktop-style Remote Resolution Negotiation Preset
+enum JumpResolutionPreset {
+  matchDisplay('Auto Match Screen (Native Aspect)', 'Auto Match', 1.0),
+  matchHiDpi('Retina / HiDPI Match (1.35× Sharp)', 'HiDPI 1.35×', 1.35),
+  fhd1080p('Full HD 1920×1080 (16:9)', '1080p 16:9', 0.0),
+  wxga1440('WXGA+ 1440×900 (16:10)', '1440×900', 0.0),
+  xga1280('Tablet 1280×960 (4:3)', '1280×960', 0.0);
+
+  final String label;
+  final String shortLabel;
+  final double densityFactor;
+  const JumpResolutionPreset(this.label, this.shortLabel, this.densityFactor);
+}
+
+/// Jump Desktop-style Canvas Aspect & Scaling Mode
+enum JumpCanvasFitMode {
+  aspectFit('Fit (Exact Aspect)', 'Fit'),
+  stretchFill('Fill (Edge-to-Edge)', 'Fill'),
+  cropCover('Cover (Zoom Fill)', 'Cover'),
+  pixel1to1('1:1 Native Pixel', '1:1');
+
+  final String label;
+  final String shortLabel;
+  const JumpCanvasFitMode(this.label, this.shortLabel);
+}
+
 class JalaDeskMobileShell extends StatefulWidget {
   final List<RemoteHostItem>? initialHostsOverride;
   final bool disableNetworkProbes;
@@ -427,8 +453,20 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   bool _altLocked = false;
   bool _winLocked = false;
   bool _shiftLocked = false;
-  Offset _cursorPos = const Offset(155, 118);
+  Offset _cursorNorm = const Offset(0.5, 0.5);
   String _lastRdpAction = 'Select a host in Connections or tap + Add Host to begin.';
+
+  // Jump Desktop-style Display Sizing, Full Screen & Adaptive Tablet/Foldable state
+  JumpResolutionPreset _resolutionPreset = JumpResolutionPreset.matchDisplay;
+  JumpCanvasFitMode _canvasFitMode = JumpCanvasFitMode.aspectFit;
+  bool _isFullScreen = false;
+  bool _floatingHudExpanded = true;
+  bool _showFullScreenModifierBar = true;
+  bool _landscapeLocked = false;
+  bool _showTabletSidebar = true;
+  final TransformationController _canvasTransformCtrl = TransformationController();
+  Size _lastMeasuredCanvasSize = const Size(1280, 800);
+  Timer? _autoResizeDebounce;
 
   // Live SSHv2 PTY Shell & SFTP Client state (`dartssh2`)
   SSHClient? _sshClient;
@@ -465,6 +503,104 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     _loadPersistedVault();
   }
 
+  /// Toggles true edge-to-edge Immersive Sticky Full Screen mode
+  void toggleFullScreen([bool? forceValue]) {
+    final next = forceValue ?? !_isFullScreen;
+    setState(() {
+      _isFullScreen = next;
+      if (next) {
+        _floatingHudExpanded = true;
+      }
+    });
+    SystemChrome.setEnabledSystemUIMode(
+      next ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+    );
+  }
+
+  /// Toggles landscape orientation lock for mobile RDP productivity
+  void toggleLandscapeOrientation([bool? forceLandscape]) {
+    final next = forceLandscape ?? !_landscapeLocked;
+    setState(() => _landscapeLocked = next);
+    SystemChrome.setPreferredOrientations(
+      next
+          ? const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]
+          : const [],
+    );
+  }
+
+  /// Resolves the target remote desktop `(width, height)` based on the active Jump preset & viewport
+  (int, int) _resolveTargetDesktopDimensions({Size? viewportOverride}) {
+    final vp = viewportOverride ?? _lastMeasuredCanvasSize;
+    switch (_resolutionPreset) {
+      case JumpResolutionPreset.matchDisplay:
+        return RdpFfiClient.computeJumpMatchResolution(vp.width, vp.height, densityMultiplier: 1.0);
+      case JumpResolutionPreset.matchHiDpi:
+        return RdpFfiClient.computeJumpMatchResolution(vp.width, vp.height, densityMultiplier: 1.35);
+      case JumpResolutionPreset.fhd1080p:
+        return (1920, 1080);
+      case JumpResolutionPreset.wxga1440:
+        return (1440, 900);
+      case JumpResolutionPreset.xga1280:
+        return (1280, 960);
+    }
+  }
+
+  /// Sends a live MS-RDPEDISP / fast-reconnect resolution update to the active RDP session
+  void _applyTargetResolutionToActiveSession({Size? viewportOverride}) {
+    final (targetW, targetH) = _resolveTargetDesktopDimensions(viewportOverride: viewportOverride);
+    if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
+      _rdpFfiClient!.requestResolution(
+        targetW,
+        targetH,
+        desktopScaleFactor: _resolutionPreset == JumpResolutionPreset.matchHiDpi ? 125 : 100,
+      );
+      setState(() {
+        _lastRdpAction = 'Jump Display Sizing → ${targetW}x$targetH (${_resolutionPreset.shortLabel})';
+      });
+    } else {
+      setState(() {
+        _desktopServerWidth = targetW;
+        _desktopServerHeight = targetH;
+        _lastRdpAction = 'Target Resolution → ${targetW}x$targetH (${_resolutionPreset.shortLabel})';
+      });
+    }
+  }
+
+  /// Called by the RDP/VNC canvas `LayoutBuilder` whenever window/foldable/fullscreen geometry changes
+  void _onViewportDimensionsMeasured(Size newSize) {
+    final dw = (newSize.width - _lastMeasuredCanvasSize.width).abs();
+    final dh = (newSize.height - _lastMeasuredCanvasSize.height).abs();
+    if (dw < 12 && dh < 12) return;
+    _lastMeasuredCanvasSize = newSize;
+
+    if (_rdpFfiClient != null &&
+        _rdpFfiClient!.isConnected &&
+        (_resolutionPreset == JumpResolutionPreset.matchDisplay ||
+            _resolutionPreset == JumpResolutionPreset.matchHiDpi)) {
+      _autoResizeDebounce?.cancel();
+      _autoResizeDebounce = Timer(const Duration(milliseconds: 160), () {
+        if (!mounted) return;
+        _applyTargetResolutionToActiveSession(viewportOverride: newSize);
+      });
+    }
+  }
+
+  /// Computes the exact destination `Rect` of the remote desktop frame inside the viewport
+  Rect _computeRenderedDesktopRect(Size viewportSize) {
+    final srvW = _desktopServerWidth.clamp(64, 8192).toDouble();
+    final srvH = _desktopServerHeight.clamp(64, 8192).toDouble();
+    if (_canvasFitMode == JumpCanvasFitMode.stretchFill) {
+      return Rect.fromLTWH(0, 0, viewportSize.width, viewportSize.height);
+    }
+    final boxFit = _canvasFitMode == JumpCanvasFitMode.cropCover ? BoxFit.cover : BoxFit.contain;
+    final fitted = applyBoxFit(boxFit, Size(srvW, srvH), viewportSize);
+    final dstW = fitted.destination.width.clamp(1.0, viewportSize.width);
+    final dstH = fitted.destination.height.clamp(1.0, viewportSize.height);
+    final dx = (viewportSize.width - dstW) / 2.0;
+    final dy = (viewportSize.height - dstH) / 2.0;
+    return Rect.fromLTWH(dx, dy, dstW, dstH);
+  }
+
   Future<void> connectHostForVerification(String hostId) async {
     while (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
       Navigator.of(context, rootNavigator: true).pop();
@@ -486,6 +622,23 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
   Future<void> runSshCommandForVerification(String cmd) async {
     await _runSshCommand(cmd);
+  }
+
+  void setDisplayModeForVerification({
+    JumpResolutionPreset? preset,
+    JumpCanvasFitMode? fit,
+    bool? fullScreen,
+  }) {
+    setState(() {
+      if (preset != null) _resolutionPreset = preset;
+      if (fit != null) _canvasFitMode = fit;
+    });
+    if (fullScreen != null) {
+      toggleFullScreen(fullScreen);
+    }
+    if (preset != null) {
+      _applyTargetResolutionToActiveSession();
+    }
   }
 
   void sendDesktopInteractionForVerification(int rx, int ry, String keyLabel) {
@@ -612,6 +765,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   @override
   void dispose() {
     _totpTimer.cancel();
+    _autoResizeDebounce?.cancel();
+    _canvasTransformCtrl.dispose();
     _sshInputCtrl.dispose();
     _sshScrollCtrl.dispose();
     _desktopKeyInputCtrl.dispose();
@@ -1484,14 +1639,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
           if (RdpFfiClient.isNativeAvailable) {
             _closeDesktopSession();
+            final (initW, initH) = _resolveTargetDesktopDimensions();
             final rdpClient = RdpFfiClient(
               host: host.address,
               port: host.port,
               domain: resolvedDomain,
               username: resolvedUser,
               password: host.password,
-              initialWidth: 1280,
-              initialHeight: 800,
+              initialWidth: initW,
+              initialHeight: initH,
               onFrame: (ui.Image img, int w, int h, String status) {
                 if (!mounted) return;
                 setState(() {
@@ -2303,170 +2459,401 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(56),
-        child: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [JalaPalette.chip, JalaPalette.header],
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-            ),
-            border: Border(
-              bottom: BorderSide(color: JalaPalette.line, width: 1),
-            ),
-          ),
-          child: SafeArea(
-            bottom: false,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              child: Row(
-                children: [
-                  _buildJalaBrandLogo(size: 32, radius: 8),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Row(
+    return LayoutBuilder(
+      builder: (context, windowConstraints) {
+        final double winW = windowConstraints.maxWidth;
+        final bool isWideScreen = winW >= 600;
+        final bool isLargeTablet = winW >= 800;
+        final bool isFullTablet = winW >= 960;
+        final bool activeFullScreen = _isFullScreen && (_tabIndex == 1 || _tabIndex == 2);
+
+        final Widget activeTabBody = IndexedStack(
+          index: _tabIndex,
+          children: [
+            _buildConnectionsTab(),
+            _buildJumpRdpCanvasTab(isFullScreen: activeFullScreen, isWideScreen: isWideScreen),
+            _buildTermiusSshTab(isFullScreen: activeFullScreen, isWideScreen: isWideScreen),
+            _buildSecurityVaultTab(),
+          ],
+        );
+
+        // True 100% edge-to-edge Immersive Full Screen Mode for RDP/VNC and SSH/SFTP
+        if (activeFullScreen) {
+          return Scaffold(
+            backgroundColor: JalaPalette.splashBg,
+            body: activeTabBody,
+          );
+        }
+
+        return Scaffold(
+          appBar: PreferredSize(
+            preferredSize: const Size.fromHeight(56),
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [JalaPalette.chip, JalaPalette.header],
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                ),
+                border: Border(
+                  bottom: BorderSide(color: JalaPalette.line, width: 1),
+                ),
+              ),
+              child: SafeArea(
+                bottom: false,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  child: Row(
+                    children: [
+                      _buildJalaBrandLogo(size: 32, radius: 8),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const Flexible(
-                              child: Text(
-                                'JalaDesk',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 16,
-                                  letterSpacing: -0.3,
-                                  color: JalaPalette.text,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                            FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Text(
+                                    'JalaDesk',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 16,
+                                      letterSpacing: -0.3,
+                                      color: JalaPalette.text,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 7),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                    decoration: BoxDecoration(
+                                      color: JalaPalette.brandGold.withValues(alpha: 0.14),
+                                      borderRadius: BorderRadius.circular(5),
+                                      border: Border.all(
+                                        color: JalaPalette.brandGold.withValues(alpha: 0.45),
+                                        width: 0.8,
+                                      ),
+                                    ),
+                                    child: Text(
+                                      isFullTablet
+                                          ? 'TABLET PRO'
+                                          : (isWideScreen ? 'FOLDABLE PRO' : 'MOBILE PRO'),
+                                      style: const TextStyle(
+                                        fontSize: 9.5,
+                                        fontWeight: FontWeight.w700,
+                                        letterSpacing: 0.4,
+                                        color: JalaPalette.brandGold,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                            const SizedBox(width: 7),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                              decoration: BoxDecoration(
-                                color: JalaPalette.brandGold.withValues(alpha: 0.14),
-                                borderRadius: BorderRadius.circular(5),
-                                border: Border.all(
-                                  color: JalaPalette.brandGold.withValues(alpha: 0.45),
-                                  width: 0.8,
-                                ),
-                              ),
-                              child: const Text(
-                                'MOBILE PRO',
-                                style: TextStyle(
-                                  fontSize: 9.5,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 0.4,
-                                  color: JalaPalette.brandGold,
-                                ),
-                              ),
+                            const Text(
+                              'Sapphire-Gold Zero-Trust Workspace',
+                              style: TextStyle(fontSize: 10.5, color: JalaPalette.muted),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ],
                         ),
-                        const Text(
-                          'Sapphire-Gold Zero-Trust Workspace',
-                          style: TextStyle(fontSize: 10.5, color: JalaPalette.muted),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                      ),
+                      if (isLargeTablet && (_tabIndex == 1 || _tabIndex == 2)) ...[
+                        IconButton(
+                          tooltip: _showTabletSidebar ? 'Hide Host Sidebar' : 'Show Host Sidebar',
+                          onPressed: () => setState(() => _showTabletSidebar = !_showTabletSidebar),
+                          style: IconButton.styleFrom(
+                            backgroundColor: _showTabletSidebar ? JalaPalette.selected : JalaPalette.surface,
+                            side: BorderSide(
+                              color: _showTabletSidebar ? JalaPalette.brandGold : JalaPalette.lineInput,
+                              width: 0.8,
+                            ),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                          icon: const Icon(Icons.view_sidebar_outlined, size: 18, color: JalaPalette.brandGold),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      if (isWideScreen && (_tabIndex == 1 || _tabIndex == 2)) ...[
+                        IconButton(
+                          tooltip: 'Enter Full Screen Mode',
+                          onPressed: () => toggleFullScreen(true),
+                          style: IconButton.styleFrom(
+                            backgroundColor: JalaPalette.surface,
+                            side: const BorderSide(color: JalaPalette.lineInput, width: 0.8),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                          icon: const Icon(Icons.fullscreen_rounded, size: 19, color: JalaPalette.brandGold),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      IconButton(
+                        tooltip: 'Add New Connection',
+                        onPressed: () => _showHostEditorDialog(),
+                        style: IconButton.styleFrom(
+                          backgroundColor: JalaPalette.selected,
+                          side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.5), width: 0.8),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        icon: const Icon(Icons.add_rounded, size: 19, color: JalaPalette.brandGold),
+                      ),
+                      const SizedBox(width: 6),
+                      IconButton(
+                        tooltip: 'Pair with JalaDesk Desktop (QR / URI)',
+                        onPressed: _showQrPairDialog,
+                        style: IconButton.styleFrom(
+                          backgroundColor: JalaPalette.surface,
+                          side: const BorderSide(color: JalaPalette.lineInput, width: 0.8),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        icon: const Icon(Icons.qr_code_scanner, size: 18, color: JalaPalette.brandGold),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          body: isWideScreen
+              ? Row(
+                  children: [
+                    Container(
+                      decoration: const BoxDecoration(
+                        color: JalaPalette.header,
+                        border: Border(right: BorderSide(color: JalaPalette.line, width: 1)),
+                      ),
+                      child: NavigationRail(
+                        backgroundColor: JalaPalette.header,
+                        selectedIndex: _tabIndex,
+                        onDestinationSelected: (idx) => setState(() => _tabIndex = idx),
+                        labelType: NavigationRailLabelType.all,
+                        minWidth: 74,
+                        indicatorColor: JalaPalette.selected,
+                        selectedIconTheme: const IconThemeData(color: JalaPalette.brandGold, size: 21),
+                        unselectedIconTheme: const IconThemeData(color: JalaPalette.muted, size: 20),
+                        selectedLabelTextStyle: const TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w700,
+                          color: JalaPalette.brandGold,
+                        ),
+                        unselectedLabelTextStyle: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w500,
+                          color: JalaPalette.muted,
+                        ),
+                        destinations: const [
+                          NavigationRailDestination(
+                            icon: Icon(Icons.dns_outlined),
+                            selectedIcon: Icon(Icons.dns_rounded),
+                            label: Text('Connections'),
+                          ),
+                          NavigationRailDestination(
+                            icon: Icon(Icons.desktop_windows_outlined),
+                            selectedIcon: Icon(Icons.desktop_windows_rounded),
+                            label: Text('RDP / VNC'),
+                          ),
+                          NavigationRailDestination(
+                            icon: Icon(Icons.terminal_outlined),
+                            selectedIcon: Icon(Icons.terminal_rounded),
+                            label: Text('SSH & SFTP'),
+                          ),
+                          NavigationRailDestination(
+                            icon: Icon(Icons.shield_outlined),
+                            selectedIcon: Icon(Icons.shield_rounded),
+                            label: Text('Vault & 2FA'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (isLargeTablet && _showTabletSidebar && (_tabIndex == 1 || _tabIndex == 2))
+                      _buildTabletQuickHostSidebar(),
+                    Expanded(child: activeTabBody),
+                  ],
+                )
+              : activeTabBody,
+          bottomNavigationBar: isWideScreen
+              ? null
+              : Container(
+                  decoration: const BoxDecoration(
+                    color: JalaPalette.header,
+                    border: Border(top: BorderSide(color: JalaPalette.line, width: 1)),
+                  ),
+                  child: NavigationBarTheme(
+                    data: NavigationBarThemeData(
+                      backgroundColor: JalaPalette.header,
+                      indicatorColor: JalaPalette.selected,
+                      labelTextStyle: WidgetStateProperty.resolveWith((states) {
+                        final selected = states.contains(WidgetState.selected);
+                        return TextStyle(
+                          fontSize: 11,
+                          fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                          color: selected ? JalaPalette.brandGold : JalaPalette.muted,
+                        );
+                      }),
+                      iconTheme: WidgetStateProperty.resolveWith((states) {
+                        final selected = states.contains(WidgetState.selected);
+                        return IconThemeData(
+                          size: 20,
+                          color: selected ? JalaPalette.brandGold : JalaPalette.muted,
+                        );
+                      }),
+                    ),
+                    child: NavigationBar(
+                      height: 62,
+                      selectedIndex: _tabIndex,
+                      onDestinationSelected: (idx) => setState(() => _tabIndex = idx),
+                      destinations: const [
+                        NavigationDestination(
+                          icon: Icon(Icons.dns_outlined),
+                          selectedIcon: Icon(Icons.dns_rounded),
+                          label: 'Connections',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(Icons.desktop_windows_outlined),
+                          selectedIcon: Icon(Icons.desktop_windows_rounded),
+                          label: 'RDP / VNC',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(Icons.terminal_outlined),
+                          selectedIcon: Icon(Icons.terminal_rounded),
+                          label: 'SSH & SFTP',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(Icons.shield_outlined),
+                          selectedIcon: Icon(Icons.shield_rounded),
+                          label: 'Vault & 2FA',
                         ),
                       ],
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  IconButton(
-                    tooltip: 'Add New Connection',
-                    onPressed: () => _showHostEditorDialog(),
-                    style: IconButton.styleFrom(
-                      backgroundColor: JalaPalette.selected,
-                      side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.5), width: 0.8),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+        );
+      },
+    );
+  }
+
+  /// Tablet / Foldable Split-Screen Quick Host Switcher Sidebar
+  Widget _buildTabletQuickHostSidebar() {
+    return Container(
+      width: 236,
+      decoration: const BoxDecoration(
+        color: JalaPalette.aside,
+        border: Border(right: BorderSide(color: JalaPalette.line, width: 1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: const BoxDecoration(
+              color: JalaPalette.bar,
+              border: Border(bottom: BorderSide(color: JalaPalette.line)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.storage_rounded, size: 14, color: JalaPalette.brandGold),
+                const SizedBox(width: 7),
+                const Expanded(
+                  child: Text(
+                    'QUICK HOST SWITCHER',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.4,
+                      color: JalaPalette.brandGold,
                     ),
-                    icon: const Icon(Icons.add_rounded, size: 19, color: JalaPalette.brandGold),
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(width: 6),
-                  IconButton(
-                    tooltip: 'Pair with JalaDesk Desktop (QR / URI)',
-                    onPressed: _showQrPairDialog,
-                    style: IconButton.styleFrom(
-                      backgroundColor: JalaPalette.surface,
-                      side: const BorderSide(color: JalaPalette.lineInput, width: 0.8),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    ),
-                    icon: const Icon(Icons.qr_code_scanner, size: 18, color: JalaPalette.brandGold),
-                  ),
-                ],
-              ),
+                ),
+                InkWell(
+                  onTap: () => _showHostEditorDialog(),
+                  child: const Icon(Icons.add_circle_outline_rounded, size: 16, color: JalaPalette.brandGold),
+                ),
+              ],
             ),
           ),
-        ),
-      ),
-      body: IndexedStack(
-        index: _tabIndex,
-        children: [
-          _buildConnectionsTab(),
-          _buildJumpRdpCanvasTab(),
-          _buildTermiusSshTab(),
-          _buildSecurityVaultTab(),
+          Expanded(
+            child: _hosts.isEmpty
+                ? const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(14),
+                      child: Text(
+                        'No saved hosts yet.\nTap + to add a server.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: _hosts.length,
+                    itemBuilder: (ctx, i) {
+                      final h = _hosts[i];
+                      final isSelected = (_tabIndex == 1 && _activeRdpHost?.id == h.id) ||
+                          (_tabIndex == 2 && _activeSshHost?.id == h.id);
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(9),
+                          onTap: () => _connectToHost(h),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: isSelected ? JalaPalette.selected : JalaPalette.surface,
+                              borderRadius: BorderRadius.circular(9),
+                              border: Border.all(
+                                color: isSelected ? JalaPalette.brandGold : JalaPalette.line,
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(_iconForProtocol(h.protocol), size: 16, color: JalaPalette.brandGold),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        h.name,
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                          color: JalaPalette.text,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      Text(
+                                        '${h.protocol.name.toUpperCase()} • ${h.address}:${h.port}',
+                                        style: const TextStyle(fontSize: 10, color: JalaPalette.muted),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                if (h.latencyMs != null)
+                                  Text(
+                                    '${h.latencyMs}ms',
+                                    style: const TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: JalaPalette.ok,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
         ],
-      ),
-      bottomNavigationBar: Container(
-        decoration: const BoxDecoration(
-          color: JalaPalette.header,
-          border: Border(top: BorderSide(color: JalaPalette.line, width: 1)),
-        ),
-        child: NavigationBarTheme(
-          data: NavigationBarThemeData(
-            backgroundColor: JalaPalette.header,
-            indicatorColor: JalaPalette.selected,
-            labelTextStyle: WidgetStateProperty.resolveWith((states) {
-              final selected = states.contains(WidgetState.selected);
-              return TextStyle(
-                fontSize: 11,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                color: selected ? JalaPalette.brandGold : JalaPalette.muted,
-              );
-            }),
-            iconTheme: WidgetStateProperty.resolveWith((states) {
-              final selected = states.contains(WidgetState.selected);
-              return IconThemeData(
-                size: 20,
-                color: selected ? JalaPalette.brandGold : JalaPalette.muted,
-              );
-            }),
-          ),
-          child: NavigationBar(
-            height: 62,
-            selectedIndex: _tabIndex,
-            onDestinationSelected: (idx) => setState(() => _tabIndex = idx),
-            destinations: const [
-              NavigationDestination(
-                icon: Icon(Icons.dns_outlined),
-                selectedIcon: Icon(Icons.dns_rounded),
-                label: 'Connections',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.desktop_windows_outlined),
-                selectedIcon: Icon(Icons.desktop_windows_rounded),
-                label: 'RDP / VNC',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.terminal_outlined),
-                selectedIcon: Icon(Icons.terminal_rounded),
-                label: 'SSH & SFTP',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.shield_outlined),
-                selectedIcon: Icon(Icons.shield_rounded),
-                label: 'Vault & 2FA',
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }
@@ -2491,219 +2878,244 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         ? '—'
         : '${(latencies.reduce((a, b) => a + b) / latencies.length).toStringAsFixed(0)} ms';
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
-      children: [
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [JalaPalette.chip, JalaPalette.surface],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.circular(13),
-            border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.35)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.25),
-                blurRadius: 12,
-                offset: const Offset(0, 4),
-              ),
-            ],
-          ),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  _buildJalaBrandLogo(size: 40, radius: 10),
-                  const SizedBox(width: 11),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'JalaDesk Enterprise Vault',
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                            color: JalaPalette.text,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          _pairedDesktopInfo,
-                          style: const TextStyle(fontSize: 11, color: JalaPalette.text2),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
+    return LayoutBuilder(
+      builder: (ctx, constraints) {
+        final double availW = constraints.maxWidth;
+        final int columns = availW >= 980 ? 3 : (availW >= 600 ? 2 : 1);
+        const double spacing = 10.0;
+        const double horizontalPad = 14.0;
+        final double cardW = columns == 1
+            ? (availW - horizontalPad * 2)
+            : ((availW - horizontalPad * 2 - spacing * (columns - 1)) / columns);
+
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [JalaPalette.chip, JalaPalette.surface],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(13),
+                border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.35)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.25),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
                   ),
-                  const SizedBox(width: 6),
-                  FilledButton.tonal(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: JalaPalette.selected,
-                      foregroundColor: JalaPalette.brandGold,
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      minimumSize: const Size(0, 32),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                        side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.4)),
+                ],
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      _buildJalaBrandLogo(size: 40, radius: 10),
+                      const SizedBox(width: 11),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'JalaDesk Enterprise Vault',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                                color: JalaPalette.text,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              _pairedDesktopInfo,
+                              style: const TextStyle(fontSize: 11, color: JalaPalette.text2),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      FilledButton.tonal(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: JalaPalette.selected,
+                          foregroundColor: JalaPalette.brandGold,
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          minimumSize: const Size(0, 32),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.4)),
+                          ),
+                        ),
+                        onPressed: () => _showHostEditorDialog(),
+                        child: const Text('+ Add Host', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      _buildTelemetryMetricPill('${_hosts.length} SAVED', '$onlineCount Reachable', JalaPalette.ok),
+                      const SizedBox(width: 8),
+                      _buildTelemetryMetricPill(avgRtt, 'Live TCP RTT', JalaPalette.accentLine),
+                      const SizedBox(width: 8),
+                      _buildTelemetryMetricPill('AES-256', 'Zero-Trust GCM', JalaPalette.brandGold),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    onChanged: (v) => setState(() => _searchQuery = v),
+                    style: const TextStyle(fontSize: 13, color: JalaPalette.text),
+                    decoration: InputDecoration(
+                      hintText: 'Search servers, IPs, folders...',
+                      hintStyle: const TextStyle(fontSize: 12.5, color: JalaPalette.muted),
+                      prefixIcon: const Icon(Icons.search_rounded, size: 18, color: JalaPalette.brandGold),
+                      filled: true,
+                      fillColor: JalaPalette.aside,
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 11, horizontal: 12),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: JalaPalette.lineInput, width: 1),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: JalaPalette.accentLine, width: 1.5),
                       ),
                     ),
-                    onPressed: () => _showHostEditorDialog(),
-                    child: const Text('+ Add Host', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  _buildTelemetryMetricPill('${_hosts.length} SAVED', '$onlineCount Reachable', JalaPalette.ok),
-                  const SizedBox(width: 8),
-                  _buildTelemetryMetricPill(avgRtt, 'Live TCP RTT', JalaPalette.accentLine),
-                  const SizedBox(width: 8),
-                  _buildTelemetryMetricPill('AES-256', 'Zero-Trust GCM', JalaPalette.brandGold),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                onChanged: (v) => setState(() => _searchQuery = v),
-                style: const TextStyle(fontSize: 13, color: JalaPalette.text),
-                decoration: InputDecoration(
-                  hintText: 'Search servers, IPs, folders...',
-                  hintStyle: const TextStyle(fontSize: 12.5, color: JalaPalette.muted),
-                  prefixIcon: const Icon(Icons.search_rounded, size: 18, color: JalaPalette.brandGold),
-                  filled: true,
-                  fillColor: JalaPalette.aside,
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 11, horizontal: 12),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: JalaPalette.lineInput, width: 1),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: JalaPalette.accentLine, width: 1.5),
                   ),
                 ),
+                if (_hosts.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: 'Probe Live TCP Latency',
+                    onPressed: _probingAll ? null : _probeAllHosts,
+                    style: IconButton.styleFrom(
+                      backgroundColor: JalaPalette.surface,
+                      side: const BorderSide(color: JalaPalette.lineInput),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    icon: Icon(
+                      Icons.network_ping_rounded,
+                      size: 18,
+                      color: _probingAll ? JalaPalette.muted : JalaPalette.brandGold,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 10),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  for (final proto in ['ALL', 'SSH', 'RDP', 'VNC', 'SFTP', 'HYPERVISOR'])
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => setState(() => _protocolFilter = proto),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 140),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: _protocolFilter == proto ? JalaPalette.selected : JalaPalette.surface,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: _protocolFilter == proto ? JalaPalette.brandGold : JalaPalette.line,
+                              width: 1,
+                            ),
+                          ),
+                          child: Text(
+                            proto,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: _protocolFilter == proto ? FontWeight.w700 : FontWeight.w500,
+                              color: _protocolFilter == proto ? JalaPalette.brandGold : JalaPalette.text2,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
-            if (_hosts.isNotEmpty) ...[
-              const SizedBox(width: 8),
-              IconButton(
-                tooltip: 'Probe Live TCP Latency',
-                onPressed: _probingAll ? null : _probeAllHosts,
-                style: IconButton.styleFrom(
-                  backgroundColor: JalaPalette.surface,
-                  side: const BorderSide(color: JalaPalette.lineInput),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            const SizedBox(height: 12),
+            if (_hosts.isEmpty && _vaultLoaded)
+              _buildEmptyConnectionsCard()
+            else if (filtered.isEmpty)
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: JalaPalette.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: JalaPalette.line),
                 ),
-                icon: Icon(
-                  Icons.network_ping_rounded,
-                  size: 18,
-                  color: _probingAll ? JalaPalette.muted : JalaPalette.brandGold,
+                child: const Center(
+                  child: Text(
+                    'No connections match the active filter.',
+                    style: TextStyle(fontSize: 12.5, color: JalaPalette.muted),
+                  ),
                 ),
+              )
+            else ...[
+              if (columns == 1)
+                for (final host in filtered) _buildHostCard(host)
+              else
+                Wrap(
+                  spacing: spacing,
+                  runSpacing: 0,
+                  children: [
+                    for (final host in filtered)
+                      SizedBox(
+                        width: cardW,
+                        child: _buildHostCard(host),
+                      ),
+                  ],
+                ),
+              const SizedBox(height: 6),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  TextButton.icon(
+                    onPressed: () => _showHostEditorDialog(),
+                    icon: const Icon(Icons.add_circle_outline_rounded, size: 16, color: JalaPalette.brandGold),
+                    label: const Text(
+                      'Add New Connection',
+                      style: TextStyle(fontSize: 12, color: JalaPalette.brandGold, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        _hosts.clear();
+                        _activeRdpHost = null;
+                        _activeSshHost = null;
+                      });
+                      _saveVaultToDisk();
+                    },
+                    icon: const Icon(Icons.delete_sweep_outlined, size: 16, color: JalaPalette.muted),
+                    label: const Text(
+                      'Clear Vault',
+                      style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
+                    ),
+                  ),
+                ],
               ),
             ],
           ],
-        ),
-        const SizedBox(height: 10),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            children: [
-              for (final proto in ['ALL', 'SSH', 'RDP', 'VNC', 'SFTP', 'HYPERVISOR'])
-                Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(8),
-                    onTap: () => setState(() => _protocolFilter = proto),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 140),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: _protocolFilter == proto ? JalaPalette.selected : JalaPalette.surface,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: _protocolFilter == proto ? JalaPalette.brandGold : JalaPalette.line,
-                          width: 1,
-                        ),
-                      ),
-                      child: Text(
-                        proto,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: _protocolFilter == proto ? FontWeight.w700 : FontWeight.w500,
-                          color: _protocolFilter == proto ? JalaPalette.brandGold : JalaPalette.text2,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        if (_hosts.isEmpty && _vaultLoaded)
-          _buildEmptyConnectionsCard()
-        else if (filtered.isEmpty)
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: JalaPalette.surface,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: JalaPalette.line),
-            ),
-            child: const Center(
-              child: Text(
-                'No connections match the active filter.',
-                style: TextStyle(fontSize: 12.5, color: JalaPalette.muted),
-              ),
-            ),
-          )
-        else ...[
-          for (final host in filtered) _buildHostCard(host),
-          const SizedBox(height: 6),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              TextButton.icon(
-                onPressed: () => _showHostEditorDialog(),
-                icon: const Icon(Icons.add_circle_outline_rounded, size: 16, color: JalaPalette.brandGold),
-                label: const Text(
-                  'Add New Connection',
-                  style: TextStyle(fontSize: 12, color: JalaPalette.brandGold, fontWeight: FontWeight.w600),
-                ),
-              ),
-              TextButton.icon(
-                onPressed: () {
-                  setState(() {
-                    _hosts.clear();
-                    _activeRdpHost = null;
-                    _activeSshHost = null;
-                  });
-                  _saveVaultToDisk();
-                },
-                icon: const Icon(Icons.delete_sweep_outlined, size: 16, color: JalaPalette.muted),
-                label: const Text(
-                  'Clear Vault',
-                  style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ],
+        );
+      },
     );
   }
 
@@ -2961,105 +3373,376 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     );
   }
 
-  /// Jump Desktop-style Touch RDP / VNC Canvas with Real Live Framebuffer (`ui.Image`) & Keyboard Input
-  Widget _buildJumpRdpCanvasTab() {
+  /// Show Jump Desktop-style Display Resolution & Aspect Ratio Sheet
+  void _showDisplaySizingModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: JalaPalette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.aspect_ratio_rounded, size: 18, color: JalaPalette.brandGold),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text(
+                            'Jump Display Sizing & Aspect Match',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: JalaPalette.text),
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: JalaPalette.selected,
+                            borderRadius: BorderRadius.circular(99),
+                            border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.5)),
+                          ),
+                          child: Text(
+                            'Active: ${_desktopServerWidth}x$_desktopServerHeight',
+                            style: const TextStyle(
+                              fontSize: 10.5,
+                              fontFamily: 'monospace',
+                              fontWeight: FontWeight.w700,
+                              color: JalaPalette.brandGold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Automatically matches the remote GUI desktop resolution and aspect ratio to your phone, foldable, or tablet screen (FreeRDP DisplayControl DVC).',
+                      style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'REMOTE DESKTOP RESOLUTION',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.5,
+                        color: JalaPalette.brandGold,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final preset in JumpResolutionPreset.values)
+                          ChoiceChip(
+                            label: Text(preset.shortLabel, style: const TextStyle(fontSize: 11.5)),
+                            selected: _resolutionPreset == preset,
+                            selectedColor: JalaPalette.selected,
+                            backgroundColor: JalaPalette.header,
+                            labelStyle: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: _resolutionPreset == preset ? JalaPalette.brandGold : JalaPalette.text2,
+                            ),
+                            side: BorderSide(
+                              color: _resolutionPreset == preset ? JalaPalette.brandGold : JalaPalette.lineInput,
+                            ),
+                            onSelected: (_) {
+                              setState(() {
+                                _resolutionPreset = preset;
+                                if (preset == JumpResolutionPreset.matchDisplay ||
+                                    preset == JumpResolutionPreset.matchHiDpi) {
+                                  _canvasFitMode = JumpCanvasFitMode.aspectFit;
+                                }
+                              });
+                              setModalState(() {});
+                              _applyTargetResolutionToActiveSession();
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'VIEWPORT SCALING MODE',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.5,
+                        color: JalaPalette.brandGold,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final fitMode in JumpCanvasFitMode.values)
+                          ChoiceChip(
+                            label: Text(fitMode.shortLabel, style: const TextStyle(fontSize: 11.5)),
+                            selected: _canvasFitMode == fitMode,
+                            selectedColor: JalaPalette.selected,
+                            backgroundColor: JalaPalette.header,
+                            labelStyle: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: _canvasFitMode == fitMode ? JalaPalette.brandGold : JalaPalette.text2,
+                            ),
+                            side: BorderSide(
+                              color: _canvasFitMode == fitMode ? JalaPalette.brandGold : JalaPalette.lineInput,
+                            ),
+                            onSelected: (_) {
+                              setState(() => _canvasFitMode = fitMode);
+                              setModalState(() {});
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: JalaPalette.text,
+                              side: const BorderSide(color: JalaPalette.lineInput),
+                            ),
+                            onPressed: () {
+                              Navigator.of(ctx).pop();
+                              toggleLandscapeOrientation();
+                            },
+                            icon: const Icon(Icons.screen_rotation_rounded, size: 15),
+                            label: Text(
+                              _landscapeLocked ? 'Unlock Orientation' : 'Force Landscape',
+                              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: FilledButton.icon(
+                            style: FilledButton.styleFrom(
+                              backgroundColor: JalaPalette.accent,
+                              foregroundColor: Colors.white,
+                            ),
+                            onPressed: () {
+                              Navigator.of(ctx).pop();
+                              toggleFullScreen();
+                            },
+                            icon: Icon(
+                              _isFullScreen ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
+                              size: 16,
+                            ),
+                            label: Text(
+                              _isFullScreen ? 'Exit Full Screen' : 'Max Full Screen',
+                              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// Jump Desktop-style Touch RDP / VNC Canvas with Real Live Framebuffer (`ui.Image`),
+  /// Dynamic Display Resolution Matching (`DispClientContext`), and Immersive Full-Screen Mode
+  Widget _buildJumpRdpCanvasTab({bool isFullScreen = false, bool isWideScreen = false}) {
     final hostTitle = _activeRdpHost != null
         ? '${_activeRdpHost!.name} (${_activeRdpHost!.address}:${_activeRdpHost!.port})'
         : 'No Remote Desktop Selected';
 
     return Column(
       children: [
-        // Top HUD bar
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          decoration: const BoxDecoration(
-            color: JalaPalette.bar,
-            border: Border(bottom: BorderSide(color: JalaPalette.line)),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                Icons.desktop_windows_rounded,
-                size: 14,
-                color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
-              ),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  hostTitle,
-                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: JalaPalette.text),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+        // Top HUD bar (hidden in Full Screen mode for 100% edge-to-edge canvas)
+        if (!isFullScreen)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: const BoxDecoration(
+              color: JalaPalette.bar,
+              border: Border(bottom: BorderSide(color: JalaPalette.line)),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.desktop_windows_rounded,
+                  size: 14,
+                  color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
                 ),
-              ),
-              const SizedBox(width: 4),
-              Flexible(
-                flex: 0,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(2),
-                        decoration: BoxDecoration(
-                          color: JalaPalette.header,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: JalaPalette.lineInput),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _buildTouchModeOption('Trackpad', true),
-                            _buildTouchModeOption('Direct Touch', false),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      InkWell(
-                        borderRadius: BorderRadius.circular(7),
-                        onTap: () => setState(() => _showDesktopKeyboardBar = !_showDesktopKeyboardBar),
-                        child: Container(
-                          width: 26,
-                          height: 26,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: _showDesktopKeyboardBar ? JalaPalette.selected : JalaPalette.header,
-                            borderRadius: BorderRadius.circular(7),
-                            border: Border.all(
-                              color: _showDesktopKeyboardBar ? JalaPalette.brandGold : JalaPalette.lineInput,
-                            ),
-                          ),
-                          child: const Icon(Icons.keyboard_alt_outlined, size: 14, color: JalaPalette.brandGold),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      InkWell(
-                        borderRadius: BorderRadius.circular(7),
-                        onTap: () => setState(() => _viewOnly = !_viewOnly),
-                        child: Container(
-                          width: 26,
-                          height: 26,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: JalaPalette.header,
-                            borderRadius: BorderRadius.circular(7),
-                            border: Border.all(color: JalaPalette.lineInput),
-                          ),
-                          child: Icon(
-                            _viewOnly ? Icons.lock_rounded : Icons.lock_open_rounded,
-                            size: 14,
-                            color: _viewOnly ? JalaPalette.amber : JalaPalette.ok,
-                          ),
-                        ),
-                      ),
-                    ],
+                const SizedBox(width: 5),
+                Expanded(
+                  flex: 2,
+                  child: Text(
+                    hostTitle,
+                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-              ),
-            ],
+                const SizedBox(width: 4),
+                Flexible(
+                  flex: 5,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Jump Display Sizing & Aspect Ratio Match Pill
+                        InkWell(
+                          key: const ValueKey('btn_display_sizing'),
+                          borderRadius: BorderRadius.circular(7),
+                          onTap: _showDisplaySizingModal,
+                          child: Container(
+                            height: 26,
+                            padding: const EdgeInsets.symmetric(horizontal: 7),
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: JalaPalette.selected,
+                              borderRadius: BorderRadius.circular(7),
+                              border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.65)),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.aspect_ratio_rounded, size: 13, color: JalaPalette.brandGold),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${_resolutionPreset.shortLabel} • ${_canvasFitMode.shortLabel}',
+                                  style: const TextStyle(
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: JalaPalette.brandGold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: BoxDecoration(
+                            color: JalaPalette.header,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: JalaPalette.lineInput),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _buildTouchModeOption('Trackpad', true),
+                              _buildTouchModeOption('Direct Touch', false),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        // Keyboard Input Bar Toggle
+                        InkWell(
+                          borderRadius: BorderRadius.circular(7),
+                          onTap: () => setState(() => _showDesktopKeyboardBar = !_showDesktopKeyboardBar),
+                          child: Container(
+                            width: 26,
+                            height: 26,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: _showDesktopKeyboardBar ? JalaPalette.selected : JalaPalette.header,
+                              borderRadius: BorderRadius.circular(7),
+                              border: Border.all(
+                                color: _showDesktopKeyboardBar ? JalaPalette.brandGold : JalaPalette.lineInput,
+                              ),
+                            ),
+                            child: const Icon(Icons.keyboard_alt_outlined, size: 14, color: JalaPalette.brandGold),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        // Rotate Landscape / Portrait Toggle
+                        InkWell(
+                          key: const ValueKey('btn_rotate_orientation'),
+                          borderRadius: BorderRadius.circular(7),
+                          onTap: () => toggleLandscapeOrientation(),
+                          child: Container(
+                            width: 26,
+                            height: 26,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: _landscapeLocked ? JalaPalette.selected : JalaPalette.header,
+                              borderRadius: BorderRadius.circular(7),
+                              border: Border.all(
+                                color: _landscapeLocked ? JalaPalette.brandGold : JalaPalette.lineInput,
+                              ),
+                            ),
+                            child: const Icon(Icons.screen_rotation_rounded, size: 14, color: JalaPalette.brandGold),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        // Immersive Edge-to-Edge Full Screen Toggle
+                        InkWell(
+                          key: const ValueKey('btn_toggle_fullscreen'),
+                          borderRadius: BorderRadius.circular(7),
+                          onTap: () => toggleFullScreen(),
+                          child: Container(
+                            height: 26,
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: JalaPalette.accent.withValues(alpha: 0.22),
+                              borderRadius: BorderRadius.circular(7),
+                              border: Border.all(color: JalaPalette.accentLine),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.fullscreen_rounded, size: 15, color: JalaPalette.brandGold),
+                                SizedBox(width: 2),
+                                Text(
+                                  'Full',
+                                  style: TextStyle(
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.w800,
+                                    color: JalaPalette.brandGold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        // View-Only Lock Toggle
+                        InkWell(
+                          borderRadius: BorderRadius.circular(7),
+                          onTap: () => setState(() => _viewOnly = !_viewOnly),
+                          child: Container(
+                            width: 26,
+                            height: 26,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: JalaPalette.header,
+                              borderRadius: BorderRadius.circular(7),
+                              border: Border.all(color: JalaPalette.lineInput),
+                            ),
+                            child: Icon(
+                              _viewOnly ? Icons.lock_rounded : Icons.lock_open_rounded,
+                              size: 14,
+                              color: _viewOnly ? JalaPalette.amber : JalaPalette.ok,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
         if (_showDesktopKeyboardBar)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -3114,314 +3797,481 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         Expanded(
           child: LayoutBuilder(
             builder: (ctx, constraints) {
-              final canvasW = (constraints.maxWidth - 24).clamp(160.0, 4096.0);
-              final canvasH = (constraints.maxHeight - 24).clamp(120.0, 4096.0);
-              return GestureDetector(
-                onPanUpdate: (details) {
-                  if (_viewOnly) return;
-                  if (_trackpadMode) {
-                    setState(() {
-                      _cursorPos = Offset(
-                        (_cursorPos.dx + details.delta.dx * 1.35).clamp(8.0, canvasW - 8.0),
-                        (_cursorPos.dy + details.delta.dy * 1.35).clamp(8.0, canvasH - 8.0),
+              final margin = isFullScreen ? 0.0 : (isWideScreen ? 6.0 : 8.0);
+              final canvasW = (constraints.maxWidth - margin * 2).clamp(160.0, 4096.0);
+              final canvasH = (constraints.maxHeight - margin * 2).clamp(120.0, 4096.0);
+              final viewportSize = Size(canvasW, canvasH);
+
+              // Notify Jump Auto-Match engine when viewport dimensions change (foldable unfold / orientation / fullscreen)
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _onViewportDimensionsMeasured(viewportSize);
+              });
+
+              final desktopRect = _computeRenderedDesktopRect(viewportSize);
+              final pointerPx = Offset(
+                desktopRect.left + _cursorNorm.dx.clamp(0.0, 1.0) * desktopRect.width,
+                desktopRect.top + _cursorNorm.dy.clamp(0.0, 1.0) * desktopRect.height,
+              );
+
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  GestureDetector(
+                    onPanUpdate: (details) {
+                      if (_viewOnly) return;
+                      if (_trackpadMode) {
+                        setState(() {
+                          final nextDx =
+                              (_cursorNorm.dx + (details.delta.dx * 1.25) / desktopRect.width).clamp(0.0, 1.0);
+                          final nextDy =
+                              (_cursorNorm.dy + (details.delta.dy * 1.25) / desktopRect.height).clamp(0.0, 1.0);
+                          _cursorNorm = Offset(nextDx, nextDy);
+                        });
+                        _dispatchDesktopPointer(
+                          normX: _cursorNorm.dx,
+                          normY: _cursorNorm.dy,
+                        );
+                      }
+                    },
+                    onTapDown: (details) {
+                      if (_viewOnly) return;
+                      setState(() {
+                        if (!_trackpadMode) {
+                          final relX =
+                              ((details.localPosition.dx - margin - desktopRect.left) / desktopRect.width)
+                                  .clamp(0.0, 1.0);
+                          final relY =
+                              ((details.localPosition.dy - margin - desktopRect.top) / desktopRect.height)
+                                  .clamp(0.0, 1.0);
+                          _cursorNorm = Offset(relX, relY);
+                        }
+                        _lastRdpAction =
+                            'Left Click @ (${(_cursorNorm.dx * _desktopServerWidth).round()}, ${(_cursorNorm.dy * _desktopServerHeight).round()}) [${_activeModifierSummary()}]';
+                      });
+                      _dispatchDesktopPointer(
+                        normX: _cursorNorm.dx,
+                        normY: _cursorNorm.dy,
+                        click: true,
                       );
-                    });
-                    _dispatchDesktopPointer(
-                      normX: _cursorPos.dx / canvasW,
-                      normY: _cursorPos.dy / canvasH,
-                    );
-                  }
-                },
-                onTapDown: (details) {
-                  if (_viewOnly) return;
-                  setState(() {
-                    if (!_trackpadMode) {
-                      _cursorPos = Offset(
-                        details.localPosition.dx.clamp(8.0, canvasW - 8.0),
-                        details.localPosition.dy.clamp(8.0, canvasH - 8.0),
+                    },
+                    onDoubleTap: () {
+                      if (_viewOnly) return;
+                      setState(() {
+                        _lastRdpAction =
+                            'Double Click @ (${(_cursorNorm.dx * _desktopServerWidth).round()}, ${(_cursorNorm.dy * _desktopServerHeight).round()})';
+                      });
+                      _dispatchDesktopPointer(
+                        normX: _cursorNorm.dx,
+                        normY: _cursorNorm.dy,
+                        doubleClick: true,
                       );
-                    }
-                    _lastRdpAction =
-                        'Left Click @ (${(_cursorPos.dx / canvasW * _desktopServerWidth).round()}, ${(_cursorPos.dy / canvasH * _desktopServerHeight).round()}) [${_activeModifierSummary()}]';
-                  });
-                  _dispatchDesktopPointer(
-                    normX: _cursorPos.dx / canvasW,
-                    normY: _cursorPos.dy / canvasH,
-                    click: true,
-                  );
-                },
-                onDoubleTap: () {
-                  if (_viewOnly) return;
-                  setState(() {
-                    _lastRdpAction = 'Double Click @ (${_cursorPos.dx.toInt()}, ${_cursorPos.dy.toInt()})';
-                  });
-                  _dispatchDesktopPointer(
-                    normX: _cursorPos.dx / canvasW,
-                    normY: _cursorPos.dy / canvasH,
-                    doubleClick: true,
-                  );
-                },
-                onSecondaryTap: () {
-                  if (_viewOnly) return;
-                  setState(() {
-                    _lastRdpAction = 'Right Click @ (${_cursorPos.dx.toInt()}, ${_cursorPos.dy.toInt()})';
-                  });
-                  _dispatchDesktopPointer(
-                    normX: _cursorPos.dx / canvasW,
-                    normY: _cursorPos.dy / canvasH,
-                    rightClick: true,
-                  );
-                },
-                child: InteractiveViewer(
-                  minScale: 1.0,
-                  maxScale: 4.0,
-                  child: Container(
-                    margin: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: JalaPalette.splashBg,
-                      gradient: _remoteDesktopFrame == null
-                          ? const LinearGradient(
-                              colors: [JalaPalette.header, JalaPalette.chip, JalaPalette.selected],
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                            )
-                          : null,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: _desktopLiveConnected
-                            ? JalaPalette.ok.withValues(alpha: 0.75)
-                            : JalaPalette.accentLine.withValues(alpha: 0.55),
-                      ),
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        // REAL LIVE REMOTE DESKTOP PIXEL FRAMEBUFFER (FreeRDP 3.x / VNC RFB 3.8)
-                        if (_remoteDesktopFrame != null)
-                          RawImage(
-                            image: _remoteDesktopFrame,
-                            fit: BoxFit.fill,
-                            filterQuality: FilterQuality.medium,
-                          ),
-                        // Top overlay HUD (only shown when no pixel frame has arrived yet)
-                        if (_remoteDesktopFrame == null)
-                          Positioned(
-                            top: 14,
-                            left: 14,
-                            right: 14,
-                            child: Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: JalaPalette.header.withValues(alpha: 0.9),
-                                borderRadius: BorderRadius.circular(9),
-                                border: Border.all(color: JalaPalette.lineInput),
+                    },
+                    onSecondaryTap: () {
+                      if (_viewOnly) return;
+                      setState(() {
+                        _lastRdpAction =
+                            'Right Click @ (${(_cursorNorm.dx * _desktopServerWidth).round()}, ${(_cursorNorm.dy * _desktopServerHeight).round()})';
+                      });
+                      _dispatchDesktopPointer(
+                        normX: _cursorNorm.dx,
+                        normY: _cursorNorm.dy,
+                        rightClick: true,
+                      );
+                    },
+                    child: InteractiveViewer(
+                      transformationController: _canvasTransformCtrl,
+                      minScale: 1.0,
+                      maxScale: 5.0,
+                      child: Container(
+                        key: const ValueKey('remote_desktop_viewport_container'),
+                        margin: EdgeInsets.all(margin),
+                        decoration: BoxDecoration(
+                          color: JalaPalette.splashBg,
+                          gradient: _remoteDesktopFrame == null
+                              ? const LinearGradient(
+                                  colors: [JalaPalette.header, JalaPalette.chip, JalaPalette.selected],
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                )
+                              : null,
+                          borderRadius: BorderRadius.circular(isFullScreen ? 0 : 12),
+                          border: isFullScreen
+                              ? null
+                              : Border.all(
+                                  color: _desktopLiveConnected
+                                      ? JalaPalette.ok.withValues(alpha: 0.75)
+                                      : JalaPalette.accentLine.withValues(alpha: 0.55),
+                                ),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            // REAL LIVE REMOTE DESKTOP PIXEL FRAMEBUFFER (FreeRDP 3.x / VNC RFB 3.8)
+                            // Positioned at the exact Jump aspect-fitted rectangle so Direct Touch & Trackpad coordinates
+                            // map 1:1 to remote desktop server pixels with zero aspect distortion.
+                            if (_remoteDesktopFrame != null)
+                              Positioned.fromRect(
+                                rect: desktopRect,
+                                child: RawImage(
+                                  image: _remoteDesktopFrame,
+                                  fit: BoxFit.fill,
+                                  filterQuality: FilterQuality.medium,
+                                ),
                               ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
+                            // Top overlay HUD (only shown when no pixel frame has arrived yet)
+                            if (_remoteDesktopFrame == null)
+                              Positioned(
+                                top: 14,
+                                left: 14,
+                                right: 14,
+                                child: Container(
+                                  padding: const EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: JalaPalette.header.withValues(alpha: 0.9),
+                                    borderRadius: BorderRadius.circular(9),
+                                    border: Border.all(color: JalaPalette.lineInput),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      _buildJalaBrandLogo(size: 20, radius: 5),
+                                      Row(
+                                        children: [
+                                          _buildJalaBrandLogo(size: 20, radius: 5),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              _desktopLiveConnected
+                                                  ? 'LIVE STREAM • $_desktopProtocolBanner'
+                                                  : 'REMOTE DESKTOP CANVAS • ${_activeRdpHost?.osLabel ?? "READY"}',
+                                              style: TextStyle(
+                                                fontSize: 10.5,
+                                                fontWeight: FontWeight.w700,
+                                                color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
+                                              ),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                          if (_activeRdpHost != null)
+                                            SizedBox(
+                                              height: 26,
+                                              child: FilledButton.tonal(
+                                                style: FilledButton.styleFrom(
+                                                  backgroundColor: JalaPalette.selected,
+                                                  foregroundColor: JalaPalette.brandGold,
+                                                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                                                ),
+                                                onPressed: () => _connectToHost(_activeRdpHost!),
+                                                child: Text(
+                                                  _desktopLiveConnected ? 'Reconnect' : 'Connect Live',
+                                                  style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700),
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        _lastRdpAction,
+                                        style: const TextStyle(fontSize: 11.5, color: JalaPalette.text),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            // Precision Trackpad Virtual Pointer
+                            Positioned(
+                              left: pointerPx.dx.clamp(4.0, (canvasW - 44.0).clamp(4.0, 4096.0)),
+                              top: pointerPx.dy.clamp(4.0, (canvasH - 36.0).clamp(4.0, 4096.0)),
+                              child: IgnorePointer(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Icon(Icons.near_me_rounded, color: JalaPalette.brandGold, size: 20),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                      decoration: BoxDecoration(
+                                        color: JalaPalette.header.withValues(alpha: 0.85),
+                                        borderRadius: BorderRadius.circular(4),
+                                        border: Border.all(color: JalaPalette.brandGold, width: 0.6),
+                                      ),
+                                      child: Text(
+                                        '${(_cursorNorm.dx * _desktopServerWidth).round()},${(_cursorNorm.dy * _desktopServerHeight).round()}',
+                                        style: const TextStyle(fontSize: 9, color: JalaPalette.brandGold),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            // Bottom status bar (hidden in Full Screen mode for unobstructed view)
+                            if (!isFullScreen)
+                              Positioned(
+                                left: 0,
+                                right: 0,
+                                bottom: 0,
+                                child: Container(
+                                  height: 30,
+                                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                                  decoration: BoxDecoration(
+                                    color: JalaPalette.header.withValues(alpha: 0.86),
+                                    border: const Border(top: BorderSide(color: JalaPalette.line)),
+                                  ),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Flexible(
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              Icons.circle,
+                                              size: 8,
+                                              color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.amber,
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Flexible(
+                                              child: Text(
+                                                '${_desktopServerWidth}x$_desktopServerHeight • ${_resolutionPreset.shortLabel} (${_canvasFitMode.shortLabel})',
+                                                style: const TextStyle(
+                                                  fontSize: 10,
+                                                  fontFamily: 'monospace',
+                                                  color: JalaPalette.text2,
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
                                       const SizedBox(width: 8),
-                                      Expanded(
+                                      Flexible(
                                         child: Text(
                                           _desktopLiveConnected
-                                              ? 'LIVE STREAM • $_desktopProtocolBanner'
-                                              : 'REMOTE DESKTOP CANVAS • ${_activeRdpHost?.osLabel ?? "READY"}',
+                                              ? 'LIVE PIXEL STREAM • ${_activeRdpHost?.latencyMs ?? 1}ms'
+                                              : 'JUMP AUTO-MATCH READY',
                                           style: TextStyle(
-                                            fontSize: 10.5,
+                                            fontSize: 10,
                                             fontWeight: FontWeight.w700,
                                             color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
                                           ),
+                                          maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
                                         ),
                                       ),
-                                      if (_activeRdpHost != null)
-                                        SizedBox(
-                                          height: 26,
-                                          child: FilledButton.tonal(
-                                            style: FilledButton.styleFrom(
-                                              backgroundColor: JalaPalette.selected,
-                                              foregroundColor: JalaPalette.brandGold,
-                                              padding: const EdgeInsets.symmetric(horizontal: 8),
-                                            ),
-                                            onPressed: () => _connectToHost(_activeRdpHost!),
-                                            child: Text(
-                                              _desktopLiveConnected ? 'Reconnect' : 'Connect Live',
-                                              style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700),
-                                            ),
-                                          ),
-                                        ),
                                     ],
                                   ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    _lastRdpAction,
-                                    style: const TextStyle(fontSize: 11.5, color: JalaPalette.text),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        // Precision Trackpad Virtual Pointer
-                        Positioned(
-                          left: _cursorPos.dx,
-                          top: _cursorPos.dy,
-                          child: IgnorePointer(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Icon(Icons.near_me_rounded, color: JalaPalette.brandGold, size: 20),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                  decoration: BoxDecoration(
-                                    color: JalaPalette.header.withValues(alpha: 0.85),
-                                    borderRadius: BorderRadius.circular(4),
-                                    border: Border.all(color: JalaPalette.brandGold, width: 0.6),
-                                  ),
-                                  child: Text(
-                                    '${(_cursorPos.dx / canvasW * _desktopServerWidth).round()},${(_cursorPos.dy / canvasH * _desktopServerHeight).round()}',
-                                    style: const TextStyle(fontSize: 9, color: JalaPalette.brandGold),
-                                  ),
                                 ),
-                              ],
-                            ),
-                          ),
+                              ),
+                          ],
                         ),
-                        // Bottom status bar
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          child: Container(
-                            height: 32,
-                            padding: const EdgeInsets.symmetric(horizontal: 10),
-                            decoration: BoxDecoration(
-                              color: JalaPalette.header.withValues(alpha: 0.86),
-                              border: const Border(top: BorderSide(color: JalaPalette.line)),
-                            ),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Row(
+                      ),
+                    ),
+                  ),
+                  // Jump Desktop-style Floating Mini-Pill HUD in Full Screen Mode (above GestureDetector/InteractiveViewer)
+                  if (isFullScreen)
+                    Positioned(
+                      top: 10,
+                      right: 10,
+                      child: SafeArea(
+                        child: Container(
+                          key: const ValueKey('fullscreen_floating_hud'),
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: JalaPalette.header.withValues(alpha: 0.88),
+                            borderRadius: BorderRadius.circular(99),
+                            border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.65)),
+                            boxShadow: const [
+                              BoxShadow(color: Colors.black54, blurRadius: 10, offset: Offset(0, 3)),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              InkWell(
+                                onTap: () => setState(() => _floatingHudExpanded = !_floatingHudExpanded),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Icon(
                                       Icons.circle,
                                       size: 8,
-                                      color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.amber,
+                                      color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
                                     ),
-                                    const SizedBox(width: 6),
+                                    const SizedBox(width: 5),
                                     Text(
                                       '${_desktopServerWidth}x$_desktopServerHeight',
                                       style: const TextStyle(
                                         fontSize: 10,
                                         fontFamily: 'monospace',
-                                        color: JalaPalette.text2,
+                                        fontWeight: FontWeight.w800,
+                                        color: JalaPalette.brandGold,
                                       ),
                                     ),
                                   ],
                                 ),
+                              ),
+                              if (_floatingHudExpanded) ...[
                                 const SizedBox(width: 8),
-                                Flexible(
-                                  child: Text(
-                                    _desktopLiveConnected
-                                        ? 'LIVE PIXEL STREAM • ${_activeRdpHost?.latencyMs ?? 1}ms'
-                                        : 'TOUCH TRACKPAD READY',
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w700,
-                                      color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
+                                InkWell(
+                                  onTap: _showDisplaySizingModal,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: JalaPalette.selected,
+                                      borderRadius: BorderRadius.circular(6),
                                     ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
+                                    child: Text(
+                                      _resolutionPreset.shortLabel,
+                                      style: const TextStyle(
+                                        fontSize: 9.5,
+                                        fontWeight: FontWeight.w700,
+                                        color: JalaPalette.brandGold,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                InkWell(
+                                  onTap: () => setState(() => _showFullScreenModifierBar = !_showFullScreenModifierBar),
+                                  child: Icon(
+                                    Icons.keyboard_command_key_rounded,
+                                    size: 15,
+                                    color: _showFullScreenModifierBar ? JalaPalette.brandGold : JalaPalette.text2,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                InkWell(
+                                  onTap: () => setState(() => _showDesktopKeyboardBar = !_showDesktopKeyboardBar),
+                                  child: Icon(
+                                    Icons.keyboard_alt_outlined,
+                                    size: 15,
+                                    color: _showDesktopKeyboardBar ? JalaPalette.brandGold : JalaPalette.text2,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                InkWell(
+                                  onTap: () => toggleLandscapeOrientation(),
+                                  child: Icon(
+                                    Icons.screen_rotation_rounded,
+                                    size: 15,
+                                    color: _landscapeLocked ? JalaPalette.brandGold : JalaPalette.text2,
                                   ),
                                 ),
                               ],
-                            ),
+                              const SizedBox(width: 8),
+                              InkWell(
+                                key: const ValueKey('btn_exit_fullscreen_pill'),
+                                onTap: () => toggleFullScreen(false),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: JalaPalette.danger.withValues(alpha: 0.2),
+                                    borderRadius: BorderRadius.circular(99),
+                                    border: Border.all(color: JalaPalette.danger.withValues(alpha: 0.6)),
+                                  ),
+                                  child: const Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.fullscreen_exit_rounded, size: 13, color: JalaPalette.brandGold),
+                                      SizedBox(width: 2),
+                                      Text(
+                                        'Exit',
+                                        style: TextStyle(
+                                          fontSize: 9.5,
+                                          fontWeight: FontWeight.w800,
+                                          color: JalaPalette.brandGold,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
-                  ),
-                ),
+                ],
               );
             },
           ),
         ),
-        // Extended On-Screen Modifier & Function Key Strip
-        Container(
-          decoration: const BoxDecoration(
-            color: JalaPalette.header,
-            border: Border(top: BorderSide(color: JalaPalette.line)),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: ActionChip(
-                    backgroundColor: JalaPalette.selected,
-                    side: const BorderSide(color: JalaPalette.brandGold),
-                    label: const Text(
-                      'R-Click',
-                      style: TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
-                    ),
-                    onPressed: _viewOnly
-                        ? null
-                        : () {
-                            HapticFeedback.lightImpact();
-                            _dispatchDesktopPointer(normX: 0.5, normY: 0.5, rightClick: true);
-                          },
-                  ),
-                ),
-                _buildModifierChip('Ctrl', _ctrlLocked, (v) => setState(() => _ctrlLocked = v)),
-                _buildModifierChip('Alt', _altLocked, (v) => setState(() => _altLocked = v)),
-                _buildModifierChip('⌘/Win', _winLocked, (v) => setState(() => _winLocked = v)),
-                _buildModifierChip('Shift', _shiftLocked, (v) => setState(() => _shiftLocked = v)),
-                for (final keyLabel in [
-                  'Esc',
-                  'Tab',
-                  'Enter',
-                  'Bksp',
-                  'Ctrl+Alt+Del',
-                  'Win+D',
-                  '←',
-                  '↑',
-                  '↓',
-                  '→',
-                  'F1',
-                  'F5',
-                  'F11',
-                  'F12',
-                ])
+        // Extended On-Screen Modifier & Function Key Strip (shown normally, or optionally in Full Screen)
+        if (!isFullScreen || _showFullScreenModifierBar)
+          Container(
+            decoration: const BoxDecoration(
+              color: JalaPalette.header,
+              border: Border(top: BorderSide(color: JalaPalette.line)),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
                   Padding(
                     padding: const EdgeInsets.only(right: 6),
                     child: ActionChip(
-                      backgroundColor: JalaPalette.surface,
-                      side: const BorderSide(color: JalaPalette.lineInput),
-                      label: Text(
-                        keyLabel,
-                        style: const TextStyle(fontSize: 11.5, color: JalaPalette.text, fontWeight: FontWeight.w600),
+                      backgroundColor: JalaPalette.selected,
+                      side: const BorderSide(color: JalaPalette.brandGold),
+                      label: const Text(
+                        'R-Click',
+                        style: TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
                       ),
                       onPressed: _viewOnly
                           ? null
                           : () {
                               HapticFeedback.lightImpact();
-                              _dispatchDesktopKey(keyLabel);
-                              setState(() {
-                                _lastRdpAction =
-                                    'Sent Key: [${_activeModifierSummary()}$keyLabel] to ${_activeRdpHost?.name ?? "session"}';
-                              });
+                              _dispatchDesktopPointer(normX: _cursorNorm.dx, normY: _cursorNorm.dy, rightClick: true);
                             },
                     ),
                   ),
-              ],
+                  _buildModifierChip('Ctrl', _ctrlLocked, (v) => setState(() => _ctrlLocked = v)),
+                  _buildModifierChip('Alt', _altLocked, (v) => setState(() => _altLocked = v)),
+                  _buildModifierChip('⌘/Win', _winLocked, (v) => setState(() => _winLocked = v)),
+                  _buildModifierChip('Shift', _shiftLocked, (v) => setState(() => _shiftLocked = v)),
+                  for (final keyLabel in [
+                    'Esc',
+                    'Tab',
+                    'Enter',
+                    'Bksp',
+                    'Ctrl+Alt+Del',
+                    'Win+D',
+                    '←',
+                    '↑',
+                    '↓',
+                    '→',
+                    'F1',
+                    'F5',
+                    'F11',
+                    'F12',
+                  ])
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: ActionChip(
+                        backgroundColor: JalaPalette.surface,
+                        side: const BorderSide(color: JalaPalette.lineInput),
+                        label: Text(
+                          keyLabel,
+                          style: const TextStyle(fontSize: 11.5, color: JalaPalette.text, fontWeight: FontWeight.w600),
+                        ),
+                        onPressed: _viewOnly
+                            ? null
+                            : () {
+                                HapticFeedback.lightImpact();
+                                _dispatchDesktopKey(keyLabel);
+                                setState(() {
+                                  _lastRdpAction =
+                                      'Sent Key: [${_activeModifierSummary()}$keyLabel] to ${_activeRdpHost?.name ?? "session"}';
+                                });
+                              },
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
-        ),
       ],
     );
   }
@@ -3481,204 +4331,251 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   }
 
   /// Termius-style Mobile SSHv2 Terminal + SFTP Studio (`dartssh2`)
-  Widget _buildTermiusSshTab() {
+  /// Supports side-by-side Split SSH + SFTP mode on foldables & tablets (`isWideScreen == true`)
+  Widget _buildTermiusSshTab({bool isFullScreen = false, bool isWideScreen = false}) {
     final hostDesc = _activeSshHost != null
         ? '${_activeSshHost!.displayAccount}@${_activeSshHost!.address}:${_activeSshHost!.port}'
         : 'No SSH Host Selected';
 
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: const BoxDecoration(
-            color: JalaPalette.bar,
-            border: Border(bottom: BorderSide(color: JalaPalette.line)),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                Icons.terminal_rounded,
-                size: 16,
-                color: _sshLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
+    return LayoutBuilder(
+      builder: (ctx, constraints) {
+        final canSplitSshSftp = constraints.maxWidth >= 700;
+
+        Widget buildTerminalPane() {
+          return Container(
+            width: double.infinity,
+            margin: EdgeInsets.all(isFullScreen ? 4 : 10),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: JalaPalette.header,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: _sshLiveConnected ? JalaPalette.ok.withValues(alpha: 0.5) : JalaPalette.lineInput,
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  hostDesc,
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: JalaPalette.text),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              if (_activeSshHost != null && !_sshLiveConnected)
-                Padding(
-                  padding: const EdgeInsets.only(right: 4),
-                  child: SizedBox(
-                    height: 28,
-                    child: FilledButton.tonal(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: JalaPalette.selected,
-                        foregroundColor: JalaPalette.brandGold,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                      ),
-                      onPressed: () => _connectToHost(_activeSshHost!),
-                      child: const Text('Connect SSH', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
-                    ),
-                  ),
-                ),
-              TextButton.icon(
-                style: TextButton.styleFrom(foregroundColor: JalaPalette.brandGold),
-                onPressed: () {
-                  setState(() {
-                    _sshSubMode = _sshSubMode == 'sftp' ? 'terminal' : 'sftp';
-                  });
-                  if (_sshSubMode == 'sftp' && _sshLiveConnected) {
-                    _browseRemoteSftpPath(_sftpCurrentPath);
-                  }
-                },
-                icon: Icon(
-                  _sshSubMode == 'sftp' ? Icons.terminal_rounded : Icons.folder_shared_outlined,
-                  size: 15,
-                ),
-                label: Text(
-                  _sshSubMode == 'sftp' ? 'Terminal' : 'SFTP Check',
-                  style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
-                ),
-              ),
-            ],
-          ),
-        ),
-        if (_sshBusy)
-          const LinearProgressIndicator(
-            minHeight: 2,
-            color: JalaPalette.brandGold,
-            backgroundColor: JalaPalette.header,
-          ),
-        Expanded(
-          child: _sshSubMode == 'sftp'
-              ? _buildSftpMobileBrowser()
-              : Container(
-                  width: double.infinity,
-                  margin: const EdgeInsets.all(10),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: JalaPalette.header,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: _sshLiveConnected ? JalaPalette.ok.withValues(alpha: 0.5) : JalaPalette.lineInput,
-                    ),
-                  ),
-                  child: ListView.builder(
-                    controller: _sshScrollCtrl,
-                    itemCount: _sshLines.length,
-                    itemBuilder: (ctx, i) => Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text(
-                        _sshLines[i],
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                          color: _sshLines[i].contains('@') && _sshLines[i].endsWith('\$ ')
-                              ? JalaPalette.brandGold
-                              : (_sshLines[i].startsWith('✓') ? JalaPalette.ok : JalaPalette.text),
-                          height: 1.35,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-        ),
-        // Quick-Key Strip
-        Container(
-          decoration: const BoxDecoration(
-            color: JalaPalette.header,
-            border: Border(top: BorderSide(color: JalaPalette.line)),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                if (_sshLiveConnected && _sshPtySession != null)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: ActionChip(
-                      backgroundColor: JalaPalette.selected,
-                      side: const BorderSide(color: JalaPalette.danger),
-                      label: const Text(
-                        'Ctrl+C',
-                        style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: JalaPalette.danger),
-                      ),
-                      onPressed: () {
-                        _sshPtySession?.write(Uint8List.fromList([0x03]));
-                      },
-                    ),
-                  ),
-                for (final quick in [
-                  'uptime',
-                  'docker ps',
-                  'kubectl get pods',
-                  'uname -a',
-                  'df -h',
-                  'clear',
-                ])
-                  Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: ActionChip(
-                      backgroundColor: JalaPalette.surface,
-                      side: const BorderSide(color: JalaPalette.lineInput),
-                      label: Text(
-                        quick,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontFamily: 'monospace',
-                          color: JalaPalette.brandGold,
-                        ),
-                      ),
-                      onPressed: () {
-                        setState(() => _sshSubMode = 'terminal');
-                        _runSshCommand(quick);
-                      },
-                    ),
-                  ),
-              ],
             ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _sshInputCtrl,
-                  onSubmitted: _runSshCommand,
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5, color: JalaPalette.text),
-                  decoration: InputDecoration(
-                    hintText: _sshLiveConnected ? 'Execute remote SSH command...' : 'Enter SSH command...',
-                    hintStyle: const TextStyle(color: JalaPalette.muted, fontSize: 12),
-                    isDense: true,
-                    filled: true,
-                    fillColor: JalaPalette.aside,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: JalaPalette.lineInput),
-                    ),
+            child: ListView.builder(
+              controller: _sshScrollCtrl,
+              itemCount: _sshLines.length,
+              itemBuilder: (ctx, i) => Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  _sshLines[i],
+                  style: TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    color: _sshLines[i].contains('@') && _sshLines[i].endsWith('\$ ')
+                        ? JalaPalette.brandGold
+                        : (_sshLines[i].startsWith('✓') ? JalaPalette.ok : JalaPalette.text),
+                    height: 1.35,
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
-              FilledButton(
-                style: FilledButton.styleFrom(
-                  backgroundColor: JalaPalette.accent,
-                  foregroundColor: Colors.white,
-                ),
-                onPressed: () => _runSshCommand(_sshInputCtrl.text),
-                child: const Text('Run'),
+            ),
+          );
+        }
+
+        return Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: const BoxDecoration(
+                color: JalaPalette.bar,
+                border: Border(bottom: BorderSide(color: JalaPalette.line)),
               ),
-            ],
-          ),
-        ),
-      ],
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.terminal_rounded,
+                    size: 16,
+                    color: _sshLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      hostDesc,
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (_activeSshHost != null && !_sshLiveConnected)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: SizedBox(
+                        height: 26,
+                        child: FilledButton.tonal(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: JalaPalette.selected,
+                            foregroundColor: JalaPalette.brandGold,
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          onPressed: () => _connectToHost(_activeSshHost!),
+                          child: const Text('Connect SSH', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700)),
+                        ),
+                      ),
+                    ),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(
+                      foregroundColor: JalaPalette.brandGold,
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        if (canSplitSshSftp) {
+                          _sshSubMode = _sshSubMode == 'split' ? 'terminal' : 'split';
+                        } else {
+                          _sshSubMode = _sshSubMode == 'sftp' ? 'terminal' : 'sftp';
+                        }
+                      });
+                      if ((_sshSubMode == 'sftp' || _sshSubMode == 'split') && _sshLiveConnected) {
+                        _browseRemoteSftpPath(_sftpCurrentPath);
+                      }
+                    },
+                    icon: Icon(
+                      _sshSubMode == 'sftp'
+                          ? Icons.terminal_rounded
+                          : (canSplitSshSftp ? Icons.vertical_split_rounded : Icons.folder_shared_outlined),
+                      size: 14,
+                    ),
+                    label: Text(
+                      canSplitSshSftp
+                          ? (_sshSubMode == 'split' ? 'Single Terminal' : 'Split SSH+SFTP')
+                          : (_sshSubMode == 'sftp' ? 'Terminal' : 'SFTP Check'),
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  InkWell(
+                    borderRadius: BorderRadius.circular(6),
+                    onTap: () => toggleFullScreen(),
+                    child: Padding(
+                      padding: const EdgeInsets.all(4),
+                      child: Icon(
+                        isFullScreen ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
+                        size: 17,
+                        color: JalaPalette.brandGold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (_sshBusy)
+              const LinearProgressIndicator(
+                minHeight: 2,
+                color: JalaPalette.brandGold,
+                backgroundColor: JalaPalette.header,
+              ),
+            Expanded(
+              child: canSplitSshSftp && _sshSubMode == 'split'
+                  ? Row(
+                      children: [
+                        Expanded(flex: 3, child: buildTerminalPane()),
+                        Container(width: 1, color: JalaPalette.line),
+                        Expanded(flex: 2, child: _buildSftpMobileBrowser()),
+                      ],
+                    )
+                  : (_sshSubMode == 'sftp' ? _buildSftpMobileBrowser() : buildTerminalPane()),
+            ),
+            // Quick-Key Strip
+            Container(
+              decoration: const BoxDecoration(
+                color: JalaPalette.header,
+                border: Border(top: BorderSide(color: JalaPalette.line)),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    if (_sshLiveConnected && _sshPtySession != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: ActionChip(
+                          backgroundColor: JalaPalette.selected,
+                          side: const BorderSide(color: JalaPalette.danger),
+                          label: const Text(
+                            'Ctrl+C',
+                            style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: JalaPalette.danger),
+                          ),
+                          onPressed: () {
+                            _sshPtySession?.write(Uint8List.fromList([0x03]));
+                          },
+                        ),
+                      ),
+                    for (final quick in [
+                      'uptime',
+                      'docker ps',
+                      'kubectl get pods',
+                      'uname -a',
+                      'df -h',
+                      'clear',
+                    ])
+                      Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: ActionChip(
+                          backgroundColor: JalaPalette.surface,
+                          side: const BorderSide(color: JalaPalette.lineInput),
+                          label: Text(
+                            quick,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontFamily: 'monospace',
+                              color: JalaPalette.brandGold,
+                            ),
+                          ),
+                          onPressed: () {
+                            if (!canSplitSshSftp) {
+                              setState(() => _sshSubMode = 'terminal');
+                            }
+                            _runSshCommand(quick);
+                          },
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _sshInputCtrl,
+                      onSubmitted: _runSshCommand,
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5, color: JalaPalette.text),
+                      decoration: InputDecoration(
+                        hintText: _sshLiveConnected ? 'Execute remote SSH command...' : 'Enter SSH command...',
+                        hintStyle: const TextStyle(color: JalaPalette.muted, fontSize: 12),
+                        isDense: true,
+                        filled: true,
+                        fillColor: JalaPalette.aside,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(color: JalaPalette.lineInput),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: JalaPalette.accent,
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () => _runSshCommand(_sshInputCtrl.text),
+                    child: const Text('Run'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -3840,180 +4737,200 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             ),
           ];
 
-    return ListView(
-      padding: const EdgeInsets.all(14),
-      children: [
-        Container(
-          padding: const EdgeInsets.all(13),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [JalaPalette.chip, JalaPalette.surface],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
+    final totpCard = Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.key_rounded, size: 17, color: JalaPalette.brandGold),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'RFC 6238 TOTP 2FA Authenticator',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: _showAddTotpDialog,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: JalaPalette.header,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: JalaPalette.lineInput),
+                    ),
+                    child: const Text(
+                      '+ Add 2FA',
+                      style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: JalaPalette.selected,
+                    borderRadius: BorderRadius.circular(99),
+                    border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
+                  ),
+                  child: Text(
+                    '${_secondsRemaining}s',
+                    style: const TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
             ),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.35)),
-          ),
-          child: Row(
-            children: [
-              _buildJalaBrandLogo(size: 38, radius: 10),
-              const SizedBox(width: 11),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Zero-Trust Hardware Enclave',
-                      style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    SizedBox(height: 2),
-                    Text(
-                      'AES-256-GCM • PBKDF2 210k • Secure Enclave Active',
-                      style: TextStyle(fontSize: 11, color: JalaPalette.brandGold),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: JalaPalette.ok.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(99),
-                  border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.45)),
-                ),
-                child: const Text(
-                  'SEALED',
-                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: JalaPalette.ok),
+            const SizedBox(height: 12),
+            for (int i = 0; i < activeTotpList.length; i++) ...[
+              if (i > 0) const Divider(height: 18),
+              _buildTotpRow(
+                activeTotpList[i].label,
+                '${activeTotpList[i].algorithm} • ${activeTotpList[i].digits} digits',
+                Rfc6238Totp.generateCode(
+                  activeTotpList[i].secretBase32,
+                  algorithm: activeTotpList[i].algorithm,
+                  digits: activeTotpList[i].digits,
                 ),
               ),
             ],
-          ),
+          ],
         ),
-        const SizedBox(height: 12),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.key_rounded, size: 17, color: JalaPalette.brandGold),
-                    const SizedBox(width: 8),
-                    const Expanded(
-                      child: Text(
-                        'RFC 6238 TOTP 2FA Authenticator',
-                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    InkWell(
-                      borderRadius: BorderRadius.circular(6),
-                      onTap: _showAddTotpDialog,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: JalaPalette.header,
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: JalaPalette.lineInput),
-                        ),
-                        child: const Text(
-                          '+ Add 2FA',
-                          style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: JalaPalette.selected,
-                        borderRadius: BorderRadius.circular(99),
-                        border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
-                      ),
-                      child: Text(
-                        '${_secondsRemaining}s',
-                        style: const TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                  ],
+      ),
+    );
+
+    final securitySwitchesCard = Card(
+      child: Column(
+        children: [
+          SwitchListTile(
+            activeThumbColor: JalaPalette.brandGold,
+            activeTrackColor: JalaPalette.selected,
+            value: _biometricLock,
+            onChanged: (v) => setState(() => _biometricLock = v),
+            title: const Text(
+              'Biometric Enclave Unlock (FaceID / TouchID)',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+            ),
+            subtitle: const Text(
+              'Require hardware biometric verification before decrypting .rtsz / .jaladesk credentials',
+              style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
+            ),
+          ),
+          const Divider(height: 1),
+          SwitchListTile(
+            activeThumbColor: JalaPalette.brandGold,
+            activeTrackColor: JalaPalette.selected,
+            value: _lanAutoSync,
+            onChanged: (v) => setState(() => _lanAutoSync = v),
+            title: const Text(
+              'Zero-Knowledge LAN mDNS Vault Sync',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+            ),
+            subtitle: const Text(
+              'Automatically synchronize encrypted connection documents with JalaDesk Desktop on Wi-Fi',
+              style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
+            ),
+          ),
+          const Divider(height: 1),
+          SwitchListTile(
+            activeThumbColor: JalaPalette.brandGold,
+            activeTrackColor: JalaPalette.selected,
+            value: _clipboardScrubber,
+            onChanged: (v) => setState(() => _clipboardScrubber = v),
+            title: const Text(
+              'Automatic Clipboard Secret Scrubber (30s)',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+            ),
+            subtitle: const Text(
+              'Purge copied passwords and TOTP tokens from mobile OS clipboard after 30 seconds',
+              style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return LayoutBuilder(
+      builder: (ctx, constraints) {
+        final isTwoColumn = constraints.maxWidth >= 720;
+        return ListView(
+          padding: const EdgeInsets.all(14),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(13),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [JalaPalette.chip, JalaPalette.surface],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-                const SizedBox(height: 12),
-                for (int i = 0; i < activeTotpList.length; i++) ...[
-                  if (i > 0) const Divider(height: 18),
-                  _buildTotpRow(
-                    activeTotpList[i].label,
-                    '${activeTotpList[i].algorithm} • ${activeTotpList[i].digits} digits',
-                    Rfc6238Totp.generateCode(
-                      activeTotpList[i].secretBase32,
-                      algorithm: activeTotpList[i].algorithm,
-                      digits: activeTotpList[i].digits,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.35)),
+              ),
+              child: Row(
+                children: [
+                  _buildJalaBrandLogo(size: 38, radius: 10),
+                  const SizedBox(width: 11),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Zero-Trust Hardware Enclave',
+                          style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          'AES-256-GCM • PBKDF2 210k • Secure Enclave Active',
+                          style: TextStyle(fontSize: 11, color: JalaPalette.brandGold),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: JalaPalette.ok.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(99),
+                      border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.45)),
+                    ),
+                    child: const Text(
+                      'SEALED',
+                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: JalaPalette.ok),
                     ),
                   ),
                 ],
-              ],
+              ),
             ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        Card(
-          child: Column(
-            children: [
-              SwitchListTile(
-                activeThumbColor: JalaPalette.brandGold,
-                activeTrackColor: JalaPalette.selected,
-                value: _biometricLock,
-                onChanged: (v) => setState(() => _biometricLock = v),
-                title: const Text(
-                  'Biometric Enclave Unlock (FaceID / TouchID)',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
-                ),
-                subtitle: const Text(
-                  'Require hardware biometric verification before decrypting .rtsz / .jaladesk credentials',
-                  style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-                ),
-              ),
-              const Divider(height: 1),
-              SwitchListTile(
-                activeThumbColor: JalaPalette.brandGold,
-                activeTrackColor: JalaPalette.selected,
-                value: _lanAutoSync,
-                onChanged: (v) => setState(() => _lanAutoSync = v),
-                title: const Text(
-                  'Zero-Knowledge LAN mDNS Vault Sync',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
-                ),
-                subtitle: const Text(
-                  'Automatically synchronize encrypted connection documents with JalaDesk Desktop on Wi-Fi',
-                  style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-                ),
-              ),
-              const Divider(height: 1),
-              SwitchListTile(
-                activeThumbColor: JalaPalette.brandGold,
-                activeTrackColor: JalaPalette.selected,
-                value: _clipboardScrubber,
-                onChanged: (v) => setState(() => _clipboardScrubber = v),
-                title: const Text(
-                  'Automatic Clipboard Secret Scrubber (30s)',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
-                ),
-                subtitle: const Text(
-                  'Purge copied passwords and TOTP tokens from mobile OS clipboard after 30 seconds',
-                  style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-                ),
-              ),
+            const SizedBox(height: 12),
+            if (isTwoColumn)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: totpCard),
+                  const SizedBox(width: 12),
+                  Expanded(child: securitySwitchesCard),
+                ],
+              )
+            else ...[
+              totpCard,
+              const SizedBox(height: 12),
+              securitySwitchesCard,
             ],
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
   }
 

@@ -264,6 +264,34 @@ void main() {
     rdp.sendMouseMove(320, 240);
     rdp.sendScancode(0x1C, down: true);
     rdp.sendScancode(0x1C, down: false);
+
+    // Dynamically resize the remote desktop session to a Foldable Unfolded aspect ratio (1088x908)
+    rdp.requestResolution(1088, 908, desktopScaleFactor: 100);
+    await Future<void>.delayed(const Duration(milliseconds: 900));
+    expect(rdp.isConnected, isTrue);
+    expect(rdp.width, 1088);
+    expect(rdp.height, 908);
+  });
+
+  test('RdpFfiClient.computeJumpMatchResolution matches Phone, Foldable Unfolded, and Tablet aspect ratios', () {
+    // 1. Phone Portrait (360x640 -> aspect 0.5625)
+    final phoneRes = RdpFfiClient.computeJumpMatchResolution(360, 640);
+    expect(phoneRes.$1 % 4, 0);
+    expect(phoneRes.$2 % 2, 0);
+    expect(phoneRes.$1, lessThan(phoneRes.$2));
+    expect((phoneRes.$1 / phoneRes.$2 - 360 / 640).abs(), lessThan(0.02));
+
+    // 2. Foldable Unfolded Inner Display (840x700 -> aspect 1.20)
+    final foldRes = RdpFfiClient.computeJumpMatchResolution(840, 700);
+    expect(foldRes.$1 % 4, 0);
+    expect(foldRes.$2 % 2, 0);
+    expect((foldRes.$1 / foldRes.$2 - 840 / 700).abs(), lessThan(0.02));
+
+    // 3. Tablet Landscape (1280x800 -> aspect 1.60) + HiDPI 1.35x
+    final tabletStd = RdpFfiClient.computeJumpMatchResolution(1280, 800);
+    final tabletHiDpi = RdpFfiClient.computeJumpMatchResolution(1280, 800, densityMultiplier: 1.35);
+    expect(tabletHiDpi.$1, greaterThan(tabletStd.$1));
+    expect((tabletHiDpi.$1 / tabletHiDpi.$2 - 1.60).abs(), lessThan(0.02));
   });
 
   testWidgets('JalaDesk Mobile starts with clean empty vault, supports adding hosts & sample lab at 360x780',
@@ -334,5 +362,70 @@ void main() {
     }
     expect(find.text('Zero-Trust Hardware Enclave'), findsOneWidget);
     expect(find.text('RFC 6238 TOTP 2FA Authenticator'), findsOneWidget);
+  });
+
+  testWidgets(
+      'JalaDesk Mobile adapts to Foldable Unfolded (840x700), Tablet Landscape (1280x800), and Immersive Full Screen Mode',
+      (WidgetTester tester) async {
+    // 1. Foldable Unfolded (840x700) -> Renders Left NavigationRail instead of bottom NavigationBar
+    tester.view.physicalSize = const Size(840, 700);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byType(NavigationBar), findsNothing);
+    expect(find.text('FOLDABLE PRO'), findsOneWidget);
+
+    // 2. Tablet Landscape (1280x800) -> Renders NavigationRail + Quick Host Switcher Sidebar + Split SSH+SFTP
+    tester.view.physicalSize = const Size(1280, 800);
+    await tester.pumpAndSettle();
+    expect(find.text('TABLET PRO'), findsOneWidget);
+
+    // Load Sample Lab so Quick Host Switcher has hosts
+    await tester.tap(find.text('Load Sample Lab'));
+    await tester.pumpAndSettle();
+
+    // Switch to RDP / VNC Tab via NavigationRail
+    await tester.tap(find.text('RDP / VNC'));
+    await tester.pumpAndSettle();
+    expect(find.text('QUICK HOST SWITCHER'), findsOneWidget);
+    expect(find.byKey(const ValueKey('btn_display_sizing')), findsOneWidget);
+    expect(find.byKey(const ValueKey('btn_toggle_fullscreen')), findsOneWidget);
+
+    // Open Jump Display Sizing modal and verify options
+    await tester.tap(find.byKey(const ValueKey('btn_display_sizing')));
+    await tester.pumpAndSettle();
+    expect(find.text('Jump Display Sizing & Aspect Match'), findsOneWidget);
+    expect(find.text('Auto Match'), findsWidgets);
+    expect(find.text('HiDPI 1.35×'), findsOneWidget);
+    expect(find.text('Fit'), findsWidgets);
+    expect(find.text('Fill'), findsOneWidget);
+
+    // Activate Max Full Screen from the Display Sizing sheet
+    await tester.tap(find.text('Max Full Screen'));
+    await tester.pumpAndSettle();
+
+    // In Full Screen mode: NavigationRail and AppBar are hidden, Floating HUD Pill is active
+    expect(find.byType(NavigationRail), findsNothing);
+    expect(find.byKey(const ValueKey('fullscreen_floating_hud')), findsOneWidget);
+    expect(find.byKey(const ValueKey('btn_exit_fullscreen_pill')), findsOneWidget);
+
+    // Exit Full Screen via Floating HUD Pill
+    await tester.tap(find.byKey(const ValueKey('btn_exit_fullscreen_pill')));
+    await tester.pumpAndSettle();
+    expect(find.byType(NavigationRail), findsOneWidget);
+
+    // Switch to SSH & SFTP on Tablet -> Verify Split SSH+SFTP mode
+    await tester.tap(find.text('SSH & SFTP'));
+    await tester.pumpAndSettle();
+    expect(find.text('Split SSH+SFTP'), findsOneWidget);
+    await tester.tap(find.text('Split SSH+SFTP'));
+    await tester.pumpAndSettle();
+    expect(find.text('Single Terminal'), findsOneWidget);
+    expect(find.text('/etc/nginx/conf.d'), findsOneWidget);
   });
 }

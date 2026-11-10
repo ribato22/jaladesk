@@ -27,6 +27,19 @@ typedef _JalaRdpCreateDart = ffi.Pointer<ffi.Void> Function(
   ffi.Pointer<Utf8> configDir,
 );
 
+typedef _JalaRdpRequestResolutionNative = ffi.Void Function(
+  ffi.Pointer<ffi.Void> handle,
+  ffi.Int32 width,
+  ffi.Int32 height,
+  ffi.Int32 desktopScaleFactor,
+);
+typedef _JalaRdpRequestResolutionDart = void Function(
+  ffi.Pointer<ffi.Void> handle,
+  int width,
+  int height,
+  int desktopScaleFactor,
+);
+
 typedef _JalaRdpGetStateNative = ffi.Int32 Function(
   ffi.Pointer<ffi.Void> handle,
   ffi.Pointer<ffi.Int32> outWidth,
@@ -148,6 +161,7 @@ class RdpFfiClient {
   int _frameBufCap = 0;
 
   late final _JalaRdpCreateDart _fnCreate;
+  late final _JalaRdpRequestResolutionDart _fnRequestResolution;
   late final _JalaRdpGetStateDart _fnGetState;
   late final _JalaRdpCopyFrameDart _fnCopyFrame;
   late final _JalaRdpSendMouseDart _fnSendMouse;
@@ -168,6 +182,36 @@ class RdpFfiClient {
   }) {
     width = initialWidth;
     height = initialHeight;
+  }
+
+  /// Calculates Jump Desktop-style aspect-matched remote desktop dimensions
+  /// aligned to multiples of 4x2 pixels so the remote GUI fills the viewport with zero black bars.
+  static (int width, int height) computeJumpMatchResolution(
+    double viewportWidth,
+    double viewportHeight, {
+    double densityMultiplier = 1.0,
+  }) {
+    final safeW = viewportWidth.clamp(240.0, 4096.0);
+    final safeH = viewportHeight.clamp(240.0, 4096.0);
+    final aspect = safeW / safeH;
+
+    double targetW;
+    double targetH;
+    if (aspect >= 1.0) {
+      // Landscape or square-ish foldable (e.g. Galaxy Z Fold unfolded, Tablet, Landscape Phone)
+      final baseLongEdge = (safeW < 1100 ? 1280.0 : safeW) * densityMultiplier;
+      targetW = baseLongEdge.clamp(800.0, 2560.0);
+      targetH = (targetW / aspect).clamp(480.0, 2160.0);
+    } else {
+      // Portrait orientation on phone or tablet: keep short edge >= 768 so Windows UI fits cleanly
+      final baseShortEdge = (safeW < 768 ? 800.0 : safeW) * densityMultiplier;
+      targetW = baseShortEdge.clamp(680.0, 1600.0);
+      targetH = (targetW / aspect).clamp(800.0, 2400.0);
+    }
+
+    final alignedW = (((targetW.round() + 3) ~/ 4) * 4).clamp(640, 3840);
+    final alignedH = (((targetH.round() + 1) ~/ 2) * 2).clamp(480, 2400);
+    return (alignedW, alignedH);
   }
 
   static ffi.DynamicLibrary? _loadLibrary() {
@@ -228,6 +272,9 @@ class RdpFfiClient {
     }
 
     _fnCreate = lib.lookupFunction<_JalaRdpCreateNative, _JalaRdpCreateDart>('jaladesk_rdp_create');
+    _fnRequestResolution = lib.lookupFunction<_JalaRdpRequestResolutionNative, _JalaRdpRequestResolutionDart>(
+      'jaladesk_rdp_request_resolution',
+    );
     _fnGetState = lib.lookupFunction<_JalaRdpGetStateNative, _JalaRdpGetStateDart>('jaladesk_rdp_get_state');
     _fnCopyFrame = lib.lookupFunction<_JalaRdpCopyFrameNative, _JalaRdpCopyFrameDart>('jaladesk_rdp_copy_frame');
     _fnSendMouse = lib.lookupFunction<_JalaRdpSendMouseNative, _JalaRdpSendMouseDart>('jaladesk_rdp_send_mouse');
@@ -290,6 +337,16 @@ class RdpFfiClient {
 
     await dispose();
     throw TimeoutException('RDP connection to $host:$port timed out.');
+  }
+
+  /// Dynamically resizes the remote desktop session via MS-RDPEDISP (`DispClientContext`)
+  /// or seamless fast-reconnect when the user rotates/unfolds the device or changes display preset.
+  void requestResolution(int newWidth, int newHeight, {int desktopScaleFactor = 100}) {
+    if (_disposed || _handle == ffi.nullptr) return;
+    final alignedW = (((newWidth.clamp(320, 4096) + 3) ~/ 4) * 4);
+    final alignedH = (((newHeight.clamp(240, 4096) + 1) ~/ 2) * 2);
+    if ((alignedW - width).abs() < 4 && (alignedH - height).abs() < 4) return;
+    _fnRequestResolution(_handle, alignedW, alignedH, desktopScaleFactor.clamp(100, 500));
   }
 
   void _pollStateOnce() {
