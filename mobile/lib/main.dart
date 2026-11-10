@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'protocols/rdp_ffi_client.dart';
+import 'protocols/vnc_rfb_client.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -48,11 +52,13 @@ class JalaPalette {
 class JalaDeskMobileApp extends StatelessWidget {
   final List<RemoteHostItem>? initialHostsOverride;
   final bool disableNetworkProbes;
+  final GlobalKey<JalaDeskMobileShellState>? shellKey;
 
   const JalaDeskMobileApp({
     super.key,
     this.initialHostsOverride,
     this.disableNetworkProbes = false,
+    this.shellKey,
   });
 
   @override
@@ -102,6 +108,7 @@ class JalaDeskMobileApp extends StatelessWidget {
         ),
       ),
       home: JalaDeskMobileShell(
+        key: shellKey,
         initialHostsOverride: initialHostsOverride,
         disableNetworkProbes: disableNetworkProbes,
       ),
@@ -133,6 +140,7 @@ class RemoteHostItem {
   final RemoteProtocol protocol;
   final String folder;
   final String osLabel;
+  final String domain;
   final String username;
   final String password;
   final String privateKeyPem;
@@ -148,6 +156,7 @@ class RemoteHostItem {
     required this.protocol,
     this.folder = 'General',
     this.osLabel = '',
+    this.domain = '',
     this.username = 'root',
     this.password = '',
     this.privateKeyPem = '',
@@ -155,6 +164,30 @@ class RemoteHostItem {
     this.isOnline,
     this.accentTint = 'sapphire',
   });
+
+  /// Returns `(effectiveDomain, effectiveUsername)` by automatically splitting `DOMAIN\user` or `user@domain`
+  (String, String) get resolvedDomainAndUser {
+    final dom = domain.trim();
+    final usr = username.trim();
+    if (dom.isNotEmpty) return (dom, usr);
+    if (usr.contains('\\')) {
+      final parts = usr.split('\\');
+      return (parts.first, parts.sublist(1).join('\\'));
+    }
+    if (usr.contains('@') && protocol == RemoteProtocol.rdp) {
+      final parts = usr.split('@');
+      return (parts.sublist(1).join('@'), parts.first);
+    }
+    return ('', usr);
+  }
+
+  String get displayAccount {
+    final (dom, usr) = resolvedDomainAndUser;
+    if (dom.isNotEmpty && !usr.contains('\\')) {
+      return '$dom\\$usr';
+    }
+    return usr;
+  }
 
   RemoteHostItem copyWith({
     String? id,
@@ -164,6 +197,7 @@ class RemoteHostItem {
     RemoteProtocol? protocol,
     String? folder,
     String? osLabel,
+    String? domain,
     String? username,
     String? password,
     String? privateKeyPem,
@@ -179,6 +213,7 @@ class RemoteHostItem {
       protocol: protocol ?? this.protocol,
       folder: folder ?? this.folder,
       osLabel: osLabel ?? this.osLabel,
+      domain: domain ?? this.domain,
       username: username ?? this.username,
       password: password ?? this.password,
       privateKeyPem: privateKeyPem ?? this.privateKeyPem,
@@ -196,6 +231,7 @@ class RemoteHostItem {
         'protocol': protocol.name,
         'folder': folder,
         'osLabel': osLabel,
+        'domain': domain,
         'username': username,
         'password': password,
         'privateKeyPem': privateKeyPem,
@@ -218,6 +254,7 @@ class RemoteHostItem {
       protocol: proto,
       folder: json['folder'] as String? ?? 'General',
       osLabel: json['osLabel'] as String? ?? '${proto.name.toUpperCase()} Endpoint',
+      domain: json['domain'] as String? ?? '',
       username: json['username'] as String? ?? 'root',
       password: json['password'] as String? ?? '',
       privateKeyPem: json['privateKeyPem'] as String? ?? '',
@@ -232,7 +269,7 @@ class TotpEntryItem {
   final String id;
   final String label;
   final String secretBase32;
-  final String algorithm; // 'SHA-1' | 'SHA-256' | 'SHA-512'
+  final String algorithm;
   final int digits;
 
   const TotpEntryItem({
@@ -293,9 +330,7 @@ class Rfc6238Totp {
     String algorithm = 'SHA-1',
   }) {
     final keyBytes = decodeBase32(secretBase32);
-    if (keyBytes.isEmpty) {
-      return '000000';
-    }
+    if (keyBytes.isEmpty) return '000000';
     final epochSeconds = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
     int counter = epochSeconds ~/ periodSeconds;
     final counterBytes = Uint8List(8);
@@ -355,10 +390,10 @@ class JalaDeskMobileShell extends StatefulWidget {
   });
 
   @override
-  State<JalaDeskMobileShell> createState() => _JalaDeskMobileShellState();
+  State<JalaDeskMobileShell> createState() => JalaDeskMobileShellState();
 }
 
-class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
+class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   static const String _prefsHostsKey = 'jaladesk_vault_hosts_v2';
   static const String _prefsTotpKey = 'jaladesk_vault_totp_v2';
   static const String _prefsPairKey = 'jaladesk_vault_pair_v2';
@@ -376,23 +411,30 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   RemoteHostItem? _activeRdpHost;
   RemoteHostItem? _activeSshHost;
 
-  // Live RDP / VNC wire state
-  Socket? _activeDesktopSocket;
+  // Live RDP (FreeRDP 3.x FFI) & VNC (RFB 3.8) Framebuffer Engine state
+  RdpFfiClient? _rdpFfiClient;
+  VncRfbClient? _vncRfbClient;
+  ui.Image? _remoteDesktopFrame;
   bool _desktopLiveConnected = false;
   String _desktopProtocolBanner = 'No active remote desktop session';
-  final int _desktopServerWidth = 1920;
-  final int _desktopServerHeight = 1080;
+  int _desktopServerWidth = 1280;
+  int _desktopServerHeight = 800;
   bool _trackpadMode = true;
   bool _viewOnly = false;
+  bool _showDesktopKeyboardBar = false;
+  final TextEditingController _desktopKeyInputCtrl = TextEditingController();
   bool _ctrlLocked = false;
   bool _altLocked = false;
   bool _winLocked = false;
   bool _shiftLocked = false;
   Offset _cursorPos = const Offset(155, 118);
-  String _lastRdpAction = 'Select a host in Connections or tap + Add Connection to begin.';
+  String _lastRdpAction = 'Select a host in Connections or tap + Add Host to begin.';
 
-  // Live SSHv2 & SFTP client state (dartssh2)
+  // Live SSHv2 PTY Shell & SFTP Client state (`dartssh2`)
   SSHClient? _sshClient;
+  SSHSession? _sshPtySession;
+  StreamSubscription<Uint8List>? _sshStdoutSub;
+  StreamSubscription<Uint8List>? _sshStderrSub;
   SftpClient? _sftpClient;
   bool _sshLiveConnected = false;
   bool _sshBusy = false;
@@ -402,8 +444,8 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   final TextEditingController _sshInputCtrl = TextEditingController();
   final ScrollController _sshScrollCtrl = ScrollController();
   final List<String> _sshLines = [
-    'JalaDesk SSHv2 / SFTP Client Engine (RFC 4251–4254 • dartssh2)',
-    'Tap "Connect" on any SSH/SFTP host in the Connections tab, or tap "Connect SSH" above.',
+    'JalaDesk SSHv2 PTY / SFTP Client Engine (RFC 4251–4254 • dartssh2)',
+    'Tap "SSH / Connect" on any host in the Connections tab to open a live interactive PTY session.',
   ];
 
   // TOTP Timer state
@@ -423,6 +465,43 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     _loadPersistedVault();
   }
 
+  Future<void> connectHostForVerification(String hostId) async {
+    while (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+    final host = _hosts.firstWhere((h) => h.id == hostId);
+    await _connectToHost(host);
+  }
+
+  void switchTabForVerification(int index) {
+    while (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+    setState(() => _tabIndex = index);
+  }
+
+  void switchSshSubModeForVerification(String mode) {
+    setState(() => _sshSubMode = mode);
+  }
+
+  Future<void> runSshCommandForVerification(String cmd) async {
+    await _runSshCommand(cmd);
+  }
+
+  void sendDesktopInteractionForVerification(int rx, int ry, String keyLabel) {
+    if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
+      _rdpFfiClient!.sendMouseClick(rx, ry);
+      _rdpFfiClient!.sendSpecialKey(keyLabel);
+    } else if (_vncRfbClient != null && _vncRfbClient!.isConnected) {
+      _vncRfbClient!.sendPointerEvent(rx, ry, 1);
+      _vncRfbClient!.sendPointerEvent(rx, ry, 0);
+      _vncRfbClient!.sendKeySym(0xFF0D);
+    }
+    setState(() {
+      _lastRdpAction = 'LiveClick($rx, $ry) + Key[$keyLabel]';
+    });
+  }
+
   Future<void> _loadPersistedVault() async {
     if (widget.initialHostsOverride != null) {
       setState(() {
@@ -432,6 +511,9 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         _syncActiveHostSelection();
         _vaultLoaded = true;
       });
+      if (!widget.disableNetworkProbes && _hosts.isNotEmpty) {
+        _probeAllHosts();
+      }
       return;
     }
 
@@ -532,29 +614,84 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     _totpTimer.cancel();
     _sshInputCtrl.dispose();
     _sshScrollCtrl.dispose();
-    _closeDesktopSocket();
+    _desktopKeyInputCtrl.dispose();
+    _closeDesktopSession();
     _closeSshClient();
     super.dispose();
   }
 
-  void _closeDesktopSocket() {
-    try {
-      _activeDesktopSocket?.destroy();
-    } catch (_) {}
-    _activeDesktopSocket = null;
+  void _closeDesktopSession() {
+    final rdp = _rdpFfiClient;
+    final vnc = _vncRfbClient;
+    _rdpFfiClient = null;
+    _vncRfbClient = null;
     _desktopLiveConnected = false;
+    if (rdp != null) unawaited(rdp.dispose());
+    if (vnc != null) unawaited(vnc.dispose());
   }
 
   void _closeSshClient() {
+    _sshStdoutSub?.cancel();
+    _sshStderrSub?.cancel();
+    _sshStdoutSub = null;
+    _sshStderrSub = null;
+    try {
+      _sshPtySession?.close();
+    } catch (_) {}
     try {
       _sftpClient?.close();
     } catch (_) {}
     try {
       _sshClient?.close();
     } catch (_) {}
+    _sshPtySession = null;
     _sftpClient = null;
     _sshClient = null;
     _sshLiveConnected = false;
+  }
+
+  /// Strips ANSI CSI/OSC escape sequences and applies backspace (\x08) from live PTY shell output
+  static String stripAnsiCodes(String input) {
+    var s = input
+        .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
+        .replaceAll(RegExp(r'\x1B\][^\x07]*(\x07|\x1B\\)'), '')
+        .replaceAll('\x07', '')
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '');
+    final out = <int>[];
+    for (final unit in s.codeUnits) {
+      if (unit == 0x08) {
+        if (out.isNotEmpty && out.last != 0x0A) {
+          out.removeLast();
+        }
+      } else {
+        out.add(unit);
+      }
+    }
+    return String.fromCharCodes(out);
+  }
+
+  void _appendPtyOutput(String chunk) {
+    final cleaned = stripAnsiCodes(chunk);
+    if (cleaned.isEmpty || !mounted) return;
+    setState(() {
+      final parts = cleaned.split('\n');
+      for (int i = 0; i < parts.length; i++) {
+        if (i == 0 && _sshLines.isNotEmpty) {
+          _sshLines[_sshLines.length - 1] = '${_sshLines.last}${parts[0]}';
+        } else {
+          _sshLines.add(parts[i]);
+        }
+      }
+      if (_sshLines.length > 500) {
+        _sshLines.removeRange(0, _sshLines.length - 500);
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_sshScrollCtrl.hasClients) {
+        _sshScrollCtrl.jumpTo(_sshScrollCtrl.position.maxScrollExtent);
+      }
+    });
   }
 
   /// Real TCP Socket RTT Prober (`dart:io` `Socket.connect`)
@@ -639,6 +776,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     final portCtrl = TextEditingController(
       text: (existing?.port ?? defaultPortForProtocol(selectedProto)).toString(),
     );
+    final domainCtrl = TextEditingController(text: existing?.domain ?? '');
     final userCtrl = TextEditingController(text: existing?.username ?? 'root');
     final passCtrl = TextEditingController(text: existing?.password ?? '');
     final keyCtrl = TextEditingController(text: existing?.privateKeyPem ?? '');
@@ -720,7 +858,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   _buildModalField(
                     controller: nameCtrl,
                     label: 'Display Name (optional)',
-                    hint: 'e.g. prod-bastion-01 or Office Windows PC',
+                    hint: 'e.g. AD1 or prod-bastion-01',
                     icon: Icons.label_outline_rounded,
                   ),
                   const SizedBox(height: 10),
@@ -731,7 +869,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                         child: _buildModalField(
                           controller: hostCtrl,
                           label: 'Host / IP Address *',
-                          hint: 'e.g. 192.168.1.50 or ssh.example.com',
+                          hint: 'e.g. 10.28.0.154',
                           icon: Icons.dns_outlined,
                         ),
                       ),
@@ -741,41 +879,66 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                         child: _buildModalField(
                           controller: portCtrl,
                           label: 'Port *',
-                          hint: '22',
+                          hint: '3389',
                           keyboardType: TextInputType.number,
                         ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _buildModalField(
-                          controller: userCtrl,
-                          label: 'Username',
-                          hint: 'root / ubuntu / Administrator',
-                          icon: Icons.person_outline_rounded,
+                  if (selectedProto == RemoteProtocol.rdp) ...[
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildModalField(
+                            controller: domainCtrl,
+                            label: 'AD Domain (optional)',
+                            hint: 'e.g. plnbatam',
+                            icon: Icons.domain_rounded,
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _buildModalField(
-                          controller: folderCtrl,
-                          label: 'Folder / Group',
-                          hint: 'Production',
-                          icon: Icons.folder_outlined,
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _buildModalField(
+                            controller: userCtrl,
+                            label: 'Username (or domain\\user)',
+                            hint: 'adminit',
+                            icon: Icons.person_outline_rounded,
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                  ] else ...[
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildModalField(
+                            controller: userCtrl,
+                            label: 'Username',
+                            hint: 'root / ubuntu',
+                            icon: Icons.person_outline_rounded,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _buildModalField(
+                            controller: folderCtrl,
+                            label: 'Folder / Group',
+                            hint: 'Production',
+                            icon: Icons.folder_outlined,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                  ],
                   TextField(
                     controller: passCtrl,
                     obscureText: obscurePass,
                     style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
                     decoration: InputDecoration(
-                      labelText: 'Password (stored in local vault)',
+                      labelText: 'Password',
                       labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.text2),
                       prefixIcon: const Icon(Icons.lock_outline_rounded, size: 17, color: JalaPalette.brandGold),
                       suffixIcon: IconButton(
@@ -832,12 +995,20 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                       ),
                   ],
                   const SizedBox(height: 10),
-                  _buildModalField(
-                    controller: notesCtrl,
-                    label: 'OS / Description Label (optional)',
-                    hint: 'e.g. Ubuntu 24.04 LTS • Windows 11 Pro',
-                    icon: Icons.info_outline_rounded,
-                  ),
+                  if (selectedProto == RemoteProtocol.rdp)
+                    _buildModalField(
+                      controller: folderCtrl,
+                      label: 'Folder / Group',
+                      hint: 'PLN Batam / Production',
+                      icon: Icons.folder_outlined,
+                    )
+                  else
+                    _buildModalField(
+                      controller: notesCtrl,
+                      label: 'OS / Description Label (optional)',
+                      hint: 'e.g. Ubuntu 24.04 LTS • Windows Server',
+                      icon: Icons.info_outline_rounded,
+                    ),
                 ],
               ),
             ),
@@ -871,9 +1042,12 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 }
                 final parsedPort = int.tryParse(portCtrl.text.trim()) ?? defaultPortForProtocol(selectedProto);
                 final displayName = nameCtrl.text.trim().isNotEmpty ? nameCtrl.text.trim() : addr;
+                final rawUser = userCtrl.text.trim().isEmpty ? 'root' : userCtrl.text.trim();
+                final rawDom = domainCtrl.text.trim();
+                final acctDesc = rawDom.isNotEmpty && !rawUser.contains('\\') ? '$rawDom\\$rawUser' : rawUser;
                 final osDesc = notesCtrl.text.trim().isNotEmpty
                     ? notesCtrl.text.trim()
-                    : '${selectedProto.name.toUpperCase()} • ${userCtrl.text.trim().isEmpty ? "root" : userCtrl.text.trim()}@$addr';
+                    : '${selectedProto.name.toUpperCase()} • $acctDesc@$addr';
 
                 final newItem = RemoteHostItem(
                   id: existing?.id ?? 'h-${DateTime.now().millisecondsSinceEpoch}',
@@ -883,7 +1057,8 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   protocol: selectedProto,
                   folder: folderCtrl.text.trim().isEmpty ? 'General' : folderCtrl.text.trim(),
                   osLabel: osDesc,
-                  username: userCtrl.text.trim().isEmpty ? 'root' : userCtrl.text.trim(),
+                  domain: rawDom,
+                  username: rawUser,
                   password: passCtrl.text,
                   privateKeyPem: keyCtrl.text.trim(),
                   accentTint: (selectedProto == RemoteProtocol.ssh || selectedProto == RemoteProtocol.hypervisor)
@@ -906,6 +1081,145 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               },
               icon: const Icon(Icons.check_rounded, size: 16),
               label: Text(existing == null ? 'Save Host' : 'Update'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Prompts the user for password/credentials if connecting to a host whose password hasn't been entered yet
+  Future<RemoteHostItem?> _promptCredentialsIfNeeded(RemoteHostItem host, {bool forcePrompt = false}) async {
+    if (!forcePrompt && (host.password.isNotEmpty || host.privateKeyPem.isNotEmpty)) {
+      return host;
+    }
+    if (widget.disableNetworkProbes) return host;
+
+    final (initialDom, initialUser) = host.resolvedDomainAndUser;
+    final domCtrl = TextEditingController(text: initialDom);
+    final userCtrl = TextEditingController(text: initialUser);
+    final passCtrl = TextEditingController(text: host.password);
+    bool obscure = true;
+    bool rememberInVault = true;
+
+    return showDialog<RemoteHostItem>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => AlertDialog(
+          backgroundColor: JalaPalette.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: JalaPalette.brandGold),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.lock_person_rounded, color: JalaPalette.brandGold, size: 22),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Authenticate to ${host.name}',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${host.protocol.name.toUpperCase()} • ${host.address}:${host.port}',
+                  style: const TextStyle(fontSize: 11.5, fontFamily: 'monospace', color: JalaPalette.brandGold),
+                ),
+                const SizedBox(height: 12),
+                if (host.protocol == RemoteProtocol.rdp) ...[
+                  _buildModalField(
+                    controller: domCtrl,
+                    label: 'Domain (optional, e.g. plnbatam)',
+                    hint: 'plnbatam',
+                    icon: Icons.domain_rounded,
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                if (host.protocol != RemoteProtocol.vnc) ...[
+                  _buildModalField(
+                    controller: userCtrl,
+                    label: 'Username',
+                    hint: 'adminit / root',
+                    icon: Icons.person_outline_rounded,
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                TextField(
+                  controller: passCtrl,
+                  autofocus: true,
+                  obscureText: obscure,
+                  style: const TextStyle(fontSize: 13, color: JalaPalette.text),
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    labelStyle: const TextStyle(fontSize: 12, color: JalaPalette.brandGold),
+                    prefixIcon: const Icon(Icons.key_rounded, size: 17, color: JalaPalette.brandGold),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                        size: 17,
+                        color: JalaPalette.muted,
+                      ),
+                      onPressed: () => setModalState(() => obscure = !obscure),
+                    ),
+                    isDense: true,
+                    filled: true,
+                    fillColor: JalaPalette.header,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: JalaPalette.lineInput),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  activeColor: JalaPalette.brandGold,
+                  value: rememberInVault,
+                  onChanged: (v) => setModalState(() => rememberInVault = v ?? true),
+                  title: const Text(
+                    'Save credentials in local encrypted vault',
+                    style: TextStyle(fontSize: 12, color: JalaPalette.text2),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(null),
+              child: const Text('Cancel', style: TextStyle(color: JalaPalette.muted)),
+            ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: JalaPalette.accent,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () {
+                final updated = host.copyWith(
+                  domain: domCtrl.text.trim(),
+                  username: userCtrl.text.trim().isEmpty ? host.username : userCtrl.text.trim(),
+                  password: passCtrl.text,
+                );
+                if (rememberInVault) {
+                  setState(() {
+                    final idx = _hosts.indexWhere((h) => h.id == host.id);
+                    if (idx >= 0) _hosts[idx] = updated;
+                  });
+                  _saveVaultToDisk();
+                }
+                Navigator.of(ctx).pop(updated);
+              },
+              icon: const Icon(Icons.login_rounded, size: 16),
+              label: const Text('Connect Now'),
             ),
           ],
         ),
@@ -1013,24 +1327,40 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     _probeAllHosts();
   }
 
-  /// Real Network Connection Handshake Engine for SSHv2, SFTP, RDP (X.224/TLS), VNC (RFB 3.8), and Hypervisor
-  Future<void> _connectToHost(RemoteHostItem host) async {
+  /// World-Class Multi-Protocol Connection Engine:
+  /// - RDP: Native FreeRDP 3.32.2 (`RdpFfiClient` via `libjaladesk_freerdp.so`) with CredSSP/NLA + TLS + Live RGBA32 GDI Framebuffer
+  /// - VNC: Full RFC 6143 RFB 3.3/3.7/3.8 (`VncRfbClient`) with DES Challenge-Response + Live RGBA32 Framebuffer
+  /// - SSH / SFTP: Full `dartssh2` Interactive PTY Shell (`client.shell()`) & SFTP Subsystem (`client.sftp()`)
+  /// - Hypervisor: HTTPS TLS Certificate & Proxmox VE Endpoint Inspector
+  Future<void> _connectToHost(RemoteHostItem rawHost, {bool forceCredentialPrompt = false}) async {
     if (widget.disableNetworkProbes) {
-      // Deterministic path for widget tests where real sockets are disabled
       setState(() {
-        if (host.protocol == RemoteProtocol.ssh || host.protocol == RemoteProtocol.sftp) {
-          _activeSshHost = host;
-          _sshSubMode = host.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal';
+        if (rawHost.protocol == RemoteProtocol.ssh || rawHost.protocol == RemoteProtocol.sftp) {
+          _activeSshHost = rawHost;
+          _sshSubMode = rawHost.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal';
           _tabIndex = 2;
-          _sshLines.add('--- Connected to ${host.name} (${host.address}:${host.port}) ---');
-          _sshLines.add('${host.username}@${host.name.split(' ').first}:~\$ ');
+          _sshLines.add('--- Connected to ${rawHost.name} (${rawHost.address}:${rawHost.port}) ---');
+          _sshLines.add('${rawHost.username}@${rawHost.name.split(' ').first}:~\$ ');
         } else {
-          _activeRdpHost = host;
+          _activeRdpHost = rawHost;
           _tabIndex = 1;
-          _lastRdpAction = 'Connected to ${host.name} (${host.address}:${host.port})';
+          _lastRdpAction = 'Connected to ${rawHost.name} (${rawHost.address}:${rawHost.port})';
         }
       });
       return;
+    }
+
+    // Prompt for password if none is stored yet (for RDP/SSH/SFTP)
+    RemoteHostItem host = rawHost;
+    if (forceCredentialPrompt ||
+        ((host.protocol == RemoteProtocol.rdp ||
+                host.protocol == RemoteProtocol.ssh ||
+                host.protocol == RemoteProtocol.sftp) &&
+            host.password.isEmpty &&
+            host.privateKeyPem.isEmpty)) {
+      final prompted = await _promptCredentialsIfNeeded(host, forcePrompt: true);
+      if (prompted == null) return;
+      host = prompted;
     }
 
     String stageText = 'Connecting to ${host.address}:${host.port} (${host.protocol.name.toUpperCase()})...';
@@ -1039,10 +1369,12 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     bool dialogOpen = true;
     StateSetter? modalSetState;
 
-    // Start connection asynchronously while displaying progress dialog
     Future<void> performHandshake() async {
       final sw = Stopwatch()..start();
       try {
+        // =====================================================================
+        // 1. SSHv2 INTERACTIVE PTY SHELL & SFTP ENGINE (dartssh2)
+        // =====================================================================
         if (host.protocol == RemoteProtocol.ssh || host.protocol == RemoteProtocol.sftp) {
           modalSetState?.call(() {
             stageText = '1/3 Opening TCP socket to ${host.address}:${host.port}...';
@@ -1050,12 +1382,13 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           final sshSocket = await SSHSocket.connect(
             host.address,
             host.port,
-            timeout: const Duration(seconds: 6),
+            timeout: const Duration(seconds: 7),
           );
           final rtt = sw.elapsedMilliseconds.clamp(1, 9999);
 
+          final (_, cleanUser) = host.resolvedDomainAndUser;
           modalSetState?.call(() {
-            stageText = '2/3 Performing SSHv2 key exchange & authenticating ${host.username}@${host.address}...';
+            stageText = '2/3 Performing SSHv2 handshake & authenticating $cleanUser@${host.address}...';
           });
 
           List<SSHKeyPair>? identities;
@@ -1068,27 +1401,29 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
           final client = SSHClient(
             sshSocket,
-            username: host.username.isEmpty ? 'root' : host.username,
+            username: cleanUser.isEmpty ? 'root' : cleanUser,
             identities: identities,
             onPasswordRequest: () => host.password,
           );
 
-          await client.authenticated.timeout(const Duration(seconds: 8));
+          await client.authenticated.timeout(const Duration(seconds: 10));
+
+          modalSetState?.call(() {
+            stageText = '3/3 Opening interactive xterm-256color PTY shell & SFTP subsystem...';
+          });
+
+          SSHSession? ptySession;
+          try {
+            ptySession = await client.shell(
+              pty: const SSHPtyConfig(type: 'xterm-256color', width: 100, height: 34),
+            );
+          } catch (_) {}
 
           SftpClient? sftp;
           List<RemoteSftpEntry> initialSftpEntries = [];
-          if (host.protocol == RemoteProtocol.sftp) {
-            modalSetState?.call(() {
-              stageText = '3/3 Initializing SFTP subsystem & listing remote directory...';
-            });
+          try {
             sftp = await client.sftp();
             initialSftpEntries = await _fetchSftpDirectoryEntries(sftp, '.');
-          }
-
-          String bannerOut = '';
-          try {
-            final unameBytes = await client.run('uname -srm || ver').timeout(const Duration(seconds: 3));
-            bannerOut = utf8.decode(unameBytes, allowMalformed: true).trim();
           } catch (_) {}
 
           if (!mounted) {
@@ -1104,19 +1439,160 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             }
             _activeSshHost = host.copyWith(latencyMs: rtt, isOnline: true);
             _sshClient = client;
+            _sshPtySession = ptySession;
             _sftpClient = sftp;
             _sshLiveConnected = true;
             _sshSubMode = host.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal';
+            _sftpCurrentPath = '.';
             if (initialSftpEntries.isNotEmpty) {
               _sftpEntries = initialSftpEntries;
             }
             _sshLines
               ..clear()
-              ..add('✓ SSHv2 Authenticated to ${host.address}:${host.port} ($rtt ms)')
-              ..add('User: ${host.username} • Cipher: chacha20-poly1305 / aes256-gcm')
-              ..add(bannerOut.isNotEmpty ? 'Remote OS: $bannerOut' : 'Interactive SSHv2 session ready.')
-              ..add('${host.username}@${host.name.split(" ").first}:~\$ ');
+              ..add('✓ SSHv2 PTY Connected to ${host.address}:${host.port} ($rtt ms)')
+              ..add('');
             _tabIndex = 2;
+          });
+
+          if (ptySession != null) {
+            _sshStdoutSub = ptySession.stdout.listen((data) {
+              _appendPtyOutput(utf8.decode(data, allowMalformed: true));
+            });
+            _sshStderrSub = ptySession.stderr.listen((data) {
+              _appendPtyOutput(utf8.decode(data, allowMalformed: true));
+            });
+          } else {
+            _appendPtyOutput('$cleanUser@${host.name.split(" ").first}:~\$ ');
+          }
+
+          _saveVaultToDisk();
+          if (dialogOpen && mounted) {
+            Navigator.of(context, rootNavigator: true).pop();
+          }
+          return;
+        }
+
+        // =====================================================================
+        // 2. RDP ENGINE — NATIVE FREERDP 3.32.2 (`libjaladesk_freerdp.so`)
+        // =====================================================================
+        if (host.protocol == RemoteProtocol.rdp) {
+          final (resolvedDomain, resolvedUser) = host.resolvedDomainAndUser;
+          modalSetState?.call(() {
+            stageText =
+                '1/3 Starting FreeRDP 3.32.2 Engine (${resolvedDomain.isNotEmpty ? "$resolvedDomain\\$resolvedUser" : resolvedUser}@${host.address}:${host.port})...';
+          });
+
+          if (RdpFfiClient.isNativeAvailable) {
+            _closeDesktopSession();
+            final rdpClient = RdpFfiClient(
+              host: host.address,
+              port: host.port,
+              domain: resolvedDomain,
+              username: resolvedUser,
+              password: host.password,
+              initialWidth: 1280,
+              initialHeight: 800,
+              onFrame: (ui.Image img, int w, int h, String status) {
+                if (!mounted) return;
+                setState(() {
+                  _remoteDesktopFrame = img;
+                  _desktopServerWidth = w;
+                  _desktopServerHeight = h;
+                  _desktopLiveConnected = true;
+                  _desktopProtocolBanner = status;
+                });
+              },
+              onStatus: (String status, {bool isError = false}) {
+                if (!mounted) return;
+                setState(() {
+                  _desktopProtocolBanner = status;
+                  _lastRdpAction = status;
+                  if (isError) _desktopLiveConnected = false;
+                });
+              },
+            );
+
+            await rdpClient.connect();
+            final rtt = sw.elapsedMilliseconds.clamp(1, 9999);
+            if (!mounted) {
+              await rdpClient.dispose();
+              return;
+            }
+
+            setState(() {
+              final idx = _hosts.indexWhere((h) => h.id == host.id);
+              if (idx >= 0) {
+                _hosts[idx] = _hosts[idx].copyWith(latencyMs: rtt, isOnline: true);
+              }
+              _activeRdpHost = host.copyWith(latencyMs: rtt, isOnline: true);
+              _rdpFfiClient = rdpClient;
+              _desktopLiveConnected = true;
+              _desktopServerWidth = rdpClient.width;
+              _desktopServerHeight = rdpClient.height;
+              _desktopProtocolBanner = rdpClient.statusText;
+              _lastRdpAction = 'Live FreeRDP 3.x Desktop (${rdpClient.width}x${rdpClient.height})';
+              _tabIndex = 1;
+            });
+            _saveVaultToDisk();
+            if (dialogOpen && mounted) {
+              Navigator.of(context, rootNavigator: true).pop();
+            }
+            return;
+          }
+        }
+
+        // =====================================================================
+        // 3. VNC ENGINE — FULL RFC 6143 RFB 3.3 / 3.7 / 3.8 (`VncRfbClient`)
+        // =====================================================================
+        if (host.protocol == RemoteProtocol.vnc) {
+          modalSetState?.call(() {
+            stageText = '1/3 Negotiating VNC RFB 3.8 session & DES authentication with ${host.address}:${host.port}...';
+          });
+          _closeDesktopSession();
+          final vncClient = VncRfbClient(
+            host: host.address,
+            port: host.port,
+            password: host.password,
+            onFrame: (ui.Image img, int w, int h, String status) {
+              if (!mounted) return;
+              setState(() {
+                _remoteDesktopFrame = img;
+                _desktopServerWidth = w;
+                _desktopServerHeight = h;
+                _desktopLiveConnected = true;
+                _desktopProtocolBanner = status;
+              });
+            },
+            onStatus: (String status, {bool isError = false}) {
+              if (!mounted) return;
+              setState(() {
+                _desktopProtocolBanner = status;
+                _lastRdpAction = status;
+                if (isError) _desktopLiveConnected = false;
+              });
+            },
+          );
+
+          await vncClient.connect();
+          final rtt = sw.elapsedMilliseconds.clamp(1, 9999);
+          if (!mounted) {
+            await vncClient.dispose();
+            return;
+          }
+
+          setState(() {
+            final idx = _hosts.indexWhere((h) => h.id == host.id);
+            if (idx >= 0) {
+              _hosts[idx] = _hosts[idx].copyWith(latencyMs: rtt, isOnline: true);
+            }
+            _activeRdpHost = host.copyWith(latencyMs: rtt, isOnline: true);
+            _vncRfbClient = vncClient;
+            _desktopLiveConnected = true;
+            _desktopServerWidth = vncClient.width;
+            _desktopServerHeight = vncClient.height;
+            _desktopProtocolBanner = 'RFB 3.8 • ${vncClient.desktopName} (${vncClient.width}x${vncClient.height})';
+            _lastRdpAction = 'Live VNC Framebuffer (${vncClient.width}x${vncClient.height})';
+            _tabIndex = 1;
           });
           _saveVaultToDisk();
           if (dialogOpen && mounted) {
@@ -1125,83 +1601,36 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           return;
         }
 
-        // RDP, VNC, or Hypervisor real TCP + wire protocol handshake
+        // =====================================================================
+        // 4. HYPERVISOR / PROXMOX VE HTTPS API INSPECTOR
+        // =====================================================================
         modalSetState?.call(() {
-          stageText = '1/3 Opening TCP connection to ${host.address}:${host.port}...';
+          stageText = '1/2 Connecting to Hypervisor HTTPS endpoint ${host.address}:${host.port}...';
         });
-        Socket rawSocket = await Socket.connect(
-          host.address,
-          host.port,
-          timeout: const Duration(seconds: 6),
-        );
+        final httpClient = HttpClient()..badCertificateCallback = (_, __, ___) => true;
+        httpClient.connectionTimeout = const Duration(seconds: 6);
+        final uri = Uri.parse('https://${host.address}:${host.port}/api2/json/version');
+        final req = await httpClient.getUrl(uri);
+        final resp = await req.close().timeout(const Duration(seconds: 6));
         final rtt = sw.elapsedMilliseconds.clamp(1, 9999);
+        final body = await resp.transform(utf8.decoder).join();
+        httpClient.close();
 
-        String negotiatedBanner = '';
-        if (host.protocol == RemoteProtocol.vnc) {
-          modalSetState?.call(() {
-            stageText = '2/3 Negotiating VNC RFB 3.8 handshake...';
-          });
-          final firstChunk = await rawSocket.first.timeout(
-            const Duration(seconds: 4),
-            onTimeout: () => Uint8List(0),
-          );
-          final serverVer = ascii.decode(firstChunk, allowInvalid: true).trim();
-          if (serverVer.startsWith('RFB ')) {
-            rawSocket.add(ascii.encode('RFB 003.008\n'));
-            await rawSocket.flush();
-            negotiatedBanner = 'RFB Handshake OK ($serverVer) • $rtt ms';
-          } else {
-            negotiatedBanner = 'TCP Connected ($rtt ms) • RFB Stream Active';
-          }
-        } else if (host.protocol == RemoteProtocol.rdp) {
-          modalSetState?.call(() {
-            stageText = '2/3 Sending X.224 Connection Request PDU (TLS / CredSSP NLA)...';
-          });
-          // Standard 19-byte TPKT + X.224 Connection Request with RDP_NEG_REQ (PROTOCOL_SSL | PROTOCOL_HYBRID)
-          final x224Cr = Uint8List.fromList([
-            0x03, 0x00, 0x00, 0x13, // TPKT v3, length 19
-            0x0E, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, // X.224 CR CDT
-            0x01, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00, // RDP_NEG_REQ: HYBRID (NLA) | SSL
-          ]);
-          rawSocket.add(x224Cr);
-          await rawSocket.flush();
-          final resp = await rawSocket.first.timeout(
-            const Duration(seconds: 4),
-            onTimeout: () => Uint8List(0),
-          );
-          if (resp.length >= 11 && resp[5] == 0xD0) {
-            final negProto = resp.length >= 19 ? resp[15] : 0;
-            final protoDesc = negProto == 2
-                ? 'CredSSP / NLA (HYBRID)'
-                : (negProto == 1 ? 'TLS 1.3 RDP-SSL' : 'Standard RDP');
-            negotiatedBanner = 'X.224 Confirm (0xD0) • $protoDesc • $rtt ms';
-          } else {
-            negotiatedBanner = 'RDP TCP Socket Connected • $rtt ms';
-          }
-        } else {
-          modalSetState?.call(() {
-            stageText = '2/3 Verifying Hypervisor TLS endpoint (${host.address}:${host.port})...';
-          });
-          negotiatedBanner = 'Hypervisor Endpoint Reachable • $rtt ms';
-        }
-
-        if (!mounted) {
-          rawSocket.destroy();
-          return;
-        }
-
-        _closeDesktopSocket();
+        if (!mounted) return;
         setState(() {
           final idx = _hosts.indexWhere((h) => h.id == host.id);
           if (idx >= 0) {
             _hosts[idx] = _hosts[idx].copyWith(latencyMs: rtt, isOnline: true);
           }
-          _activeRdpHost = host.copyWith(latencyMs: rtt, isOnline: true);
-          _activeDesktopSocket = rawSocket;
-          _desktopLiveConnected = true;
-          _desktopProtocolBanner = negotiatedBanner;
-          _lastRdpAction = 'Live connection established to ${host.address}:${host.port} ($negotiatedBanner)';
-          _tabIndex = 1;
+          _activeSshHost = host.copyWith(latencyMs: rtt, isOnline: true);
+          _sshSubMode = 'terminal';
+          _sshLines
+            ..clear()
+            ..add('✓ Hypervisor HTTPS Connected to https://${host.address}:${host.port} ($rtt ms)')
+            ..add('HTTP Status: ${resp.statusCode} ${resp.reasonPhrase}')
+            ..add(body.isNotEmpty ? 'Response: $body' : 'TLS Endpoint Verified.')
+            ..add('${host.username}@${host.name.split(" ").first}:~\$ ');
+          _tabIndex = 2;
         });
         _saveVaultToDisk();
         if (dialogOpen && mounted) {
@@ -1210,21 +1639,16 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       } catch (err) {
         sw.stop();
         if (!mounted) return;
-        setState(() {
-          final idx = _hosts.indexWhere((h) => h.id == host.id);
-          if (idx >= 0) {
-            _hosts[idx] = _hosts[idx].copyWith(isOnline: false);
-          }
-        });
         modalSetState?.call(() {
           connecting = false;
-          errorDetail = err.toString().replaceFirst('Exception: ', '');
+          errorDetail = err.toString().replaceFirst('SocketException: ', '').replaceFirst('Exception: ', '');
         });
       }
     }
 
     unawaited(performHandshake());
 
+    if (!mounted) return;
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -1249,7 +1673,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    connecting ? 'Connecting to ${host.name}' : 'Connection Failed',
+                    connecting ? 'Connecting to ${host.name}' : 'Session Handshake Error',
                     style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: JalaPalette.text),
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -1261,7 +1685,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${host.protocol.name.toUpperCase()} • ${host.address}:${host.port}',
+                  '${host.protocol.name.toUpperCase()} • ${host.displayAccount}@${host.address}:${host.port}',
                   style: const TextStyle(
                     fontSize: 12,
                     fontFamily: 'monospace',
@@ -1290,7 +1714,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                       border: Border.all(color: JalaPalette.danger.withValues(alpha: 0.5)),
                     ),
                     child: Text(
-                      errorDetail ?? 'Host unreachable from current network.',
+                      errorDetail ?? 'Connection failed.',
                       style: const TextStyle(
                         fontSize: 11.5,
                         fontFamily: 'monospace',
@@ -1301,7 +1725,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   ),
                   const SizedBox(height: 10),
                   const Text(
-                    'Make sure your phone is on the same Wi-Fi / VPN / Tailscale network as this server and the port is open.',
+                    'Verify your Domain/Username/Password and ensure your device has network routing to this host and port.',
                     style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
                   ),
                 ],
@@ -1320,36 +1744,17 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   onPressed: () {
                     dialogOpen = false;
                     Navigator.of(ctx).pop();
-                    _showHostEditorDialog(existing: host);
+                    _connectToHost(host, forceCredentialPrompt: true);
                   },
-                  child: const Text('Edit Host', style: TextStyle(color: JalaPalette.brandGold)),
+                  child: const Text('Change Password', style: TextStyle(color: JalaPalette.brandGold)),
                 ),
-                FilledButton.tonal(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: JalaPalette.selected,
-                    foregroundColor: JalaPalette.text,
-                  ),
+                TextButton(
                   onPressed: () {
                     dialogOpen = false;
                     Navigator.of(ctx).pop();
-                    setState(() {
-                      if (host.protocol == RemoteProtocol.ssh || host.protocol == RemoteProtocol.sftp) {
-                        _activeSshHost = host;
-                        _sshLiveConnected = false;
-                        _sshSubMode = host.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal';
-                        _sshLines.add('--- Offline Sandbox Mode for ${host.name} (${host.address}:${host.port}) ---');
-                        _sshLines.add('${host.username}@${host.name.split(" ").first}:~\$ ');
-                        _tabIndex = 2;
-                      } else {
-                        _activeRdpHost = host;
-                        _desktopLiveConnected = false;
-                        _desktopProtocolBanner = 'Offline Touch Sandbox (${host.address}:${host.port} unreachable)';
-                        _lastRdpAction = 'Offline Touch Sandbox • Trackpad & key modifiers active for preview';
-                        _tabIndex = 1;
-                      }
-                    });
+                    _showHostEditorDialog(existing: host);
                   },
-                  child: const Text('Offline Preview', style: TextStyle(fontSize: 12)),
+                  child: const Text('Edit Host', style: TextStyle(color: JalaPalette.text2)),
                 ),
                 FilledButton(
                   style: FilledButton.styleFrom(
@@ -1406,8 +1811,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   }
 
   Future<void> _browseRemoteSftpPath(String newPath) async {
-    final sftp = _sftpClient;
-    if (sftp == null && _sshClient != null) {
+    if (_sftpClient == null && _sshClient != null) {
       try {
         _sftpClient = await _sshClient!.sftp();
       } catch (e) {
@@ -1438,7 +1842,63 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     }
   }
 
-  /// Executes an SSH command on the live `dartssh2` `SSHClient` (or local fallback if in offline sandbox)
+  Future<void> _viewRemoteSftpFile(RemoteSftpEntry entry) async {
+    final sftp = _sftpClient;
+    if (sftp == null) return;
+    setState(() => _sshBusy = true);
+    try {
+      final file = await sftp.open(entry.fullPath, mode: SftpFileOpenMode.read);
+      final bytes = await file.readBytes(length: 16384);
+      await file.close();
+      if (!mounted) return;
+      setState(() => _sshBusy = false);
+      final content = utf8.decode(bytes, allowMalformed: true);
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: JalaPalette.surface,
+          title: Text(
+            entry.name,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
+          ),
+          content: SizedBox(
+            width: 380,
+            height: 260,
+            child: SingleChildScrollView(
+              child: SelectableText(
+                content.isEmpty ? '(Empty file)' : content,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 11.5, color: JalaPalette.text),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: content));
+                Navigator.of(ctx).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Copied ${entry.name} content to clipboard')),
+                );
+              },
+              child: const Text('Copy', style: TextStyle(color: JalaPalette.brandGold)),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _sshBusy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to read ${entry.name}: $e')),
+      );
+    }
+  }
+
+  /// Executes an SSH command on the live `dartssh2` PTY session or `SSHClient.run`
   Future<void> _runSshCommand(String rawCmd) async {
     final cmd = rawCmd.trim();
     _sshInputCtrl.clear();
@@ -1447,10 +1907,19 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
     if (cmd == 'clear') {
       setState(() {
-        _sshLines
-          ..clear()
-          ..add('$userLabel@$hostLabel:~\$ ');
+        _sshLines.clear();
       });
+      if (_sshLiveConnected && _sshPtySession != null) {
+        _sshPtySession!.write(Uint8List.fromList(utf8.encode('\n')));
+      } else {
+        setState(() => _sshLines.add('$userLabel@$hostLabel:~\$ '));
+      }
+      return;
+    }
+
+    // If an interactive PTY shell is open, write directly to PTY stdin!
+    if (_sshLiveConnected && _sshPtySession != null) {
+      _sshPtySession!.write(Uint8List.fromList(utf8.encode('$cmd\n')));
       return;
     }
 
@@ -1467,7 +1936,6 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       return;
     }
 
-    // Real SSHv2 command execution when connected via dartssh2!
     if (_sshLiveConnected && _sshClient != null) {
       setState(() => _sshBusy = true);
       try {
@@ -1496,11 +1964,10 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       return;
     }
 
-    // Offline sandbox fallback (when not connected to a live SSH server)
+    // Offline preview fallback (used by widget tests and offline mode)
     setState(() {
       if (cmd == 'help') {
-        _sshLines.add('Offline Sandbox Commands: uptime, uname -a, docker ps, kubectl get pods, df -h, clear');
-        _sshLines.add('Tip: Tap "Connect" on a real SSH host in the Connections tab for live SSHv2 execution.');
+        _sshLines.add('Commands: uptime, uname -a, docker ps, kubectl get pods, df -h, clear');
       } else if (cmd == 'uptime') {
         _sshLines.add(' 19:36:12 up 142 days,  7:14,  2 users,  load average: 0.18, 0.24, 0.21');
       } else if (cmd == 'uname -a') {
@@ -1517,45 +1984,86 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         _sshLines.add('Filesystem      Size  Used Avail Use% Mounted on');
         _sshLines.add('/dev/nvme0n1p2  500G  142G  358G  29% /');
       } else {
-        _sshLines.add('[sandbox] Not connected to a live SSH server. Tap "Connect SSH" above to open a real SSHv2 session.');
+        _sshLines.add('[offline] Connect to a live SSH server in Connections to execute "$cmd" remotely.');
       }
       _sshLines.add('$userLabel@$hostLabel:~\$ ');
     });
   }
 
-  /// Sends a live RFB 3.8 PointerEvent (type 5) if connected to a VNC server
-  void _sendLiveDesktopPointer(int x, int y, int buttonMask) {
-    final sock = _activeDesktopSocket;
-    if (sock != null && _desktopLiveConnected && _activeRdpHost?.protocol == RemoteProtocol.vnc) {
-      try {
-        final pkt = Uint8List(6);
-        pkt[0] = 5; // RFB PointerEvent
-        pkt[1] = buttonMask & 0xFF;
-        pkt[2] = (x >> 8) & 0xFF;
-        pkt[3] = x & 0xFF;
-        pkt[4] = (y >> 8) & 0xFF;
-        pkt[5] = y & 0xFF;
-        sock.add(pkt);
-      } catch (_) {}
+  /// Dispatches mouse coordinates & clicks to the active FreeRDP or VNC engine
+  void _dispatchDesktopPointer({
+    required double normX,
+    required double normY,
+    bool click = false,
+    bool rightClick = false,
+    bool doubleClick = false,
+  }) {
+    final rx = (normX.clamp(0.0, 1.0) * _desktopServerWidth).round().clamp(0, _desktopServerWidth - 1);
+    final ry = (normY.clamp(0.0, 1.0) * _desktopServerHeight).round().clamp(0, _desktopServerHeight - 1);
+
+    if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
+      if (click || rightClick || doubleClick) {
+        _rdpFfiClient!.sendMouseClick(rx, ry, rightClick: rightClick, doubleClick: doubleClick);
+      } else {
+        _rdpFfiClient!.sendMouseMove(rx, ry);
+      }
+    } else if (_vncRfbClient != null && _vncRfbClient!.isConnected) {
+      if (rightClick) {
+        _vncRfbClient!.sendPointerEvent(rx, ry, 4);
+        _vncRfbClient!.sendPointerEvent(rx, ry, 0);
+      } else if (doubleClick) {
+        _vncRfbClient!.sendPointerEvent(rx, ry, 1);
+        _vncRfbClient!.sendPointerEvent(rx, ry, 0);
+        _vncRfbClient!.sendPointerEvent(rx, ry, 1);
+        _vncRfbClient!.sendPointerEvent(rx, ry, 0);
+      } else if (click) {
+        _vncRfbClient!.sendPointerEvent(rx, ry, 1);
+        _vncRfbClient!.sendPointerEvent(rx, ry, 0);
+      } else {
+        _vncRfbClient!.sendPointerEvent(rx, ry, 0);
+      }
     }
   }
 
-  /// Sends a live RFB 3.8 KeyEvent (type 4) if connected to a VNC server
-  void _sendLiveDesktopKey(int keysym) {
-    final sock = _activeDesktopSocket;
-    if (sock != null && _desktopLiveConnected && _activeRdpHost?.protocol == RemoteProtocol.vnc) {
-      try {
-        for (final down in [1, 0]) {
-          final pkt = Uint8List(8);
-          pkt[0] = 4; // RFB KeyEvent
-          pkt[1] = down;
-          pkt[4] = (keysym >> 24) & 0xFF;
-          pkt[5] = (keysym >> 16) & 0xFF;
-          pkt[6] = (keysym >> 8) & 0xFF;
-          pkt[7] = keysym & 0xFF;
-          sock.add(pkt);
-        }
-      } catch (_) {}
+  /// Dispatches special keys or typed text to the active FreeRDP or VNC engine
+  void _dispatchDesktopKey(String keyLabel) {
+    if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
+      _rdpFfiClient!.sendSpecialKey(
+        keyLabel,
+        ctrl: _ctrlLocked,
+        alt: _altLocked,
+        win: _winLocked,
+        shift: _shiftLocked,
+      );
+    } else if (_vncRfbClient != null && _vncRfbClient!.isConnected) {
+      switch (keyLabel) {
+        case 'Esc':
+          _vncRfbClient!.sendKeySym(0xFF1B);
+          break;
+        case 'Tab':
+          _vncRfbClient!.sendKeySym(0xFF09);
+          break;
+        case 'Enter':
+          _vncRfbClient!.sendKeySym(0xFF0D);
+          break;
+        case 'Bksp':
+          _vncRfbClient!.sendKeySym(0xFF08);
+          break;
+        case '←':
+          _vncRfbClient!.sendKeySym(0xFF51);
+          break;
+        case '↑':
+          _vncRfbClient!.sendKeySym(0xFF52);
+          break;
+        case '→':
+          _vncRfbClient!.sendKeySym(0xFF53);
+          break;
+        case '↓':
+          _vncRfbClient!.sendKeySym(0xFF54);
+          break;
+        default:
+          _vncRfbClient!.sendText(keyLabel);
+      }
     }
   }
 
@@ -1621,6 +2129,29 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             ),
             onPressed: () {
               final raw = controller.text.trim();
+              if (raw.startsWith('[')) {
+                try {
+                  final list = jsonDecode(raw) as List<dynamic>;
+                  final importedList = <RemoteHostItem>[];
+                  for (final item in list) {
+                    if (item is Map<String, dynamic>) {
+                      importedList.add(RemoteHostItem.fromJson(item));
+                    }
+                  }
+                  if (importedList.isNotEmpty) {
+                    setState(() {
+                      _hosts
+                        ..clear()
+                        ..addAll(importedList);
+                      _syncActiveHostSelection();
+                    });
+                    _saveVaultToDisk();
+                    _probeAllHosts();
+                    Navigator.of(ctx).pop();
+                    return;
+                  }
+                } catch (_) {}
+              }
               final parsedUri = Uri.tryParse(raw);
               if (parsedUri != null &&
                   ['ssh', 'rdp', 'vnc', 'sftp'].contains(parsedUri.scheme.toLowerCase()) &&
@@ -1630,17 +2161,24 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   orElse: () => RemoteProtocol.ssh,
                 );
                 final port = parsedUri.hasPort ? parsedUri.port : defaultPortForProtocol(proto);
-                final user = parsedUri.userInfo.isNotEmpty
-                    ? parsedUri.userInfo.split(':').first
+                final userParts = parsedUri.userInfo.split(':');
+                final user = userParts.isNotEmpty && userParts.first.isNotEmpty
+                    ? Uri.decodeComponent(userParts.first)
                     : 'root';
+                final pass = userParts.length > 1
+                    ? Uri.decodeComponent(userParts.sublist(1).join(':'))
+                    : '';
+                final qp = parsedUri.queryParameters;
                 final imported = RemoteHostItem(
                   id: 'h-${DateTime.now().millisecondsSinceEpoch}',
-                  name: parsedUri.host,
+                  name: qp['name'] ?? parsedUri.host,
                   address: parsedUri.host,
                   port: port,
                   protocol: proto,
+                  domain: qp['domain'] ?? '',
                   username: user,
-                  folder: 'Imported URI',
+                  password: pass,
+                  folder: qp['folder'] ?? 'Imported URI',
                   osLabel: '${proto.name.toUpperCase()} • $user@${parsedUri.host}',
                 );
                 setState(() {
@@ -1956,7 +2494,6 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
       children: [
-        // JalaDesk Identity Hero Banner
         Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
@@ -2036,7 +2573,6 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           ),
         ),
         const SizedBox(height: 12),
-        // Search Input + Refresh Ping button
         Row(
           children: [
             Expanded(
@@ -2082,7 +2618,6 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           ],
         ),
         const SizedBox(height: 10),
-        // Protocol Filter Strip
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(
@@ -2200,7 +2735,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           ),
           const SizedBox(height: 6),
           const Text(
-            'Add your own SSH, SFTP, RDP, or VNC server to open a live encrypted session, or import connections from JalaDesk Desktop.',
+            'Add your own SSH, SFTP, RDP (FreeRDP 3.x NLA), or VNC server to open a live remote session.',
             style: TextStyle(fontSize: 12, color: JalaPalette.muted, height: 1.4),
             textAlign: TextAlign.center,
           ),
@@ -2327,7 +2862,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        '${host.folder} • ${host.username}@${host.address}:${host.port}',
+                        '${host.folder} • ${host.displayAccount}@${host.address}:${host.port}',
                         style: const TextStyle(fontSize: 11.5, color: JalaPalette.muted),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -2426,7 +2961,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     );
   }
 
-  /// Jump Desktop-style Touch RDP / VNC Canvas with Live Socket Stream & Extended Modifier Bar
+  /// Jump Desktop-style Touch RDP / VNC Canvas with Real Live Framebuffer (`ui.Image`) & Keyboard Input
   Widget _buildJumpRdpCanvasTab() {
     final hostTitle = _activeRdpHost != null
         ? '${_activeRdpHost!.name} (${_activeRdpHost!.address}:${_activeRdpHost!.port})'
@@ -2436,7 +2971,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       children: [
         // Top HUD bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: const BoxDecoration(
             color: JalaPalette.bar,
             border: Border(bottom: BorderSide(color: JalaPalette.line)),
@@ -2445,255 +2980,373 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             children: [
               Icon(
                 Icons.desktop_windows_rounded,
-                size: 16,
+                size: 14,
                 color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 4),
               Expanded(
                 child: Text(
                   hostTitle,
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: JalaPalette.text),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: 6),
-              Container(
-                padding: const EdgeInsets.all(2),
-                decoration: BoxDecoration(
-                  color: JalaPalette.header,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: JalaPalette.lineInput),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _buildTouchModeOption('Trackpad', true),
-                    _buildTouchModeOption('Direct Touch', false),
-                  ],
-                ),
-              ),
               const SizedBox(width: 4),
-              InkWell(
-                borderRadius: BorderRadius.circular(7),
-                onTap: () => setState(() => _viewOnly = !_viewOnly),
-                child: Container(
-                  width: 28,
-                  height: 28,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: JalaPalette.header,
-                    borderRadius: BorderRadius.circular(7),
-                    border: Border.all(color: JalaPalette.lineInput),
-                  ),
-                  child: Icon(
-                    _viewOnly ? Icons.lock_rounded : Icons.lock_open_rounded,
-                    size: 15,
-                    color: _viewOnly ? JalaPalette.amber : JalaPalette.ok,
+              Flexible(
+                flex: 0,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(2),
+                        decoration: BoxDecoration(
+                          color: JalaPalette.header,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: JalaPalette.lineInput),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _buildTouchModeOption('Trackpad', true),
+                            _buildTouchModeOption('Direct Touch', false),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(7),
+                        onTap: () => setState(() => _showDesktopKeyboardBar = !_showDesktopKeyboardBar),
+                        child: Container(
+                          width: 26,
+                          height: 26,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: _showDesktopKeyboardBar ? JalaPalette.selected : JalaPalette.header,
+                            borderRadius: BorderRadius.circular(7),
+                            border: Border.all(
+                              color: _showDesktopKeyboardBar ? JalaPalette.brandGold : JalaPalette.lineInput,
+                            ),
+                          ),
+                          child: const Icon(Icons.keyboard_alt_outlined, size: 14, color: JalaPalette.brandGold),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(7),
+                        onTap: () => setState(() => _viewOnly = !_viewOnly),
+                        child: Container(
+                          width: 26,
+                          height: 26,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: JalaPalette.header,
+                            borderRadius: BorderRadius.circular(7),
+                            border: Border.all(color: JalaPalette.lineInput),
+                          ),
+                          child: Icon(
+                            _viewOnly ? Icons.lock_rounded : Icons.lock_open_rounded,
+                            size: 14,
+                            color: _viewOnly ? JalaPalette.amber : JalaPalette.ok,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
             ],
           ),
         ),
-        // Interactive Remote Desktop Viewport
-        Expanded(
-          child: GestureDetector(
-            onPanUpdate: (details) {
-              if (_viewOnly) return;
-              if (_trackpadMode) {
-                setState(() {
-                  _cursorPos = Offset(
-                    (_cursorPos.dx + details.delta.dx * 1.35).clamp(16.0, 320.0),
-                    (_cursorPos.dy + details.delta.dy * 1.35).clamp(16.0, 240.0),
-                  );
-                });
-                _sendLiveDesktopPointer(
-                  (_cursorPos.dx / 320.0 * _desktopServerWidth).round(),
-                  (_cursorPos.dy / 240.0 * _desktopServerHeight).round(),
-                  0,
-                );
-              }
-            },
-            onTapDown: (details) {
-              if (_viewOnly) return;
-              setState(() {
-                if (!_trackpadMode) {
-                  _cursorPos = Offset(
-                    details.localPosition.dx.clamp(16.0, 320.0),
-                    details.localPosition.dy.clamp(16.0, 240.0),
-                  );
-                }
-                _lastRdpAction =
-                    'Left Click @ (${_cursorPos.dx.toInt()}, ${_cursorPos.dy.toInt()}) [${_activeModifierSummary()}]';
-              });
-              final rx = (_cursorPos.dx / 320.0 * _desktopServerWidth).round();
-              final ry = (_cursorPos.dy / 240.0 * _desktopServerHeight).round();
-              _sendLiveDesktopPointer(rx, ry, 1);
-              _sendLiveDesktopPointer(rx, ry, 0);
-            },
-            onSecondaryTap: () {
-              if (_viewOnly) return;
-              setState(() {
-                _lastRdpAction =
-                    'Right Click (Context Menu) @ (${_cursorPos.dx.toInt()}, ${_cursorPos.dy.toInt()})';
-              });
-              final rx = (_cursorPos.dx / 320.0 * _desktopServerWidth).round();
-              final ry = (_cursorPos.dy / 240.0 * _desktopServerHeight).round();
-              _sendLiveDesktopPointer(rx, ry, 4);
-              _sendLiveDesktopPointer(rx, ry, 0);
-            },
-            child: InteractiveViewer(
-              minScale: 1.0,
-              maxScale: 4.0,
-              child: Container(
-                margin: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [JalaPalette.header, JalaPalette.chip, JalaPalette.selected],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: _desktopLiveConnected
-                        ? JalaPalette.ok.withValues(alpha: 0.7)
-                        : JalaPalette.accentLine.withValues(alpha: 0.55),
+        if (_showDesktopKeyboardBar)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            color: JalaPalette.aside,
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _desktopKeyInputCtrl,
+                    onSubmitted: (txt) {
+                      if (txt.isNotEmpty) {
+                        _dispatchDesktopKey(txt);
+                        _desktopKeyInputCtrl.clear();
+                      }
+                      _dispatchDesktopKey('Enter');
+                    },
+                    style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                    decoration: InputDecoration(
+                      hintText: 'Type text to send to remote desktop...',
+                      hintStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.muted),
+                      isDense: true,
+                      filled: true,
+                      fillColor: JalaPalette.header,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(7),
+                        borderSide: const BorderSide(color: JalaPalette.lineInput),
+                      ),
+                    ),
                   ),
                 ),
-                child: Stack(
-                  children: [
-                    Positioned(
-                      top: 14,
-                      left: 14,
-                      right: 14,
-                      child: Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: JalaPalette.header.withValues(alpha: 0.9),
-                          borderRadius: BorderRadius.circular(9),
-                          border: Border.all(color: JalaPalette.lineInput),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
+                const SizedBox(width: 6),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: JalaPalette.accent,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    minimumSize: const Size(0, 34),
+                  ),
+                  onPressed: () {
+                    final txt = _desktopKeyInputCtrl.text;
+                    if (txt.isNotEmpty) {
+                      _dispatchDesktopKey(txt);
+                      _desktopKeyInputCtrl.clear();
+                    }
+                  },
+                  child: const Text('Send', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          ),
+        // Interactive Remote Desktop Viewport
+        Expanded(
+          child: LayoutBuilder(
+            builder: (ctx, constraints) {
+              final canvasW = (constraints.maxWidth - 24).clamp(160.0, 4096.0);
+              final canvasH = (constraints.maxHeight - 24).clamp(120.0, 4096.0);
+              return GestureDetector(
+                onPanUpdate: (details) {
+                  if (_viewOnly) return;
+                  if (_trackpadMode) {
+                    setState(() {
+                      _cursorPos = Offset(
+                        (_cursorPos.dx + details.delta.dx * 1.35).clamp(8.0, canvasW - 8.0),
+                        (_cursorPos.dy + details.delta.dy * 1.35).clamp(8.0, canvasH - 8.0),
+                      );
+                    });
+                    _dispatchDesktopPointer(
+                      normX: _cursorPos.dx / canvasW,
+                      normY: _cursorPos.dy / canvasH,
+                    );
+                  }
+                },
+                onTapDown: (details) {
+                  if (_viewOnly) return;
+                  setState(() {
+                    if (!_trackpadMode) {
+                      _cursorPos = Offset(
+                        details.localPosition.dx.clamp(8.0, canvasW - 8.0),
+                        details.localPosition.dy.clamp(8.0, canvasH - 8.0),
+                      );
+                    }
+                    _lastRdpAction =
+                        'Left Click @ (${(_cursorPos.dx / canvasW * _desktopServerWidth).round()}, ${(_cursorPos.dy / canvasH * _desktopServerHeight).round()}) [${_activeModifierSummary()}]';
+                  });
+                  _dispatchDesktopPointer(
+                    normX: _cursorPos.dx / canvasW,
+                    normY: _cursorPos.dy / canvasH,
+                    click: true,
+                  );
+                },
+                onDoubleTap: () {
+                  if (_viewOnly) return;
+                  setState(() {
+                    _lastRdpAction = 'Double Click @ (${_cursorPos.dx.toInt()}, ${_cursorPos.dy.toInt()})';
+                  });
+                  _dispatchDesktopPointer(
+                    normX: _cursorPos.dx / canvasW,
+                    normY: _cursorPos.dy / canvasH,
+                    doubleClick: true,
+                  );
+                },
+                onSecondaryTap: () {
+                  if (_viewOnly) return;
+                  setState(() {
+                    _lastRdpAction = 'Right Click @ (${_cursorPos.dx.toInt()}, ${_cursorPos.dy.toInt()})';
+                  });
+                  _dispatchDesktopPointer(
+                    normX: _cursorPos.dx / canvasW,
+                    normY: _cursorPos.dy / canvasH,
+                    rightClick: true,
+                  );
+                },
+                child: InteractiveViewer(
+                  minScale: 1.0,
+                  maxScale: 4.0,
+                  child: Container(
+                    margin: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: JalaPalette.splashBg,
+                      gradient: _remoteDesktopFrame == null
+                          ? const LinearGradient(
+                              colors: [JalaPalette.header, JalaPalette.chip, JalaPalette.selected],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            )
+                          : null,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: _desktopLiveConnected
+                            ? JalaPalette.ok.withValues(alpha: 0.75)
+                            : JalaPalette.accentLine.withValues(alpha: 0.55),
+                      ),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        // REAL LIVE REMOTE DESKTOP PIXEL FRAMEBUFFER (FreeRDP 3.x / VNC RFB 3.8)
+                        if (_remoteDesktopFrame != null)
+                          RawImage(
+                            image: _remoteDesktopFrame,
+                            fit: BoxFit.fill,
+                            filterQuality: FilterQuality.medium,
+                          ),
+                        // Top overlay HUD (only shown when no pixel frame has arrived yet)
+                        if (_remoteDesktopFrame == null)
+                          Positioned(
+                            top: 14,
+                            left: 14,
+                            right: 14,
+                            child: Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: JalaPalette.header.withValues(alpha: 0.9),
+                                borderRadius: BorderRadius.circular(9),
+                                border: Border.all(color: JalaPalette.lineInput),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      _buildJalaBrandLogo(size: 20, radius: 5),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          _desktopLiveConnected
+                                              ? 'LIVE STREAM • $_desktopProtocolBanner'
+                                              : 'REMOTE DESKTOP CANVAS • ${_activeRdpHost?.osLabel ?? "READY"}',
+                                          style: TextStyle(
+                                            fontSize: 10.5,
+                                            fontWeight: FontWeight.w700,
+                                            color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      if (_activeRdpHost != null)
+                                        SizedBox(
+                                          height: 26,
+                                          child: FilledButton.tonal(
+                                            style: FilledButton.styleFrom(
+                                              backgroundColor: JalaPalette.selected,
+                                              foregroundColor: JalaPalette.brandGold,
+                                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                                            ),
+                                            onPressed: () => _connectToHost(_activeRdpHost!),
+                                            child: Text(
+                                              _desktopLiveConnected ? 'Reconnect' : 'Connect Live',
+                                              style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700),
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    _lastRdpAction,
+                                    style: const TextStyle(fontSize: 11.5, color: JalaPalette.text),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        // Precision Trackpad Virtual Pointer
+                        Positioned(
+                          left: _cursorPos.dx,
+                          top: _cursorPos.dy,
+                          child: IgnorePointer(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                _buildJalaBrandLogo(size: 20, radius: 5),
+                                const Icon(Icons.near_me_rounded, color: JalaPalette.brandGold, size: 20),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: JalaPalette.header.withValues(alpha: 0.85),
+                                    borderRadius: BorderRadius.circular(4),
+                                    border: Border.all(color: JalaPalette.brandGold, width: 0.6),
+                                  ),
+                                  child: Text(
+                                    '${(_cursorPos.dx / canvasW * _desktopServerWidth).round()},${(_cursorPos.dy / canvasH * _desktopServerHeight).round()}',
+                                    style: const TextStyle(fontSize: 9, color: JalaPalette.brandGold),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        // Bottom status bar
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: Container(
+                            height: 32,
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            decoration: BoxDecoration(
+                              color: JalaPalette.header.withValues(alpha: 0.86),
+                              border: const Border(top: BorderSide(color: JalaPalette.line)),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.circle,
+                                      size: 8,
+                                      color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.amber,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '${_desktopServerWidth}x$_desktopServerHeight',
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        fontFamily: 'monospace',
+                                        color: JalaPalette.text2,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                                 const SizedBox(width: 8),
-                                Expanded(
+                                Flexible(
                                   child: Text(
                                     _desktopLiveConnected
-                                        ? 'LIVE SOCKET STREAM • $_desktopProtocolBanner'
-                                        : 'REMOTE DESKTOP CANVAS • ${_activeRdpHost?.osLabel ?? "READY"}',
+                                        ? 'LIVE PIXEL STREAM • ${_activeRdpHost?.latencyMs ?? 1}ms'
+                                        : 'TOUCH TRACKPAD READY',
                                     style: TextStyle(
-                                      fontSize: 10.5,
+                                      fontSize: 10,
                                       fontWeight: FontWeight.w700,
                                       color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
                                     ),
+                                    maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                   ),
                                 ),
-                                if (_activeRdpHost != null)
-                                  SizedBox(
-                                    height: 26,
-                                    child: FilledButton.tonal(
-                                      style: FilledButton.styleFrom(
-                                        backgroundColor: JalaPalette.selected,
-                                        foregroundColor: JalaPalette.brandGold,
-                                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                                      ),
-                                      onPressed: () => _connectToHost(_activeRdpHost!),
-                                      child: Text(
-                                        _desktopLiveConnected ? 'Reconnect' : 'Connect Live',
-                                        style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700),
-                                      ),
-                                    ),
-                                  ),
                               ],
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              _lastRdpAction,
-                              style: const TextStyle(fontSize: 11.5, color: JalaPalette.text),
-                            ),
-                          ],
+                          ),
                         ),
-                      ),
+                      ],
                     ),
-                    // Precision Trackpad Virtual Pointer
-                    Positioned(
-                      left: _cursorPos.dx,
-                      top: _cursorPos.dy,
-                      child: IgnorePointer(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Icon(Icons.near_me_rounded, color: JalaPalette.brandGold, size: 22),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                              decoration: BoxDecoration(
-                                color: JalaPalette.header,
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(color: JalaPalette.brandGold, width: 0.6),
-                              ),
-                              child: Text(
-                                '${_cursorPos.dx.toInt()},${_cursorPos.dy.toInt()}',
-                                style: const TextStyle(fontSize: 9.5, color: JalaPalette.brandGold),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    // Status bar at bottom of canvas
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: Container(
-                        height: 36,
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        decoration: BoxDecoration(
-                          color: JalaPalette.header.withValues(alpha: 0.92),
-                          borderRadius: const BorderRadius.vertical(bottom: Radius.circular(11)),
-                          border: const Border(top: BorderSide(color: JalaPalette.line)),
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Row(
-                              children: [
-                                Icon(Icons.grid_view_rounded, size: 15, color: JalaPalette.accentLine),
-                                SizedBox(width: 10),
-                                Icon(Icons.terminal_rounded, size: 15, color: JalaPalette.text2),
-                                SizedBox(width: 10),
-                                Icon(Icons.folder_open_rounded, size: 15, color: JalaPalette.brandGold),
-                              ],
-                            ),
-                            const SizedBox(width: 8),
-                            Flexible(
-                              child: Text(
-                                _desktopLiveConnected
-                                    ? 'LIVE SOCKET • ${_activeRdpHost?.latencyMs ?? 1}ms'
-                                    : 'TOUCH TRACKPAD READY',
-                                style: TextStyle(
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w700,
-                                  color: _desktopLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         ),
         // Extended On-Screen Modifier & Function Key Strip
@@ -2707,6 +3360,23 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ActionChip(
+                    backgroundColor: JalaPalette.selected,
+                    side: const BorderSide(color: JalaPalette.brandGold),
+                    label: const Text(
+                      'R-Click',
+                      style: TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
+                    ),
+                    onPressed: _viewOnly
+                        ? null
+                        : () {
+                            HapticFeedback.lightImpact();
+                            _dispatchDesktopPointer(normX: 0.5, normY: 0.5, rightClick: true);
+                          },
+                  ),
+                ),
                 _buildModifierChip('Ctrl', _ctrlLocked, (v) => setState(() => _ctrlLocked = v)),
                 _buildModifierChip('Alt', _altLocked, (v) => setState(() => _altLocked = v)),
                 _buildModifierChip('⌘/Win', _winLocked, (v) => setState(() => _winLocked = v)),
@@ -2714,6 +3384,8 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 for (final keyLabel in [
                   'Esc',
                   'Tab',
+                  'Enter',
+                  'Bksp',
                   'Ctrl+Alt+Del',
                   'Win+D',
                   '←',
@@ -2738,7 +3410,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                           ? null
                           : () {
                               HapticFeedback.lightImpact();
-                              _sendLiveDesktopKey(keyLabel.codeUnitAt(0));
+                              _dispatchDesktopKey(keyLabel);
                               setState(() {
                                 _lastRdpAction =
                                     'Sent Key: [${_activeModifierSummary()}$keyLabel] to ${_activeRdpHost?.name ?? "session"}';
@@ -2769,7 +3441,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       borderRadius: BorderRadius.circular(6),
       onTap: () => setState(() => _trackpadMode = isTrackpad),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
         decoration: BoxDecoration(
           color: active ? JalaPalette.selected : Colors.transparent,
           borderRadius: BorderRadius.circular(6),
@@ -2777,7 +3449,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         child: Text(
           label,
           style: TextStyle(
-            fontSize: 9.5,
+            fontSize: 8.5,
             fontWeight: active ? FontWeight.w700 : FontWeight.w500,
             color: active ? JalaPalette.brandGold : JalaPalette.muted,
           ),
@@ -2811,7 +3483,7 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   /// Termius-style Mobile SSHv2 Terminal + SFTP Studio (`dartssh2`)
   Widget _buildTermiusSshTab() {
     final hostDesc = _activeSshHost != null
-        ? '${_activeSshHost!.username}@${_activeSshHost!.address}:${_activeSshHost!.port}'
+        ? '${_activeSshHost!.displayAccount}@${_activeSshHost!.address}:${_activeSshHost!.port}'
         : 'No SSH Host Selected';
 
     return Column(
@@ -2926,6 +3598,21 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
+                if (_sshLiveConnected && _sshPtySession != null)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ActionChip(
+                      backgroundColor: JalaPalette.selected,
+                      side: const BorderSide(color: JalaPalette.danger),
+                      label: const Text(
+                        'Ctrl+C',
+                        style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: JalaPalette.danger),
+                      ),
+                      onPressed: () {
+                        _sshPtySession?.write(Uint8List.fromList([0x03]));
+                      },
+                    ),
+                  ),
                 for (final quick in [
                   'uptime',
                   'docker ps',
@@ -3054,7 +3741,12 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   ),
                 ),
                 TextButton(
-                  onPressed: () => _browseRemoteSftpPath('..'),
+                  onPressed: () {
+                    final parent = _sftpCurrentPath.contains('/')
+                        ? _sftpCurrentPath.substring(0, _sftpCurrentPath.lastIndexOf('/'))
+                        : '..';
+                    _browseRemoteSftpPath(parent.isEmpty ? '/' : parent);
+                  },
                   child: const Text('Up (..)', style: TextStyle(fontSize: 11, color: JalaPalette.brandGold)),
                 ),
               ],
@@ -3101,13 +3793,15 @@ class _JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                       onPressed: () {
                         if (_sshLiveConnected && item.isDirectory) {
                           _browseRemoteSftpPath(item.fullPath);
+                        } else if (_sshLiveConnected && !item.isDirectory) {
+                          _viewRemoteSftpFile(item);
                         } else {
                           setState(() => _sshSubMode = 'terminal');
                           _runSshCommand('ls -la ${item.fullPath}');
                         }
                       },
                       child: Text(
-                        _sshLiveConnected && item.isDirectory ? 'Open' : 'Inspect',
+                        _sshLiveConnected ? (item.isDirectory ? 'Open' : 'View') : 'Inspect',
                         style: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
                       ),
                     ),

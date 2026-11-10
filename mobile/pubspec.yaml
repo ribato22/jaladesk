@@ -1,7 +1,7 @@
 name: jaladesk_mobile
-description: JalaDesk Mobile (iOS, iPadOS & Android) — Enterprise Remote Desktop (RDP/VNC), SSH/SFTP & Zero-Trust Vault Companion.
+description: JalaDesk Mobile (iOS, iPadOS & Android) — Enterprise Remote Desktop (FreeRDP 3.x / VNC RFB 3.8), SSHv2 PTY / SFTP & Zero-Trust Vault Companion.
 publish_to: 'none'
-version: 1.1.0+2
+version: 1.2.0+3
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -13,6 +13,7 @@ dependencies:
   dartssh2: ^2.9.0
   crypto: ^3.0.3
   shared_preferences: ^2.3.2
+  ffi: ^2.1.3
 
 dev_dependencies:
   flutter_test:
