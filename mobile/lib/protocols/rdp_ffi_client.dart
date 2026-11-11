@@ -110,6 +110,9 @@ typedef _JalaRdpSendUnicodeDart = void Function(
 typedef _JalaRdpDestroyNative = ffi.Void Function(ffi.Pointer<ffi.Void> handle);
 typedef _JalaRdpDestroyDart = void Function(ffi.Pointer<ffi.Void> handle);
 
+typedef _JalaRdpSelftestNtlmNative = ffi.Int32 Function();
+typedef _JalaRdpSelftestNtlmDart = int Function();
+
 /// FreeRDP 3.x Mouse Event Flags (`freerdp/input.h`)
 class RdpMouseFlags {
   static const int move = 0x0800; // PTR_FLAGS_MOVE
@@ -236,6 +239,20 @@ class RdpFfiClient {
   }
 
   static bool get isNativeAvailable => _loadLibrary() != null;
+
+  /// Verifies WinPR NTLMv2 MD4 digest (`NTOWFv1A("password")`) inside the loaded native binary.
+  static bool selfTestNtlm() {
+    final lib = _loadLibrary();
+    if (lib == null) return false;
+    try {
+      final fn = lib.lookupFunction<_JalaRdpSelftestNtlmNative, _JalaRdpSelftestNtlmDart>(
+        'jaladesk_rdp_selftest_ntlm',
+      );
+      return fn() == 1;
+    } catch (_) {
+      return false;
+    }
+  }
 
   static String _resolveWritableConfigDir() {
     if (Platform.isAndroid) {

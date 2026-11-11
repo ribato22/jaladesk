@@ -2,6 +2,7 @@
 #include <freerdp/addin.h>
 #include <freerdp/channels/channels.h>
 #include <freerdp/channels/disp.h>
+#include <freerdp/channels/drdynvc.h>
 #include <freerdp/client/channels.h>
 #include <freerdp/client/cmdline.h>
 #include <freerdp/client/disp.h>
@@ -10,10 +11,13 @@
 #include <freerdp/input.h>
 #include <freerdp/settings.h>
 #include <freerdp/error.h>
+#include <winpr/ntlm.h>
+#include <winpr/ssl.h>
 #include <winpr/synch.h>
 #include <winpr/wlog.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -34,6 +38,15 @@
 #endif
 
 namespace {
+
+static std::once_flag g_sslInitOnce;
+
+static void ensureWinprSslInitialized() {
+  std::call_once(g_sslInitOnce, []() {
+    (void)winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT);
+    WLog_SetLogLevel(WLog_GetRoot(), WLOG_OFF);
+  });
+}
 
 struct InputEventItem {
   int kind = 0; // 1 = mouse, 2 = key scancode, 3 = unicode key, 4 = sync, 5 = resize (w, h, scale)
@@ -80,6 +93,33 @@ static JalaRdpSession* getSession(rdpContext* ctx) {
   return reinterpret_cast<JalaRdpContext*>(ctx)->session;
 }
 
+static bool loadStaticChannel(freerdp* inst, const char* name, void* data) {
+  const auto entry = WINPR_FUNC_PTR_CAST(
+      freerdp_load_channel_addin_entry(
+          name, nullptr, nullptr,
+          FREERDP_ADDIN_CHANNEL_STATIC | FREERDP_ADDIN_CHANNEL_ENTRYEX),
+      PVIRTUALCHANNELENTRYEX);
+  return entry &&
+         freerdp_channels_client_load_ex(
+             inst->context->channels, inst->context->settings, entry, data) == 0;
+}
+
+static BOOL onLoadChannels(freerdp* inst) {
+  if (!inst || !inst->context || !inst->context->settings) return FALSE;
+  rdpSettings* s = inst->context->settings;
+  for (UINT32 n = 0; n < freerdp_settings_get_uint32(s, FreeRDP_StaticChannelCount); ++n) {
+    auto* args = static_cast<ADDIN_ARGV*>(
+        freerdp_settings_get_pointer_array_writable(s, FreeRDP_StaticChannelArray, n));
+    if (args && args->argv && args->argv[0]) {
+      (void)loadStaticChannel(inst, args->argv[0], args);
+    }
+  }
+  if (freerdp_settings_get_bool(s, FreeRDP_SupportDynamicChannels)) {
+    (void)loadStaticChannel(inst, DRDYNVC_SVC_CHANNEL_NAME, s);
+  }
+  return TRUE;
+}
+
 static void onChannelConnected(void* context, const ChannelConnectedEventArgs* e) {
   if (!context || !e || !e->name) return;
   auto* ctx = static_cast<rdpContext*>(context);
@@ -109,9 +149,6 @@ static BOOL onPreConnect(freerdp* inst) {
   if (inst->context->pubSub) {
     PubSub_SubscribeChannelConnected(inst->context->pubSub, onChannelConnected);
     PubSub_SubscribeChannelDisconnected(inst->context->pubSub, onChannelDisconnected);
-  }
-  if (inst->context->channels && inst->context->settings) {
-    freerdp_client_load_addins(inst->context->channels, inst->context->settings);
   }
   return TRUE;
 }
@@ -215,7 +252,6 @@ static void onPostDisconnect(freerdp* inst) {
 
 static DWORD onVerifyCertificateEx(
     freerdp*, const char*, UINT16, const char*, const char*, const char*, const char*, DWORD) {
-  // Accept self-signed & enterprise internal AD certificates on mobile
   return 2;
 }
 
@@ -243,7 +279,29 @@ static BOOL onAuthenticateEx(
   if (domain && (!*domain || !**domain) && !s->domain.empty()) {
     *domain = _strdup(s->domain.c_str());
   }
-  return TRUE;
+  return !s->username.empty() && !s->password.empty();
+}
+
+static bool isAuthenticationFailureCode(UINT32 code) {
+  switch (code) {
+    case FREERDP_ERROR_AUTHENTICATION_FAILED:
+    case FREERDP_ERROR_INSUFFICIENT_PRIVILEGES:
+    case FREERDP_ERROR_CONNECT_PASSWORD_EXPIRED:
+    case FREERDP_ERROR_CONNECT_PASSWORD_CERTAINLY_EXPIRED:
+    case FREERDP_ERROR_CONNECT_ACCOUNT_DISABLED:
+    case FREERDP_ERROR_CONNECT_PASSWORD_MUST_CHANGE:
+    case FREERDP_ERROR_CONNECT_LOGON_FAILURE:
+    case FREERDP_ERROR_CONNECT_WRONG_PASSWORD:
+    case FREERDP_ERROR_CONNECT_ACCESS_DENIED:
+    case FREERDP_ERROR_CONNECT_ACCOUNT_RESTRICTION:
+    case FREERDP_ERROR_CONNECT_ACCOUNT_LOCKED_OUT:
+    case FREERDP_ERROR_CONNECT_ACCOUNT_EXPIRED:
+    case FREERDP_ERROR_CONNECT_LOGON_TYPE_NOT_GRANTED:
+    case FREERDP_ERROR_CONNECT_NO_OR_MISSING_CREDENTIALS:
+      return true;
+    default:
+      return false;
+  }
 }
 
 static bool configureInstance(freerdp* inst, JalaRdpSession* s, bool enableNla) {
@@ -288,17 +346,19 @@ static bool configureInstance(freerdp* inst, JalaRdpSession* s, bool enableNla) 
   freerdp_settings_set_bool(settings, FreeRDP_FrameMarkerCommandEnabled, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_SurfaceFrameMarkerEnabled, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_SupportDynamicChannels, TRUE);
+  freerdp_settings_set_bool(settings, FreeRDP_SynchronousDynamicChannels, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, TRUE);
-  const char* dispParams[] = {"disp"};
+  const char* dispParams[] = {DISP_CHANNEL_NAME};
   (void)freerdp_client_add_dynamic_channel(settings, 1, dispParams);
 
   freerdp_settings_set_bool(settings, FreeRDP_ExternalCertificateManagement, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_AutoAcceptCertificate, TRUE);
   freerdp_settings_set_uint32(settings, FreeRDP_ThreadingFlags, THREADING_FLAGS_DISABLE_THREADS);
-  freerdp_settings_set_uint32(settings, FreeRDP_TcpConnectTimeout, 8000);
+  freerdp_settings_set_uint32(settings, FreeRDP_TcpConnectTimeout, 10000);
+  freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, TRUE);
 
-  // Security negotiation: NLA (CredSSP) + TLS on primary attempt; TLS + Classic RDP on fallback
+  // Primary attempt: NLA (CredSSP / NTLMv2) + TLS; Fallback: TLS + Classic RDP
   freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, enableNla ? TRUE : FALSE);
   freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, enableNla ? FALSE : TRUE);
@@ -316,7 +376,7 @@ static void runSessionThread(JalaRdpSession* s) {
     setenv("XDG_CACHE_HOME", s->configDir.c_str(), 1);
   }
 #endif
-  WLog_SetLogLevel(WLog_GetRoot(), WLOG_OFF);
+  ensureWinprSslInitialized();
   freerdp_register_addin_provider(freerdp_channels_load_static_addin_entry, 0);
 
   auto createAndConnect = [&](bool useNla, UINT32& outLastErr) -> freerdp* {
@@ -328,6 +388,7 @@ static void runSessionThread(JalaRdpSession* s) {
       return nullptr;
     }
     reinterpret_cast<JalaRdpContext*>(inst->context)->session = s;
+    inst->LoadChannels = onLoadChannels;
     inst->PreConnect = onPreConnect;
     inst->PostConnect = onPostConnect;
     inst->PostDisconnect = onPostDisconnect;
@@ -363,30 +424,36 @@ static void runSessionThread(JalaRdpSession* s) {
 
   while (!s->closing.load()) {
     s->pendingResizeReconnect.store(false);
-    UINT32 lastErr = 0;
-    const bool tryNlaFirst = !s->username.empty() && !s->password.empty();
-    freerdp* inst = createAndConnect(tryNlaFirst, lastErr);
+    UINT32 primaryErr = 0;
+    const bool hasCredentials = !s->username.empty() && !s->password.empty();
+    freerdp* inst = createAndConnect(hasCredentials, primaryErr);
 
-    if (!inst && !s->closing.load()) {
-      const bool isAuthWrong = (lastErr == FREERDP_ERROR_AUTHENTICATION_FAILED ||
-                                lastErr == FREERDP_ERROR_CONNECT_LOGON_FAILURE ||
-                                lastErr == FREERDP_ERROR_CONNECT_WRONG_PASSWORD ||
-                                lastErr == FREERDP_ERROR_CONNECT_ACCESS_DENIED ||
-                                lastErr == FREERDP_ERROR_CONNECT_ACCOUNT_LOCKED_OUT);
+    if (!inst && !s->closing.load() && hasCredentials) {
+      const bool isAuthWrong = isAuthenticationFailureCode(primaryErr);
       if (!isAuthWrong) {
         UINT32 fallbackErr = 0;
-        inst = createAndConnect(!tryNlaFirst, fallbackErr);
-        if (fallbackErr != 0) lastErr = fallbackErr;
+        inst = createAndConnect(false, fallbackErr);
+        // Preserve primaryErr if fallback failed only because the server strictly requires NLA/Hybrid
+        if (!inst && fallbackErr != 0 &&
+            fallbackErr != FREERDP_ERROR_CONNECT_HYBRID_REQUIRED_BY_SERVER) {
+          primaryErr = fallbackErr;
+        }
       }
     }
 
     if (!inst) {
-      const char* errName = freerdp_get_last_error_name(lastErr);
-      const char* errStr = freerdp_get_last_error_string(lastErr);
+      const char* errName = freerdp_get_last_error_name(primaryErr);
+      const char* errStr = freerdp_get_last_error_string(primaryErr);
       std::lock_guard<std::mutex> lock(s->mtx);
-      s->statusText = std::string("RDP Connect Failed: ") +
-                      (errStr ? errStr : "Unable to establish session") +
-                      " (" + (errName ? errName : "ERR") + ")";
+      if (primaryErr == FREERDP_ERROR_CONNECT_HYBRID_REQUIRED_BY_SERVER && s->password.empty()) {
+        s->statusText =
+            "RDP Connect Failed: Server requires Network Level Authentication (NLA). "
+            "Please provide your Windows / Active Directory password.";
+      } else {
+        s->statusText = std::string("RDP Connect Failed: ") +
+                        (errStr ? errStr : "Unable to establish session") +
+                        " (" + (errName ? errName : "ERR") + ")";
+      }
       s->state.store(-1);
       return;
     }
@@ -429,7 +496,6 @@ static void runSessionThread(JalaRdpSession* s) {
             layout.DeviceScaleFactor = 100;
             (void)activeDisp->SendMonitorLayout(activeDisp, 1, &layout);
           } else {
-            // Server does not expose MS-RDPEDISP DVC: perform seamless fast-reconnect at new resolution
             s->pendingResizeReconnect.store(true);
             break;
           }
@@ -484,6 +550,19 @@ static void runSessionThread(JalaRdpSession* s) {
 
 } // namespace
 
+JALA_EXPORT int jaladesk_rdp_selftest_ntlm() {
+  ensureWinprSslInitialized();
+  std::array<unsigned char, 16> nt{};
+  if (!NTOWFv1A("password", 8, nt.data())) {
+    return 0;
+  }
+  static constexpr unsigned char expected[16] = {
+      0x88, 0x46, 0xf7, 0xea, 0xee, 0x8f, 0xb1, 0x17,
+      0xad, 0x06, 0xbd, 0xd8, 0x30, 0xb7, 0x58, 0x6c,
+  };
+  return std::memcmp(nt.data(), expected, 16) == 0 ? 1 : 0;
+}
+
 JALA_EXPORT void* jaladesk_rdp_create(
     const char* host,
     int port,
@@ -505,7 +584,6 @@ JALA_EXPORT void* jaladesk_rdp_create(
   s->reqHeight = alignedH;
   s->configDir = config_dir ? config_dir : "";
 
-  // Automatically split DOMAIN\username or username@domain if domain wasn't passed separately
   if (s->domain.empty()) {
     const auto backslashPos = s->username.find('\\');
     if (backslashPos != std::string::npos) {
@@ -542,7 +620,6 @@ JALA_EXPORT void jaladesk_rdp_request_resolution(
   s->reqWidth = alignedW;
   s->reqHeight = alignedH;
   s->reqScale = clampedScale;
-  // Remove any older queued resize requests so only the latest viewport size is applied
   s->inputQueue.erase(
       std::remove_if(s->inputQueue.begin(), s->inputQueue.end(),
                      [](const InputEventItem& item) { return item.kind == 5; }),
@@ -620,11 +697,13 @@ JALA_EXPORT void jaladesk_rdp_destroy(void* handle) {
   if (!handle) return;
   auto* s = static_cast<JalaRdpSession*>(handle);
   s->closing.store(true);
-  {
-    std::lock_guard<std::mutex> lock(s->mtx);
-    if (s->instance && s->instance->context) {
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    {
+      std::lock_guard<std::mutex> lock(s->mtx);
+      if (!s->instance || !s->instance->context) break;
       freerdp_abort_connect_context(s->instance->context);
     }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   if (s->worker.joinable()) {
     s->worker.join();

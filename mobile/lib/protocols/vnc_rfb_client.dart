@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-/// Pure-Dart RFC 6143 DES-ECB implementation for VNC Authentication (Security Type 2)
-/// Note: VNC reverses the bit order of each byte in the 8-byte password key!
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:pointycastle/export.dart' as pc;
+
+/// Pure-Dart RFC 6143 DES-ECB / DES-CBC implementation for VNC Authentication (Security Type 2 & MSLogonII)
+/// Note: VNC reverses the bit order of each byte in the 8-byte password key.
 class VncDesAuth {
   static const List<int> _ip = [
     58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4,
@@ -132,6 +136,26 @@ class VncDesAuth {
     return out;
   }
 
+  static List<List<int>> _buildSubkeysFromReversedBytes(Uint8List rawKey8) {
+    final keyBytes = Uint8List(8);
+    for (int i = 0; i < 8; i++) {
+      keyBytes[i] = i < rawKey8.length ? _reverseByteBits(rawKey8[i]) : 0;
+    }
+    final keyBits = _bytesToBits(keyBytes);
+    final cd = List<int>.generate(56, (i) => keyBits[_pc1[i] - 1]);
+    var c = cd.sublist(0, 28);
+    var d = cd.sublist(28, 56);
+    final subkeys = <List<int>>[];
+    for (int round = 0; round < 16; round++) {
+      final s = _shifts[round];
+      c = [...c.sublist(s), ...c.sublist(0, s)];
+      d = [...d.sublist(s), ...d.sublist(0, s)];
+      final combined = [...c, ...d];
+      subkeys.add(List<int>.generate(48, (i) => combined[_pc2[i] - 1]));
+    }
+    return subkeys;
+  }
+
   static Uint8List _encryptBlock8(Uint8List block8, List<List<int>> subkeys) {
     final blockBits = _bytesToBits(block8);
     final perm = List<int>.generate(64, (i) => blockBits[_ip[i] - 1]);
@@ -167,33 +191,122 @@ class VncDesAuth {
   }
 
   static Uint8List encryptVncChallenge(Uint8List challenge16, String password) {
-    final keyBytes = Uint8List(8);
-    final rawPw = utf8.encode(password);
-    for (int i = 0; i < 8; i++) {
-      keyBytes[i] = i < rawPw.length ? _reverseByteBits(rawPw[i]) : 0;
-    }
-
-    final keyBits = _bytesToBits(keyBytes);
-    final cd = List<int>.generate(56, (i) => keyBits[_pc1[i] - 1]);
-    var c = cd.sublist(0, 28);
-    var d = cd.sublist(28, 56);
-    final subkeys = <List<int>>[];
-    for (int round = 0; round < 16; round++) {
-      final s = _shifts[round];
-      c = [...c.sublist(s), ...c.sublist(0, s)];
-      d = [...d.sublist(s), ...d.sublist(0, s)];
-      final combined = [...c, ...d];
-      subkeys.add(List<int>.generate(48, (i) => combined[_pc2[i] - 1]));
-    }
-
+    final rawPw = Uint8List.fromList(utf8.encode(password));
+    final subkeys = _buildSubkeysFromReversedBytes(rawPw);
     final out = Uint8List(16);
     out.setRange(0, 8, _encryptBlock8(challenge16.sublist(0, 8), subkeys));
     out.setRange(8, 16, _encryptBlock8(challenge16.sublist(8, 16), subkeys));
     return out;
   }
+
+  /// VNC reversed-bit DES-CBC encryption for UltraVNC MSLogonII (Security Type 113)
+  static Uint8List encryptVncDesCbc(Uint8List data, Uint8List key8, Uint8List iv8) {
+    final subkeys = _buildSubkeysFromReversedBytes(key8);
+    final out = Uint8List(data.length);
+    var prev = Uint8List.fromList(iv8.sublist(0, 8));
+    for (int off = 0; off < data.length; off += 8) {
+      final blk = Uint8List(8);
+      for (int i = 0; i < 8; i++) {
+        blk[i] = data[off + i] ^ prev[i];
+      }
+      final enc = _encryptBlock8(blk, subkeys);
+      out.setRange(off, off + 8, enc);
+      prev = enc;
+    }
+    return out;
+  }
 }
 
-/// Asynchronous buffered byte reader over a Dart TCP Socket
+/// Apple Remote Desktop / macOS Screen Sharing Authentication (RFB Security Type 30)
+/// Uses Diffie-Hellman key exchange -> MD5(sharedSecret) -> AES-128-ECB of [user\0+pad(64) | pass\0+pad(64)].
+class VncAppleArdAuth {
+  static BigInt bytesToBigInt(Uint8List bytes) {
+    BigInt result = BigInt.zero;
+    for (final b in bytes) {
+      result = (result << 8) | BigInt.from(b);
+    }
+    return result;
+  }
+
+  static Uint8List bigIntToFixedBytes(BigInt value, int length) {
+    final out = Uint8List(length);
+    var v = value;
+    for (int i = length - 1; i >= 0; i--) {
+      out[i] = (v & BigInt.from(0xFF)).toInt();
+      v = v >> 8;
+    }
+    return out;
+  }
+
+  static ({Uint8List encryptedCredentials, Uint8List clientPublicKey}) computeArdResponse({
+    required int generator,
+    required int keySize,
+    required Uint8List primeModulus,
+    required Uint8List serverPublicKey,
+    required String username,
+    required String password,
+    Uint8List? deterministicPrivateKey,
+  }) {
+    if (keySize < 16 || keySize > 1024) {
+      throw SocketException('Unsupported ARD Diffie-Hellman key length: $keySize');
+    }
+    final rng = Random.secure();
+    final p = bytesToBigInt(primeModulus);
+    final g = BigInt.from(generator);
+    final peerPub = bytesToBigInt(serverPublicKey);
+
+    BigInt priv;
+    if (deterministicPrivateKey != null) {
+      priv = bytesToBigInt(deterministicPrivateKey);
+    } else {
+      final randBytes = Uint8List.fromList(List<int>.generate(keySize, (_) => rng.nextInt(256)));
+      randBytes[0] &= 0x7F;
+      priv = bytesToBigInt(randBytes);
+      if (p > BigInt.from(4)) {
+        priv = (priv % (p - BigInt.from(3))) + BigInt.two;
+      }
+    }
+
+    final clientPub = g.modPow(priv, p);
+    final sharedSecret = peerPub.modPow(priv, p);
+
+    final clientPubBytes = bigIntToFixedBytes(clientPub, keySize);
+    final sharedSecretBytes = bigIntToFixedBytes(sharedSecret, keySize);
+
+    // Derive 128-bit AES key via MD5(sharedSecretBytes)
+    final aesKey = Uint8List.fromList(crypto.md5.convert(sharedSecretBytes).bytes);
+
+    // Format 128-byte credentials block: [username\0 + random (64B) | password\0 + random (64B)]
+    final plain = Uint8List(128);
+    for (int i = 0; i < 128; i++) {
+      plain[i] = rng.nextInt(256);
+    }
+
+    final userUtf8 = utf8.encode(username);
+    final userCopyLen = min(userUtf8.length, 63);
+    plain.setRange(0, userCopyLen, userUtf8);
+    plain[userCopyLen] = 0;
+
+    final passUtf8 = utf8.encode(password);
+    final passCopyLen = min(passUtf8.length, 63);
+    plain.setRange(64, 64 + passCopyLen, passUtf8);
+    plain[64 + passCopyLen] = 0;
+
+    // Encrypt 8 blocks of 16 bytes with AES-128-ECB
+    final aes = pc.AESEngine()..init(true, pc.KeyParameter(aesKey));
+    final encrypted = Uint8List(128);
+    for (int off = 0; off < 128; off += 16) {
+      aes.processBlock(plain, off, encrypted, off);
+    }
+
+    return (
+      encryptedCredentials: encrypted,
+      clientPublicKey: clientPubBytes,
+    );
+  }
+}
+
+/// Asynchronous buffered byte reader over a Dart TCP / TLS Socket
 class SocketByteReader {
   final StreamSubscription<Uint8List> _sub;
   final BytesBuilder _buf = BytesBuilder(copy: false);
@@ -201,9 +314,9 @@ class SocketByteReader {
   bool _closed = false;
   Object? _error;
 
-  SocketByteReader(Socket socket)
+  SocketByteReader(Stream<Uint8List> socket)
       : _sub = socket.listen(
-          ( _) {},
+          (_) {},
         ) {
     _sub.onData((chunk) {
       _buf.add(chunk);
@@ -255,10 +368,31 @@ class SocketByteReader {
   }
 }
 
-/// Full RFC 6143 VNC (RFB 3.3 / 3.7 / 3.8) Client Engine with Live RGBA32 Framebuffer
+class _VncAuthAttemptException implements Exception {
+  final String message;
+  final List<int> offeredTypes;
+  final String serverBanner;
+
+  const _VncAuthAttemptException({
+    required this.message,
+    required this.offeredTypes,
+    required this.serverBanner,
+  });
+
+  @override
+  String toString() => message;
+}
+
+/// Full RFC 6143 VNC Client Engine supporting:
+/// - Apple Remote Desktop / macOS Screen Sharing (`SecType 30` DH + AES-128-ECB)
+/// - VeNCrypt (`SecType 19` TLS / X509 / Plain / VNC Auth for TigerVNC, QEMU, Proxmox, GNOME)
+/// - Tight Security (`SecType 16` for TightVNC / x11vnc)
+/// - UltraVNC MSLogonII (`SecType 113` DH + DES-CBC)
+/// - Standard VNC DES (`SecType 2`) & None (`SecType 1`)
 class VncRfbClient {
   final String host;
   final int port;
+  final String username;
   final String password;
   final void Function(ui.Image image, int width, int height, String status) onFrame;
   final void Function(String status, {bool isError}) onStatus;
@@ -269,11 +403,13 @@ class VncRfbClient {
   int width = 1024;
   int height = 768;
   String desktopName = 'VNC Remote Desktop';
+  String negotiatedAuthLabel = 'RFB 3.8';
   late Uint8List _rgbaBuffer;
 
   VncRfbClient({
     required this.host,
     required this.port,
+    this.username = '',
     required this.password,
     required this.onFrame,
     required this.onStatus,
@@ -281,15 +417,85 @@ class VncRfbClient {
 
   bool get isConnected => _running && _socket != null;
 
+  static String describeSecurityType(int code) {
+    switch (code) {
+      case 1:
+        return 'None (1)';
+      case 2:
+        return 'VNC DES (2)';
+      case 16:
+        return 'Tight (16)';
+      case 18:
+        return 'TLS (18)';
+      case 19:
+        return 'VeNCrypt (19)';
+      case 30:
+        return 'Apple Remote Desktop (30)';
+      case 33:
+      case 35:
+      case 36:
+        return 'Apple Screen Sharing ($code)';
+      case 113:
+        return 'UltraVNC MSLogonII (113)';
+      default:
+        return 'Type $code';
+    }
+  }
+
   Future<void> connect() async {
+    try {
+      await _connectOnce();
+    } on _VncAuthAttemptException catch (firstErr) {
+      // If macOS / hybrid server offered BOTH ARD (30) and classic VNC DES (2),
+      // and the user entered a dedicated 8-char VNC password while also having a username saved,
+      // automatically retry once forcing Classic VNC DES (SecType 2)!
+      if (firstErr.offeredTypes.contains(30) &&
+          firstErr.offeredTypes.contains(2) &&
+          username.trim().isNotEmpty &&
+          password.isNotEmpty) {
+        await _cleanupSocket();
+        try {
+          await _connectOnce(forceSecurityType: 2);
+          return;
+        } on _VncAuthAttemptException catch (secondErr) {
+          throw SocketException(_formatActionableAuthError(secondErr));
+        }
+      }
+      throw SocketException(_formatActionableAuthError(firstErr));
+    }
+  }
+
+  String _formatActionableAuthError(_VncAuthAttemptException err) {
+    final offeredDesc = err.offeredTypes.map(describeSecurityType).join(', ');
+    final hasApple = err.offeredTypes.contains(30) ||
+        err.serverBanner.contains('003.889') ||
+        err.offeredTypes.any((t) => t >= 30 && t <= 36);
+    if (hasApple) {
+      if (username.trim().isEmpty) {
+        return '${err.message}\n\n'
+            'macOS Screen Sharing detected ($offeredDesc). '
+            'Edit this host and enter your Mac account Username + Password (ARD), '
+            'or enable "VNC viewers may control screen with password" in macOS Sharing > Screen Sharing > Computer Settings.';
+      }
+      return '${err.message}\n\n'
+          'macOS Screen Sharing ($offeredDesc): Verify your Mac login username ("$username") '
+          'and password, and ensure "$username" is allowed under System Settings > General > Sharing > Screen Sharing.';
+    }
+    return '${err.message}\n\n'
+        'Server ${err.serverBanner} offered [$offeredDesc]. '
+        'Note: Classic Linux/Windows VNC servers (TigerVNC, TightVNC, x11vnc) authenticate against '
+        'your VNC password (first 8 chars set via vncpasswd), which may differ from your OS/SSH password.';
+  }
+
+  Future<void> _connectOnce({int? forceSecurityType}) async {
     onStatus('Connecting TCP socket to $host:$port...');
-    final sock = await Socket.connect(host, port, timeout: const Duration(seconds: 7));
+    Socket sock = await Socket.connect(host, port, timeout: const Duration(seconds: 8));
     sock.setOption(SocketOption.tcpNoDelay, true);
     _socket = sock;
-    final reader = SocketByteReader(sock);
+    SocketByteReader reader = SocketByteReader(sock);
     _reader = reader;
 
-    // 1. Read Server ProtocolVersion (12 bytes: "RFB xxx.yyy\n")
+    // 1. Read Server ProtocolVersion (12 bytes: "RFB xxx.yyy\n", e.g., "RFB 003.008\n" or macOS "RFB 003.889\n")
     final verBytes = await reader.readExact(12);
     final verStr = ascii.decode(verBytes, allowInvalid: true).trim();
     if (!verStr.startsWith('RFB ')) {
@@ -302,6 +508,7 @@ class VncRfbClient {
 
     // 2. Negotiate Security Type
     int chosenSec = 1;
+    List<int> offeredTypes = <int>[];
     if (is33) {
       final secBuf = await reader.readExact(4);
       chosenSec = ByteData.sublistView(secBuf).getUint32(0, Endian.big);
@@ -311,6 +518,7 @@ class VncRfbClient {
         final reason = utf8.decode(await reader.readExact(reasonLen), allowMalformed: true);
         throw SocketException('VNC connection refused: $reason');
       }
+      offeredTypes = [chosenSec];
     } else {
       final countBuf = await reader.readExact(1);
       final count = countBuf[0];
@@ -320,43 +528,236 @@ class VncRfbClient {
         final reason = utf8.decode(await reader.readExact(reasonLen), allowMalformed: true);
         throw SocketException('VNC security failed: $reason');
       }
-      final types = await reader.readExact(count);
-      if (types.contains(1) && password.isEmpty) {
+      offeredTypes = (await reader.readExact(count)).toList();
+
+      if (forceSecurityType != null && offeredTypes.contains(forceSecurityType)) {
+        chosenSec = forceSecurityType;
+      } else if (offeredTypes.contains(30) && username.trim().isNotEmpty) {
+        chosenSec = 30; // Apple Remote Desktop (macOS Screen Sharing username + password)
+      } else if (offeredTypes.contains(19)) {
+        chosenSec = 19; // VeNCrypt (TigerVNC / QEMU / GNOME / WayVNC)
+      } else if (offeredTypes.contains(1) && password.isEmpty) {
         chosenSec = 1; // None
-      } else if (types.contains(2)) {
-        chosenSec = 2; // VNC Auth (DES)
-      } else if (types.contains(1)) {
+      } else if (offeredTypes.contains(2)) {
+        chosenSec = 2; // Classic VNC Auth (DES)
+      } else if (offeredTypes.contains(16)) {
+        chosenSec = 16; // TightVNC
+      } else if (offeredTypes.contains(113) && username.trim().isNotEmpty) {
+        chosenSec = 113; // UltraVNC MSLogonII
+      } else if (offeredTypes.contains(30)) {
+        chosenSec = 30;
+      } else if (offeredTypes.contains(1)) {
         chosenSec = 1;
       } else {
-        chosenSec = types.first;
+        final names = offeredTypes.map(describeSecurityType).join(', ');
+        throw SocketException('Unsupported VNC security types offered by server: [$names]');
       }
       sock.add([chosenSec]);
       await sock.flush();
     }
 
-    if (chosenSec == 2) {
+    negotiatedAuthLabel = describeSecurityType(chosenSec);
+    bool checkSecurityResult = !is33 && (chosenSec != 1 || !is37);
+
+    if (chosenSec == 30) {
+      // Apple Remote Desktop Diffie-Hellman + AES-128-ECB
+      if (username.trim().isEmpty) {
+        throw _VncAuthAttemptException(
+          message: 'VNC Authentication requires a Username for Apple Remote Desktop (Security Type 30).',
+          offeredTypes: offeredTypes,
+          serverBanner: verStr,
+        );
+      }
+      onStatus('Authenticating macOS Screen Sharing (ARD DH-AES128)...');
+      final dhHdr = await reader.readExact(4);
+      final dhBd = ByteData.sublistView(dhHdr);
+      final generator = dhBd.getUint16(0, Endian.big);
+      final keySize = dhBd.getUint16(2, Endian.big);
+      final primeModulus = await reader.readExact(keySize);
+      final serverPubKey = await reader.readExact(keySize);
+
+      final ard = VncAppleArdAuth.computeArdResponse(
+        generator: generator,
+        keySize: keySize,
+        primeModulus: primeModulus,
+        serverPublicKey: serverPubKey,
+        username: username.trim(),
+        password: password,
+      );
+      sock.add(ard.encryptedCredentials);
+      sock.add(ard.clientPublicKey);
+      await sock.flush();
+      checkSecurityResult = true;
+    } else if (chosenSec == 2) {
       onStatus('Authenticating VNC DES challenge...');
       final challenge = await reader.readExact(16);
       final response = VncDesAuth.encryptVncChallenge(challenge, password);
       sock.add(response);
       await sock.flush();
+      checkSecurityResult = !is33;
+    } else if (chosenSec == 19) {
+      // VeNCrypt 0.2 negotiation
+      onStatus('Negotiating VeNCrypt TLS security...');
+      final vVer = await reader.readExact(2);
+      if (vVer[0] == 0 && vVer[1] >= 2) {
+        sock.add([0, 2]);
+      } else {
+        sock.add([vVer[0], vVer[1]]);
+      }
+      await sock.flush();
+      final ack = (await reader.readExact(1))[0];
+      if (ack != 0) {
+        throw SocketException('VeNCrypt version negotiation rejected by server (ack=$ack).');
+      }
+      final subCount = (await reader.readExact(1))[0];
+      if (subCount == 0) {
+        throw const SocketException('Server offered zero VeNCrypt subtypes.');
+      }
+      final subRaw = await reader.readExact(subCount * 4);
+      final subBd = ByteData.sublistView(subRaw);
+      final subtypes = List<int>.generate(subCount, (i) => subBd.getUint32(i * 4, Endian.big));
+
+      // Prefer TLS/X509 Plain when username is set, otherwise X509Vnc/TLSVnc, Plain, VNC, None
+      const preferredWithUser = [262, 259, 261, 258, 256, 2, 260, 257, 1];
+      const preferredNoUser = [261, 258, 262, 259, 2, 256, 260, 257, 1];
+      final prefs = username.trim().isNotEmpty ? preferredWithUser : preferredNoUser;
+      final selectedSub = prefs.firstWhere(
+        subtypes.contains,
+        orElse: () => subtypes.first,
+      );
+
+      final selBuf = ByteData(4)..setUint32(0, selectedSub, Endian.big);
+      sock.add(selBuf.buffer.asUint8List());
+      await sock.flush();
+
+      final needsTls = {257, 258, 259, 260, 261, 262}.contains(selectedSub);
+      if (needsTls) {
+        final tlsAck = (await reader.readExact(1))[0];
+        if (tlsAck != 1) {
+          throw SocketException('VeNCrypt TLS setup rejected by server (ack=$tlsAck).');
+        }
+        await reader.dispose();
+        final tlsSock = await SecureSocket.secure(
+          sock,
+          onBadCertificate: (_) => true,
+        );
+        sock = tlsSock;
+        _socket = tlsSock;
+        reader = SocketByteReader(tlsSock);
+        _reader = reader;
+      }
+
+      if (selectedSub == 256 || selectedSub == 259 || selectedSub == 262) {
+        // VeNCrypt Plain: U32 userLen + U32 passLen + user + pass
+        final uBytes = utf8.encode(username.trim());
+        final pBytes = utf8.encode(password);
+        final hdr = ByteData(8)
+          ..setUint32(0, uBytes.length, Endian.big)
+          ..setUint32(4, pBytes.length, Endian.big);
+        sock.add(hdr.buffer.asUint8List());
+        sock.add(uBytes);
+        sock.add(pBytes);
+        await sock.flush();
+      } else if (selectedSub == 2 || selectedSub == 258 || selectedSub == 261) {
+        final challenge = await reader.readExact(16);
+        final response = VncDesAuth.encryptVncChallenge(challenge, password);
+        sock.add(response);
+        await sock.flush();
+      } else if (selectedSub != 1 && selectedSub != 257 && selectedSub != 260) {
+        throw SocketException('Unsupported VeNCrypt subtype: $selectedSub');
+      }
+      checkSecurityResult = true;
+    } else if (chosenSec == 16) {
+      // Tight Security Type (16)
+      onStatus('Negotiating TightVNC capabilities...');
+      final nTunnels = ByteData.sublistView(await reader.readExact(4)).getUint32(0, Endian.big);
+      if (nTunnels > 0) {
+        await reader.readExact(nTunnels * 16);
+        sock.add([0, 0, 0, 0]); // No tunnel
+        await sock.flush();
+      }
+      final nAuth = ByteData.sublistView(await reader.readExact(4)).getUint32(0, Endian.big);
+      if (nAuth == 0) {
+        checkSecurityResult = false;
+      } else {
+        final capsBytes = await reader.readExact(nAuth * 16);
+        final capsBd = ByteData.sublistView(capsBytes);
+        final authCodes = List<int>.generate(nAuth, (i) => capsBd.getUint32(i * 16, Endian.big));
+        final chosenTightAuth = authCodes.contains(2)
+            ? 2
+            : (authCodes.contains(1) ? 1 : authCodes.first);
+        final authSel = ByteData(4)..setUint32(0, chosenTightAuth, Endian.big);
+        sock.add(authSel.buffer.asUint8List());
+        await sock.flush();
+        if (chosenTightAuth == 2) {
+          final challenge = await reader.readExact(16);
+          sock.add(VncDesAuth.encryptVncChallenge(challenge, password));
+          await sock.flush();
+          checkSecurityResult = true;
+        } else {
+          checkSecurityResult = !is37;
+        }
+      }
+    } else if (chosenSec == 113) {
+      // UltraVNC MSLogonII (Diffie-Hellman 64-bit + VNC DES-CBC)
+      onStatus('Authenticating UltraVNC MSLogonII...');
+      final genBytes = await reader.readExact(8);
+      final modBytes = await reader.readExact(8);
+      final respBytes = await reader.readExact(8);
+      final g = VncAppleArdAuth.bytesToBigInt(genBytes);
+      final m = VncAppleArdAuth.bytesToBigInt(modBytes);
+      final serverPub = VncAppleArdAuth.bytesToBigInt(respBytes);
+      final rng = Random.secure();
+      final priv = BigInt.from(rng.nextInt(0x7FFFFFFF) + 2);
+      final clientPub = VncAppleArdAuth.bigIntToFixedBytes(g.modPow(priv, m), 8);
+      final sharedKey = VncAppleArdAuth.bigIntToFixedBytes(serverPub.modPow(priv, m), 8);
+
+      final userBlock = Uint8List.fromList(List<int>.generate(256, (_) => rng.nextInt(256)));
+      final uUtf8 = utf8.encode(username.trim());
+      final uLen = min(uUtf8.length, 255);
+      userBlock.setRange(0, uLen, uUtf8);
+      userBlock[uLen] = 0;
+
+      final passBlock = Uint8List.fromList(List<int>.generate(64, (_) => rng.nextInt(256)));
+      final pUtf8 = utf8.encode(password);
+      final pLen = min(pUtf8.length, 63);
+      passBlock.setRange(0, pLen, pUtf8);
+      passBlock[pLen] = 0;
+
+      final encUser = VncDesAuth.encryptVncDesCbc(userBlock, sharedKey, sharedKey);
+      final encPass = VncDesAuth.encryptVncDesCbc(passBlock, sharedKey, sharedKey);
+      sock.add(clientPub);
+      sock.add(encUser);
+      sock.add(encPass);
+      await sock.flush();
+      checkSecurityResult = true;
     }
 
-    if (!is33 && (chosenSec == 2 || !is37)) {
+    if (checkSecurityResult) {
       final resBuf = await reader.readExact(4);
       final secResult = ByteData.sublistView(resBuf).getUint32(0, Endian.big);
       if (secResult != 0) {
-        String errMsg = 'VNC Authentication failed (wrong password).';
-        if (!is37) {
+        String errMsg = secResult == 2
+            ? 'VNC Authentication locked temporarily (too many attempts).'
+            : 'VNC Authentication failed (invalid credentials).';
+        if (!is37 && !is33) {
           try {
-            final lenBuf = await reader.readExact(4, timeout: const Duration(seconds: 2));
+            final lenBuf = await reader.readExact(4, timeout: const Duration(milliseconds: 1200));
             final len = ByteData.sublistView(lenBuf).getUint32(0, Endian.big);
             if (len > 0 && len < 2048) {
-              errMsg = utf8.decode(await reader.readExact(len), allowMalformed: true);
+              final serverReason =
+                  utf8.decode(await reader.readExact(len), allowMalformed: true).trim();
+              if (serverReason.isNotEmpty) {
+                errMsg = 'VNC Authentication failed: $serverReason';
+              }
             }
           } catch (_) {}
         }
-        throw SocketException(errMsg);
+        throw _VncAuthAttemptException(
+          message: errMsg,
+          offeredTypes: offeredTypes,
+          serverBanner: verStr,
+        );
       }
     }
 
@@ -381,31 +782,31 @@ class VncRfbClient {
 
     // 5. Send SetPixelFormat (msgType = 0): 32bpp, depth 24, little-endian, true-color, R@0, G@8, B@16
     final setPf = ByteData(20);
-    setPf.setUint8(0, 0); // SetPixelFormat
-    setPf.setUint8(4, 32); // bits-per-pixel = 32
-    setPf.setUint8(5, 24); // depth = 24
-    setPf.setUint8(6, 0); // big-endian-flag = 0 (little-endian so byte0=R, byte1=G, byte2=B)
-    setPf.setUint8(7, 1); // true-colour-flag = 1
-    setPf.setUint16(8, 255, Endian.big); // red-max = 255
-    setPf.setUint16(10, 255, Endian.big); // green-max = 255
-    setPf.setUint16(12, 255, Endian.big); // blue-max = 255
-    setPf.setUint8(14, 0); // red-shift = 0
-    setPf.setUint8(15, 8); // green-shift = 8
-    setPf.setUint8(16, 16); // blue-shift = 16
+    setPf.setUint8(0, 0);
+    setPf.setUint8(4, 32);
+    setPf.setUint8(5, 24);
+    setPf.setUint8(6, 0);
+    setPf.setUint8(7, 1);
+    setPf.setUint16(8, 255, Endian.big);
+    setPf.setUint16(10, 255, Endian.big);
+    setPf.setUint16(12, 255, Endian.big);
+    setPf.setUint8(14, 0);
+    setPf.setUint8(15, 8);
+    setPf.setUint8(16, 16);
     sock.add(setPf.buffer.asUint8List());
 
     // 6. Send SetEncodings (msgType = 2): CopyRect (1), Raw (0), DesktopSize (-223)
     final setEnc = ByteData(16);
-    setEnc.setUint8(0, 2); // SetEncodings
-    setEnc.setUint16(2, 3, Endian.big); // 3 encodings
-    setEnc.setInt32(4, 1, Endian.big); // CopyRect
-    setEnc.setInt32(8, 0, Endian.big); // Raw
-    setEnc.setInt32(12, -223, Endian.big); // DesktopSize pseudo-encoding
+    setEnc.setUint8(0, 2);
+    setEnc.setUint16(2, 3, Endian.big);
+    setEnc.setInt32(4, 1, Endian.big);
+    setEnc.setInt32(8, 0, Endian.big);
+    setEnc.setInt32(12, -223, Endian.big);
     sock.add(setEnc.buffer.asUint8List());
     await sock.flush();
 
     _running = true;
-    onStatus('Connected to $desktopName (${width}x$height • RFB 3.8)');
+    onStatus('Connected to $desktopName (${width}x$height • ${describeSecurityType(chosenSec)})');
     _sendFramebufferUpdateRequest(incremental: false);
     unawaited(_receiveLoop());
   }
@@ -414,7 +815,7 @@ class VncRfbClient {
     final sock = _socket;
     if (sock == null || !_running) return;
     final req = ByteData(10);
-    req.setUint8(0, 3); // FramebufferUpdateRequest
+    req.setUint8(0, 3);
     req.setUint8(1, incremental ? 1 : 0);
     req.setUint16(2, 0, Endian.big);
     req.setUint16(4, 0, Endian.big);
@@ -431,7 +832,6 @@ class VncRfbClient {
         final msgTypeBuf = await reader.readExact(1, timeout: const Duration(seconds: 60));
         final msgType = msgTypeBuf[0];
         if (msgType == 0) {
-          // FramebufferUpdate
           final hdr = await reader.readExact(3);
           final numRects = ByteData.sublistView(hdr).getUint16(1, Endian.big);
           for (int r = 0; r < numRects; r++) {
@@ -444,7 +844,6 @@ class VncRfbClient {
             final encoding = rbd.getInt32(8, Endian.big);
 
             if (encoding == -223) {
-              // DesktopSize pseudo-encoding
               width = rw;
               height = rh;
               _rgbaBuffer = Uint8List(width * height * 4);
@@ -453,7 +852,6 @@ class VncRfbClient {
               }
               continue;
             } else if (encoding == 0) {
-              // Raw encoding (rw * rh * 4 bytes)
               final rawBytes = await reader.readExact(rw * rh * 4);
               for (int row = 0; row < rh; row++) {
                 final dstY = ry + row;
@@ -471,7 +869,6 @@ class VncRfbClient {
                 }
               }
             } else if (encoding == 1) {
-              // CopyRect (4 bytes: srcX, srcY)
               final cpBytes = await reader.readExact(4);
               final cpBd = ByteData.sublistView(cpBytes);
               final srcX = cpBd.getUint16(0, Endian.big);
@@ -510,14 +907,12 @@ class VncRfbClient {
           await _emitDecodedImage();
           _sendFramebufferUpdateRequest(incremental: true);
         } else if (msgType == 1) {
-          // SetColourMapEntries
           final hdr = await reader.readExact(5);
           final nColors = ByteData.sublistView(hdr).getUint16(3, Endian.big);
           await reader.readExact(nColors * 6);
         } else if (msgType == 2) {
           // Bell
         } else if (msgType == 3) {
-          // ServerCutText
           final hdr = await reader.readExact(7);
           final len = ByteData.sublistView(hdr).getUint32(3, Endian.big);
           if (len > 0 && len < 1048576) {
@@ -551,7 +946,7 @@ class VncRfbClient {
     final sock = _socket;
     if (sock == null || !_running) return;
     final pkt = ByteData(6);
-    pkt.setUint8(0, 5); // PointerEvent
+    pkt.setUint8(0, 5);
     pkt.setUint8(1, buttonMask & 0xFF);
     pkt.setUint16(2, x.clamp(0, width - 1), Endian.big);
     pkt.setUint16(4, y.clamp(0, height - 1), Endian.big);
@@ -564,7 +959,7 @@ class VncRfbClient {
     final states = down != null ? [down ? 1 : 0] : [1, 0];
     for (final st in states) {
       final pkt = ByteData(8);
-      pkt.setUint8(0, 4); // KeyEvent
+      pkt.setUint8(0, 4);
       pkt.setUint8(1, st);
       pkt.setUint32(4, keysym, Endian.big);
       sock.add(pkt.buffer.asUint8List());
@@ -577,12 +972,17 @@ class VncRfbClient {
     }
   }
 
-  Future<void> dispose() async {
+  Future<void> _cleanupSocket() async {
     _running = false;
     await _reader?.dispose();
+    _reader = null;
     try {
       _socket?.destroy();
     } catch (_) {}
     _socket = null;
+  }
+
+  Future<void> dispose() async {
+    await _cleanupSocket();
   }
 }

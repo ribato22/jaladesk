@@ -11,6 +11,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'protocols/rdp_ffi_client.dart';
 import 'protocols/vnc_rfb_client.dart';
+import 'terminal/sftp_explorer_view.dart';
+import 'terminal/termius_terminal.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -183,10 +185,15 @@ class RemoteHostItem {
 
   String get displayAccount {
     final (dom, usr) = resolvedDomainAndUser;
-    if (dom.isNotEmpty && !usr.contains('\\')) {
+    if (dom.isNotEmpty && usr.isNotEmpty && !usr.contains('\\')) {
       return '$dom\\$usr';
     }
     return usr;
+  }
+
+  String get formattedEndpoint {
+    final acct = displayAccount.trim();
+    return acct.isNotEmpty ? '$acct@$address:$port' : '$address:$port';
   }
 
   RemoteHostItem copyWith({
@@ -367,6 +374,7 @@ class RemoteSftpEntry {
   final String name;
   final String fullPath;
   final String permissions;
+  final int sizeBytes;
   final String sizeLabel;
   final bool isDirectory;
 
@@ -374,9 +382,18 @@ class RemoteSftpEntry {
     required this.name,
     required this.fullPath,
     required this.permissions,
+    this.sizeBytes = 0,
     required this.sizeLabel,
     required this.isDirectory,
   });
+
+  SftpFileEntry toExplorerEntry() => SftpFileEntry(
+        name: name,
+        permissions: permissions,
+        sizeBytes: sizeBytes,
+        sizeLabel: sizeLabel,
+        isDirectory: isDirectory,
+      );
 }
 
 /// Jump Desktop-style Remote Resolution Negotiation Preset
@@ -423,6 +440,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   static const String _prefsHostsKey = 'jaladesk_vault_hosts_v2';
   static const String _prefsTotpKey = 'jaladesk_vault_totp_v2';
   static const String _prefsPairKey = 'jaladesk_vault_pair_v2';
+  static const String _prefsTermThemeKey = 'jaladesk_terminal_theme_v1';
+  static const String _prefsTermFontKey = 'jaladesk_terminal_font_v1';
+  static const String _prefsSnippetsKey = 'jaladesk_terminal_snippets_v1';
 
   int _tabIndex = 0;
   String _protocolFilter = 'ALL';
@@ -430,6 +450,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   String _pairedDesktopInfo = 'Local Encrypted Vault • AES-256-GCM';
   bool _vaultLoaded = false;
   bool _probingAll = false;
+  final Set<String> _collapsedFolders = <String>{};
 
   final List<RemoteHostItem> _hosts = [];
   final List<TotpEntryItem> _totpItems = [];
@@ -437,7 +458,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   RemoteHostItem? _activeRdpHost;
   RemoteHostItem? _activeSshHost;
 
-  // Live RDP (FreeRDP 3.x FFI) & VNC (RFB 3.8) Framebuffer Engine state
+  // Live RDP (FreeRDP 3.x FFI) & VNC (RFB 3.8 / Apple ARD) Framebuffer Engine state
   RdpFfiClient? _rdpFfiClient;
   VncRfbClient? _vncRfbClient;
   ui.Image? _remoteDesktopFrame;
@@ -468,7 +489,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   Size _lastMeasuredCanvasSize = const Size(1280, 800);
   Timer? _autoResizeDebounce;
 
-  // Live SSHv2 PTY Shell & SFTP Client state (`dartssh2`)
+  // Live SSHv2 Interactive PTY Shell & SFTP Client state (`dartssh2`)
   SSHClient? _sshClient;
   SSHSession? _sshPtySession;
   StreamSubscription<Uint8List>? _sshStdoutSub;
@@ -477,13 +498,62 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   bool _sshLiveConnected = false;
   bool _sshBusy = false;
   String _sshSubMode = 'terminal';
-  String _sftpCurrentPath = '.';
+  String _sftpCurrentPath = '/etc/nginx/conf.d';
   List<RemoteSftpEntry> _sftpEntries = [];
-  final TextEditingController _sshInputCtrl = TextEditingController();
-  final ScrollController _sshScrollCtrl = ScrollController();
-  final List<String> _sshLines = [
-    'JalaDesk SSHv2 PTY / SFTP Client Engine (RFC 4251–4254 • dartssh2)',
-    'Tap "SSH / Connect" on any host in the Connections tab to open a live interactive PTY session.',
+  final AnsiTerminalBuffer _terminalBuffer = AnsiTerminalBuffer();
+  String _terminalThemeId = 'jala_sapphire';
+  double _terminalFontSize = 13.0;
+  final List<TerminalSnippetItem> _customSnippets = [];
+  String _offlineTerminalLine = '';
+  final List<RemoteSftpEntry> _offlineSftpEntries = [
+    const RemoteSftpEntry(
+      name: 'ssl-certs',
+      fullPath: '/etc/nginx/conf.d/ssl-certs',
+      permissions: 'drwxr-xr-x',
+      sizeBytes: 4096,
+      sizeLabel: '4.0 KB',
+      isDirectory: true,
+    ),
+    const RemoteSftpEntry(
+      name: 'upstreams',
+      fullPath: '/etc/nginx/conf.d/upstreams',
+      permissions: 'drwxr-xr-x',
+      sizeBytes: 4096,
+      sizeLabel: '4.0 KB',
+      isDirectory: true,
+    ),
+    const RemoteSftpEntry(
+      name: '.htpasswd.sealed',
+      fullPath: '/etc/nginx/conf.d/.htpasswd.sealed',
+      permissions: '-rw-------',
+      sizeBytes: 2150,
+      sizeLabel: '2.1 KB',
+      isDirectory: false,
+    ),
+    const RemoteSftpEntry(
+      name: 'default.conf',
+      fullPath: '/etc/nginx/conf.d/default.conf',
+      permissions: '-rw-r--r--',
+      sizeBytes: 3480,
+      sizeLabel: '3.4 KB',
+      isDirectory: false,
+    ),
+    const RemoteSftpEntry(
+      name: 'zero-trust-gateway.conf',
+      fullPath: '/etc/nginx/conf.d/zero-trust-gateway.conf',
+      permissions: '-rw-r-----',
+      sizeBytes: 6963,
+      sizeLabel: '6.8 KB',
+      isDirectory: false,
+    ),
+    const RemoteSftpEntry(
+      name: 'jaladesk-audit-2026.jsonl',
+      fullPath: '/etc/nginx/conf.d/jaladesk-audit-2026.jsonl',
+      permissions: '-rw-r--r--',
+      sizeBytes: 1468006,
+      sizeLabel: '1.4 MB',
+      isDirectory: false,
+    ),
   ];
 
   // TOTP Timer state
@@ -493,9 +563,20 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   bool _lanAutoSync = true;
   bool _clipboardScrubber = true;
 
+  String get _offlinePrompt {
+    final hostLabel = _activeSshHost?.name.split(' ').first ?? 'jaladesk';
+    final userLabel = (_activeSshHost?.username.isNotEmpty ?? false) ? _activeSshHost!.username : 'root';
+    return '\x1b[1;32m$userLabel@$hostLabel\x1b[0m:\x1b[1;34m~\x1b[0m\$ ';
+  }
+
   @override
   void initState() {
     super.initState();
+    _terminalBuffer.write(
+      '\x1b[1;33mJalaDesk Interactive SSHv2 PTY\x1b[0m (xterm-256color)\r\n'
+      'Tap anywhere on the terminal to type directly, or connect to a live SSH server.\r\n'
+      '$_offlinePrompt',
+    );
     _updateTotpCountdown();
     _totpTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) _updateTotpCountdown();
@@ -618,10 +699,30 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
   void switchSshSubModeForVerification(String mode) {
     setState(() => _sshSubMode = mode);
+    if ((mode == 'sftp' || mode == 'split') && _sshLiveConnected) {
+      _browseRemoteSftpPath(_sftpCurrentPath);
+    }
   }
 
   Future<void> runSshCommandForVerification(String cmd) async {
     await _runSshCommand(cmd);
+  }
+
+  void setTerminalThemeForVerification(String themeId) {
+    setState(() => _terminalThemeId = themeId);
+    _saveVaultToDisk();
+  }
+
+  void sendTerminalRawForVerification(String raw) {
+    _sendRawTerminalInput(raw);
+  }
+
+  Future<void> browseSftpPathForVerification(String path) async {
+    await _browseRemoteSftpPath(path);
+  }
+
+  void openThemeSheetForVerification() {
+    _showTerminalThemeSheet();
   }
 
   void setDisplayModeForVerification({
@@ -675,6 +776,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       final rawHosts = prefs.getString(_prefsHostsKey);
       final rawTotp = prefs.getString(_prefsTotpKey);
       final savedPair = prefs.getString(_prefsPairKey);
+      final savedTheme = prefs.getString(_prefsTermThemeKey);
+      final savedFont = prefs.getDouble(_prefsTermFontKey);
+      final rawSnippets = prefs.getString(_prefsSnippetsKey);
 
       final loadedHosts = <RemoteHostItem>[];
       if (rawHosts != null && rawHosts.isNotEmpty) {
@@ -696,6 +800,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         }
       }
 
+      final loadedSnippets = <TerminalSnippetItem>[];
+      if (rawSnippets != null && rawSnippets.isNotEmpty) {
+        final decoded = jsonDecode(rawSnippets) as List<dynamic>;
+        for (final item in decoded) {
+          if (item is Map<String, dynamic>) {
+            loadedSnippets.add(TerminalSnippetItem.fromJson(item));
+          }
+        }
+      }
+
       if (!mounted) return;
       setState(() {
         _hosts
@@ -704,8 +818,17 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         _totpItems
           ..clear()
           ..addAll(loadedTotp);
+        _customSnippets
+          ..clear()
+          ..addAll(loadedSnippets);
         if (savedPair != null && savedPair.isNotEmpty) {
           _pairedDesktopInfo = savedPair;
+        }
+        if (savedTheme != null && savedTheme.isNotEmpty) {
+          _terminalThemeId = savedTheme;
+        }
+        if (savedFont != null) {
+          _terminalFontSize = savedFont.clamp(10.0, 18.0);
         }
         _syncActiveHostSelection();
         _vaultLoaded = true;
@@ -733,6 +856,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         jsonEncode(_totpItems.map((t) => t.toJson()).toList()),
       );
       await prefs.setString(_prefsPairKey, _pairedDesktopInfo);
+      await prefs.setString(_prefsTermThemeKey, _terminalThemeId);
+      await prefs.setDouble(_prefsTermFontKey, _terminalFontSize);
+      await prefs.setString(
+        _prefsSnippetsKey,
+        jsonEncode(_customSnippets.map((s) => s.toJson()).toList()),
+      );
     } catch (_) {}
   }
 
@@ -767,8 +896,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     _totpTimer.cancel();
     _autoResizeDebounce?.cancel();
     _canvasTransformCtrl.dispose();
-    _sshInputCtrl.dispose();
-    _sshScrollCtrl.dispose();
+    _terminalBuffer.dispose();
     _desktopKeyInputCtrl.dispose();
     _closeDesktopSession();
     _closeSshClient();
@@ -805,48 +933,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     _sshLiveConnected = false;
   }
 
-  /// Strips ANSI CSI/OSC escape sequences and applies backspace (\x08) from live PTY shell output
-  static String stripAnsiCodes(String input) {
-    var s = input
-        .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
-        .replaceAll(RegExp(r'\x1B\][^\x07]*(\x07|\x1B\\)'), '')
-        .replaceAll('\x07', '')
-        .replaceAll('\r\n', '\n')
-        .replaceAll('\r', '');
-    final out = <int>[];
-    for (final unit in s.codeUnits) {
-      if (unit == 0x08) {
-        if (out.isNotEmpty && out.last != 0x0A) {
-          out.removeLast();
-        }
-      } else {
-        out.add(unit);
-      }
-    }
-    return String.fromCharCodes(out);
-  }
-
   void _appendPtyOutput(String chunk) {
-    final cleaned = stripAnsiCodes(chunk);
-    if (cleaned.isEmpty || !mounted) return;
-    setState(() {
-      final parts = cleaned.split('\n');
-      for (int i = 0; i < parts.length; i++) {
-        if (i == 0 && _sshLines.isNotEmpty) {
-          _sshLines[_sshLines.length - 1] = '${_sshLines.last}${parts[0]}';
-        } else {
-          _sshLines.add(parts[i]);
-        }
-      }
-      if (_sshLines.length > 500) {
-        _sshLines.removeRange(0, _sshLines.length - 500);
-      }
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_sshScrollCtrl.hasClients) {
-        _sshScrollCtrl.jumpTo(_sshScrollCtrl.position.maxScrollExtent);
-      }
-    });
+    if (chunk.isEmpty || !mounted) return;
+    _terminalBuffer.write(chunk);
   }
 
   /// Real TCP Socket RTT Prober (`dart:io` `Socket.connect`)
@@ -1070,8 +1159,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                         Expanded(
                           child: _buildModalField(
                             controller: userCtrl,
-                            label: 'Username',
-                            hint: 'root / ubuntu',
+                            label: selectedProto == RemoteProtocol.vnc
+                                ? 'Username (macOS / ARD)'
+                                : 'Username',
+                            hint: selectedProto == RemoteProtocol.vnc
+                                ? 'ribato (optional)'
+                                : 'root / ubuntu',
                             icon: Icons.person_outline_rounded,
                           ),
                         ),
@@ -1197,12 +1290,18 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 }
                 final parsedPort = int.tryParse(portCtrl.text.trim()) ?? defaultPortForProtocol(selectedProto);
                 final displayName = nameCtrl.text.trim().isNotEmpty ? nameCtrl.text.trim() : addr;
-                final rawUser = userCtrl.text.trim().isEmpty ? 'root' : userCtrl.text.trim();
+                final rawUser = userCtrl.text.trim().isEmpty
+                    ? (selectedProto == RemoteProtocol.vnc ? '' : 'root')
+                    : userCtrl.text.trim();
                 final rawDom = domainCtrl.text.trim();
-                final acctDesc = rawDom.isNotEmpty && !rawUser.contains('\\') ? '$rawDom\\$rawUser' : rawUser;
+                final acctDesc = rawDom.isNotEmpty && rawUser.isNotEmpty && !rawUser.contains('\\')
+                    ? '$rawDom\\$rawUser'
+                    : rawUser;
                 final osDesc = notesCtrl.text.trim().isNotEmpty
                     ? notesCtrl.text.trim()
-                    : '${selectedProto.name.toUpperCase()} • $acctDesc@$addr';
+                    : (acctDesc.isNotEmpty
+                        ? '${selectedProto.name.toUpperCase()} • $acctDesc@$addr'
+                        : '${selectedProto.name.toUpperCase()} • $addr');
 
                 final newItem = RemoteHostItem(
                   id: existing?.id ?? 'h-${DateTime.now().millisecondsSinceEpoch}',
@@ -1298,15 +1397,17 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   ),
                   const SizedBox(height: 10),
                 ],
-                if (host.protocol != RemoteProtocol.vnc) ...[
-                  _buildModalField(
-                    controller: userCtrl,
-                    label: 'Username',
-                    hint: 'adminit / root',
-                    icon: Icons.person_outline_rounded,
-                  ),
-                  const SizedBox(height: 10),
-                ],
+                _buildModalField(
+                  controller: userCtrl,
+                  label: host.protocol == RemoteProtocol.vnc
+                      ? 'Username (macOS Screen Sharing / VeNCrypt)'
+                      : 'Username',
+                  hint: host.protocol == RemoteProtocol.vnc
+                      ? 'e.g. ribato (blank for Classic VNC)'
+                      : 'adminit / root',
+                  icon: Icons.person_outline_rounded,
+                ),
+                const SizedBox(height: 10),
                 TextField(
                   controller: passCtrl,
                   autofocus: true,
@@ -1361,7 +1462,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               onPressed: () {
                 final updated = host.copyWith(
                   domain: domCtrl.text.trim(),
-                  username: userCtrl.text.trim().isEmpty ? host.username : userCtrl.text.trim(),
+                  username: host.protocol == RemoteProtocol.vnc
+                      ? userCtrl.text.trim()
+                      : (userCtrl.text.trim().isEmpty ? host.username : userCtrl.text.trim()),
                   password: passCtrl.text,
                 );
                 if (rememberInVault) {
@@ -1484,18 +1587,25 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
   /// World-Class Multi-Protocol Connection Engine:
   /// - RDP: Native FreeRDP 3.32.2 (`RdpFfiClient` via `libjaladesk_freerdp.so`) with CredSSP/NLA + TLS + Live RGBA32 GDI Framebuffer
-  /// - VNC: Full RFC 6143 RFB 3.3/3.7/3.8 (`VncRfbClient`) with DES Challenge-Response + Live RGBA32 Framebuffer
+  /// - VNC: Full RFC 6143 RFB 3.3/3.7/3.8/3.889 (`VncRfbClient`) with Apple ARD (SecType 30), VeNCrypt TLS (19), Tight (16), MSLogonII (113), & DES (2)
   /// - SSH / SFTP: Full `dartssh2` Interactive PTY Shell (`client.shell()`) & SFTP Subsystem (`client.sftp()`)
   /// - Hypervisor: HTTPS TLS Certificate & Proxmox VE Endpoint Inspector
-  Future<void> _connectToHost(RemoteHostItem rawHost, {bool forceCredentialPrompt = false}) async {
+  Future<void> _connectToHost(
+    RemoteHostItem rawHost, {
+    bool forceCredentialPrompt = false,
+    String? initialSshSubMode,
+  }) async {
     if (widget.disableNetworkProbes) {
       setState(() {
         if (rawHost.protocol == RemoteProtocol.ssh || rawHost.protocol == RemoteProtocol.sftp) {
           _activeSshHost = rawHost;
-          _sshSubMode = rawHost.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal';
+          _sshSubMode = initialSshSubMode ?? (rawHost.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal');
           _tabIndex = 2;
-          _sshLines.add('--- Connected to ${rawHost.name} (${rawHost.address}:${rawHost.port}) ---');
-          _sshLines.add('${rawHost.username}@${rawHost.name.split(' ').first}:~\$ ');
+          _offlineTerminalLine = '';
+          _terminalBuffer.write(
+            '\r\n\x1b[1;32m✓ Connected to ${rawHost.name} (${rawHost.address}:${rawHost.port})\x1b[0m\r\n'
+            '$_offlinePrompt',
+          );
         } else {
           _activeRdpHost = rawHost;
           _tabIndex = 1;
@@ -1505,12 +1615,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       return;
     }
 
-    // Prompt for password if none is stored yet (for RDP/SSH/SFTP)
+    // Prompt for password if none is stored yet (for RDP/SSH/SFTP/VNC)
     RemoteHostItem host = rawHost;
     if (forceCredentialPrompt ||
         ((host.protocol == RemoteProtocol.rdp ||
                 host.protocol == RemoteProtocol.ssh ||
-                host.protocol == RemoteProtocol.sftp) &&
+                host.protocol == RemoteProtocol.sftp ||
+                host.protocol == RemoteProtocol.vnc) &&
             host.password.isEmpty &&
             host.privateKeyPem.isEmpty)) {
       final prompted = await _promptCredentialsIfNeeded(host, forcePrompt: true);
@@ -1575,10 +1686,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           } catch (_) {}
 
           SftpClient? sftp;
+          String resolvedHomePath = '.';
           List<RemoteSftpEntry> initialSftpEntries = [];
           try {
             sftp = await client.sftp();
-            initialSftpEntries = await _fetchSftpDirectoryEntries(sftp, '.');
+            try {
+              resolvedHomePath = await sftp.absolute('.');
+            } catch (_) {
+              resolvedHomePath = '.';
+            }
+            initialSftpEntries = await _fetchSftpDirectoryEntries(sftp, resolvedHomePath);
           } catch (_) {}
 
           if (!mounted) {
@@ -1587,6 +1704,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           }
 
           _closeSshClient();
+          _offlineTerminalLine = '';
+          _terminalBuffer.clear();
+          _terminalBuffer.write(
+            '\x1b[1;32m✓ SSHv2 PTY Connected\x1b[0m to \x1b[1;33m${host.formattedEndpoint}\x1b[0m (${rtt}ms)\r\n',
+          );
+
           setState(() {
             final idx = _hosts.indexWhere((h) => h.id == host.id);
             if (idx >= 0) {
@@ -1597,15 +1720,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             _sshPtySession = ptySession;
             _sftpClient = sftp;
             _sshLiveConnected = true;
-            _sshSubMode = host.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal';
-            _sftpCurrentPath = '.';
-            if (initialSftpEntries.isNotEmpty) {
-              _sftpEntries = initialSftpEntries;
-            }
-            _sshLines
-              ..clear()
-              ..add('✓ SSHv2 PTY Connected to ${host.address}:${host.port} ($rtt ms)')
-              ..add('');
+            _sshSubMode = initialSshSubMode ?? (host.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal');
+            _sftpCurrentPath = resolvedHomePath;
+            _sftpEntries = initialSftpEntries;
             _tabIndex = 2;
           });
 
@@ -1617,7 +1734,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               _appendPtyOutput(utf8.decode(data, allowMalformed: true));
             });
           } else {
-            _appendPtyOutput('$cleanUser@${host.name.split(" ").first}:~\$ ');
+            _appendPtyOutput(_offlinePrompt);
           }
 
           _saveVaultToDisk();
@@ -1698,16 +1815,19 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         }
 
         // =====================================================================
-        // 3. VNC ENGINE — FULL RFC 6143 RFB 3.3 / 3.7 / 3.8 (`VncRfbClient`)
+        // 3. VNC ENGINE — RFC 6143 RFB 3.3 / 3.7 / 3.8 / Apple ARD (`VncRfbClient`)
         // =====================================================================
         if (host.protocol == RemoteProtocol.vnc) {
+          final (_, vncUser) = host.resolvedDomainAndUser;
           modalSetState?.call(() {
-            stageText = '1/3 Negotiating VNC RFB 3.8 session & DES authentication with ${host.address}:${host.port}...';
+            stageText =
+                '1/3 Negotiating VNC / Apple Screen Sharing session with ${host.address}:${host.port}...';
           });
           _closeDesktopSession();
           final vncClient = VncRfbClient(
             host: host.address,
             port: host.port,
+            username: vncUser,
             password: host.password,
             onFrame: (ui.Image img, int w, int h, String status) {
               if (!mounted) return;
@@ -1746,7 +1866,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             _desktopLiveConnected = true;
             _desktopServerWidth = vncClient.width;
             _desktopServerHeight = vncClient.height;
-            _desktopProtocolBanner = 'RFB 3.8 • ${vncClient.desktopName} (${vncClient.width}x${vncClient.height})';
+            _desktopProtocolBanner =
+                '${vncClient.negotiatedAuthLabel} • ${vncClient.desktopName} (${vncClient.width}x${vncClient.height})';
             _lastRdpAction = 'Live VNC Framebuffer (${vncClient.width}x${vncClient.height})';
             _tabIndex = 1;
           });
@@ -1773,6 +1894,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         httpClient.close();
 
         if (!mounted) return;
+        _terminalBuffer.clear();
+        _terminalBuffer.write(
+          '\x1b[1;32m✓ Hypervisor HTTPS Connected\x1b[0m to https://${host.address}:${host.port} ($rtt ms)\r\n'
+          'HTTP Status: ${resp.statusCode} ${resp.reasonPhrase}\r\n'
+          '${body.isNotEmpty ? "Response: $body" : "TLS Endpoint Verified."}\r\n'
+          '$_offlinePrompt',
+        );
         setState(() {
           final idx = _hosts.indexWhere((h) => h.id == host.id);
           if (idx >= 0) {
@@ -1780,12 +1908,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           }
           _activeSshHost = host.copyWith(latencyMs: rtt, isOnline: true);
           _sshSubMode = 'terminal';
-          _sshLines
-            ..clear()
-            ..add('✓ Hypervisor HTTPS Connected to https://${host.address}:${host.port} ($rtt ms)')
-            ..add('HTTP Status: ${resp.statusCode} ${resp.reasonPhrase}')
-            ..add(body.isNotEmpty ? 'Response: $body' : 'TLS Endpoint Verified.')
-            ..add('${host.username}@${host.name.split(" ").first}:~\$ ');
           _tabIndex = 2;
         });
         _saveVaultToDisk();
@@ -1841,7 +1963,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${host.protocol.name.toUpperCase()} • ${host.displayAccount}@${host.address}:${host.port}',
+                  '${host.protocol.name.toUpperCase()} • ${host.formattedEndpoint}',
                   style: const TextStyle(
                     fontSize: 12,
                     fontFamily: 'monospace',
@@ -1880,9 +2002,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                     ),
                   ),
                   const SizedBox(height: 10),
-                  const Text(
-                    'Verify your Domain/Username/Password and ensure your device has network routing to this host and port.',
-                    style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
+                  Text(
+                    host.protocol == RemoteProtocol.vnc
+                        ? 'macOS Screen Sharing tip: Enter your Mac account Username & Password (Apple ARD SecType 30), or set an 8-char VNC password in System Settings > General > Sharing > Screen Sharing (i).'
+                        : 'Verify your Domain/Username/Password and ensure your device has network routing to this host and port.',
+                    style: const TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
                   ),
                 ],
               ],
@@ -1900,7 +2024,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   onPressed: () {
                     dialogOpen = false;
                     Navigator.of(ctx).pop();
-                    _connectToHost(host, forceCredentialPrompt: true);
+                    _connectToHost(host, forceCredentialPrompt: true, initialSshSubMode: initialSshSubMode);
                   },
                   child: const Text('Change Password', style: TextStyle(color: JalaPalette.brandGold)),
                 ),
@@ -1936,6 +2060,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     dialogOpen = false;
   }
 
+  String _joinSftpChildPath(String basePath, String childName) {
+    if (childName.startsWith('/')) return childName;
+    final cleanBase = basePath.trim();
+    if (cleanBase.isEmpty || cleanBase == '.') return './$childName';
+    if (cleanBase == '/') return '/$childName';
+    return cleanBase.endsWith('/') ? '$cleanBase$childName' : '$cleanBase/$childName';
+  }
+
   Future<List<RemoteSftpEntry>> _fetchSftpDirectoryEntries(SftpClient sftp, String path) async {
     final items = await sftp.listdir(path);
     final entries = <RemoteSftpEntry>[];
@@ -1946,14 +2078,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       final sizeStr = sizeBytes >= 1048576
           ? '${(sizeBytes / 1048576).toStringAsFixed(1)} MB'
           : (sizeBytes >= 1024 ? '${(sizeBytes / 1024).toStringAsFixed(1)} KB' : '$sizeBytes B');
-      final full = path == '.'
-          ? item.filename
-          : (path.endsWith('/') ? '$path${item.filename}' : '$path/${item.filename}');
+      final full = _joinSftpChildPath(path, item.filename);
       entries.add(
         RemoteSftpEntry(
           name: item.filename,
           fullPath: full,
           permissions: item.longname.split(' ').first,
+          sizeBytes: sizeBytes,
           sizeLabel: sizeStr,
           isDirectory: isDir,
         ),
@@ -1961,12 +2092,18 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     }
     entries.sort((a, b) {
       if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
-      return a.name.compareTo(b.name);
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
     });
     return entries;
   }
 
   Future<void> _browseRemoteSftpPath(String newPath) async {
+    if (!_sshLiveConnected) {
+      setState(() {
+        _sftpCurrentPath = newPath.isEmpty ? '/' : newPath;
+      });
+      return;
+    }
     if (_sftpClient == null && _sshClient != null) {
       try {
         _sftpClient = await _sshClient!.sftp();
@@ -1982,10 +2119,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     if (_sftpClient == null) return;
     setState(() => _sshBusy = true);
     try {
-      final list = await _fetchSftpDirectoryEntries(_sftpClient!, newPath);
+      String resolvedPath = newPath;
+      try {
+        resolvedPath = await _sftpClient!.absolute(newPath);
+      } catch (_) {}
+      final list = await _fetchSftpDirectoryEntries(_sftpClient!, resolvedPath);
       if (!mounted) return;
       setState(() {
-        _sftpCurrentPath = newPath;
+        _sftpCurrentPath = resolvedPath;
         _sftpEntries = list;
         _sshBusy = false;
       });
@@ -1998,97 +2139,269 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     }
   }
 
-  Future<void> _viewRemoteSftpFile(RemoteSftpEntry entry) async {
-    final sftp = _sftpClient;
-    if (sftp == null) return;
-    setState(() => _sshBusy = true);
-    try {
-      final file = await sftp.open(entry.fullPath, mode: SftpFileOpenMode.read);
-      final bytes = await file.readBytes(length: 16384);
-      await file.close();
-      if (!mounted) return;
-      setState(() => _sshBusy = false);
-      final content = utf8.decode(bytes, allowMalformed: true);
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: JalaPalette.surface,
-          title: Text(
-            entry.name,
-            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
-          ),
-          content: SizedBox(
-            width: 380,
-            height: 260,
-            child: SingleChildScrollView(
-              child: SelectableText(
-                content.isEmpty ? '(Empty file)' : content,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 11.5, color: JalaPalette.text),
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Clipboard.setData(ClipboardData(text: content));
-                Navigator.of(ctx).pop();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Copied ${entry.name} content to clipboard')),
-                );
-              },
-              child: const Text('Copy', style: TextStyle(color: JalaPalette.brandGold)),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Close'),
-            ),
-          ],
+  Future<void> _navigateSftpUp() async {
+    final cur = _sftpCurrentPath.trim();
+    if (_sshLiveConnected && _sftpClient != null) {
+      if (cur == '/') return;
+      final candidate = cur.isEmpty || cur == '.' ? '..' : '$cur/..';
+      await _browseRemoteSftpPath(candidate);
+      return;
+    }
+    if (cur == '/' || cur == '.') return;
+    final idx = cur.lastIndexOf('/');
+    final parent = idx <= 0 ? '/' : cur.substring(0, idx);
+    setState(() => _sftpCurrentPath = parent);
+  }
+
+  Future<void> _createSftpFolder(String folderName) async {
+    final target = _joinSftpChildPath(_sftpCurrentPath, folderName);
+    if (_sshLiveConnected && _sftpClient != null) {
+      setState(() => _sshBusy = true);
+      try {
+        await _sftpClient!.mkdir(target);
+        await _browseRemoteSftpPath(_sftpCurrentPath);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Created directory "$folderName"')),
+          );
+        }
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _sshBusy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to create folder: $e')),
+        );
+      }
+      return;
+    }
+    setState(() {
+      _offlineSftpEntries.insert(
+        0,
+        RemoteSftpEntry(
+          name: folderName,
+          fullPath: target,
+          permissions: 'drwxr-xr-x',
+          sizeBytes: 4096,
+          sizeLabel: '4.0 KB',
+          isDirectory: true,
         ),
       );
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _sshBusy = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to read ${entry.name}: $e')),
+    });
+  }
+
+  Future<String> _readSftpTextFile(SftpFileEntry entry) async {
+    final target = _joinSftpChildPath(_sftpCurrentPath, entry.name);
+    if (_sshLiveConnected && _sftpClient != null) {
+      final file = await _sftpClient!.open(target, mode: SftpFileOpenMode.read);
+      try {
+        final bytes = await file.readBytes(length: 65536);
+        return utf8.decode(bytes, allowMalformed: true);
+      } finally {
+        await file.close();
+      }
+    }
+    return '# Preview of $target\nserver {\n    listen 443 ssl http2;\n    server_name jaladesk.internal;\n}\n';
+  }
+
+  Future<void> _writeSftpTextFile(String fileName, String content) async {
+    final target = _joinSftpChildPath(_sftpCurrentPath, fileName);
+    final encoded = Uint8List.fromList(utf8.encode(content));
+    if (_sshLiveConnected && _sftpClient != null) {
+      setState(() => _sshBusy = true);
+      try {
+        final file = await _sftpClient!.open(
+          target,
+          mode: SftpFileOpenMode.create | SftpFileOpenMode.truncate | SftpFileOpenMode.write,
+        );
+        await file.writeBytes(encoded);
+        await file.close();
+        await _browseRemoteSftpPath(_sftpCurrentPath);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Saved "$fileName" (${encoded.length} B)')),
+          );
+        }
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _sshBusy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save "$fileName": $e')),
+        );
+      }
+      return;
+    }
+    final sizeLabel = encoded.length >= 1024
+        ? '${(encoded.length / 1024).toStringAsFixed(1)} KB'
+        : '${encoded.length} B';
+    setState(() {
+      _offlineSftpEntries.removeWhere((e) => e.name == fileName);
+      _offlineSftpEntries.add(
+        RemoteSftpEntry(
+          name: fileName,
+          fullPath: target,
+          permissions: '-rw-r--r--',
+          sizeBytes: encoded.length,
+          sizeLabel: sizeLabel,
+          isDirectory: false,
+        ),
       );
+    });
+  }
+
+  Future<void> _renameSftpEntry(SftpFileEntry entry, String newName) async {
+    final oldPath = _joinSftpChildPath(_sftpCurrentPath, entry.name);
+    final newPath = _joinSftpChildPath(_sftpCurrentPath, newName);
+    if (_sshLiveConnected && _sftpClient != null) {
+      setState(() => _sshBusy = true);
+      try {
+        await _sftpClient!.rename(oldPath, newPath);
+        await _browseRemoteSftpPath(_sftpCurrentPath);
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _sshBusy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Rename failed: $e')),
+        );
+      }
+      return;
+    }
+    setState(() {
+      final idx = _offlineSftpEntries.indexWhere((e) => e.name == entry.name);
+      if (idx >= 0) {
+        final prev = _offlineSftpEntries[idx];
+        _offlineSftpEntries[idx] = RemoteSftpEntry(
+          name: newName,
+          fullPath: newPath,
+          permissions: prev.permissions,
+          sizeBytes: prev.sizeBytes,
+          sizeLabel: prev.sizeLabel,
+          isDirectory: prev.isDirectory,
+        );
+      }
+    });
+  }
+
+  Future<void> _deleteSftpEntry(SftpFileEntry entry) async {
+    final target = _joinSftpChildPath(_sftpCurrentPath, entry.name);
+    if (_sshLiveConnected && _sftpClient != null) {
+      setState(() => _sshBusy = true);
+      try {
+        if (entry.isDirectory) {
+          await _sftpClient!.rmdir(target);
+        } else {
+          await _sftpClient!.remove(target);
+        }
+        await _browseRemoteSftpPath(_sftpCurrentPath);
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _sshBusy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Delete failed: $e')),
+        );
+      }
+      return;
+    }
+    setState(() {
+      _offlineSftpEntries.removeWhere((e) => e.name == entry.name);
+    });
+  }
+
+  /// Sends raw keystrokes / control sequences directly into the live SSHv2 PTY (Termius-style)
+  /// or handles interactive line-editing in offline/exec-fallback mode.
+  void _sendRawTerminalInput(String raw) {
+    if (raw.isEmpty) return;
+
+    if (_sshLiveConnected && _sshPtySession != null) {
+      _sshPtySession!.write(Uint8List.fromList(utf8.encode(raw)));
+      return;
+    }
+
+    for (int i = 0; i < raw.length; i++) {
+      final code = raw.codeUnitAt(i);
+      if (code == 0x1B) {
+        // Ignore ANSI arrow/escape sequences in offline line buffer
+        if (i + 2 < raw.length && raw[i + 1] == '[') {
+          i += 2;
+        }
+        continue;
+      } else if (code == 0x03) {
+        // Ctrl+C
+        _offlineTerminalLine = '';
+        _terminalBuffer.write('^C\r\n$_offlinePrompt');
+      } else if (code == 0x04) {
+        // Ctrl+D
+        if (_offlineTerminalLine.isEmpty) {
+          _terminalBuffer.write('logout\r\n$_offlinePrompt');
+        }
+      } else if (code == 0x0C) {
+        // Ctrl+L (clear screen)
+        _terminalBuffer.write('\x1b[2J\x1b[H$_offlinePrompt$_offlineTerminalLine');
+      } else if (code == 0x7F || code == 0x08) {
+        // Backspace
+        if (_offlineTerminalLine.isNotEmpty) {
+          _offlineTerminalLine = _offlineTerminalLine.substring(0, _offlineTerminalLine.length - 1);
+          _terminalBuffer.write('\x08\x1b[K');
+        }
+      } else if (code == 0x09) {
+        // Tab auto-complete common commands in offline preview
+        const candidates = ['uptime', 'uname -a', 'docker ps', 'kubectl get pods', 'df -h', 'free -h', 'clear'];
+        final match = candidates.where((c) => c.startsWith(_offlineTerminalLine)).firstOrNull;
+        if (match != null && match.length > _offlineTerminalLine.length) {
+          final suffix = match.substring(_offlineTerminalLine.length);
+          _offlineTerminalLine = match;
+          _terminalBuffer.write(suffix);
+        }
+      } else if (code == 0x0D || code == 0x0A) {
+        final submitted = _offlineTerminalLine;
+        _offlineTerminalLine = '';
+        _terminalBuffer.write('\r\n');
+        unawaited(_executeNonPtyCommand(submitted));
+      } else if (code >= 0x20) {
+        final ch = raw[i];
+        _offlineTerminalLine += ch;
+        _terminalBuffer.write(ch);
+      }
     }
   }
 
-  /// Executes an SSH command on the live `dartssh2` PTY session or `SSHClient.run`
+  void _runTerminalSnippet(TerminalSnippetItem snippet) {
+    if (_sshSubMode == 'sftp') {
+      setState(() => _sshSubMode = 'terminal');
+    }
+    if (snippet.runImmediately) {
+      unawaited(_runSshCommand(snippet.command));
+    } else {
+      _sendRawTerminalInput(snippet.command);
+    }
+  }
+
+  /// Executes an SSH command on the live `dartssh2` PTY session or offline/exec fallback
   Future<void> _runSshCommand(String rawCmd) async {
     final cmd = rawCmd.trim();
-    _sshInputCtrl.clear();
-    final hostLabel = _activeSshHost?.name.split(' ').first ?? 'host';
-    final userLabel = _activeSshHost?.username ?? 'root';
+    if (_sshLiveConnected && _sshPtySession != null) {
+      _sshPtySession!.write(Uint8List.fromList(utf8.encode('$cmd\r')));
+      return;
+    }
+    if (_offlineTerminalLine.isNotEmpty) {
+      _terminalBuffer.write('\x08\x1b[K' * _offlineTerminalLine.length);
+      _offlineTerminalLine = '';
+    }
+    _terminalBuffer.write('$cmd\r\n');
+    await _executeNonPtyCommand(cmd);
+  }
+
+  Future<void> _executeNonPtyCommand(String rawCmd) async {
+    final cmd = rawCmd.trim();
+    final hostLabel = _activeSshHost?.name.split(' ').first ?? 'jaladesk';
 
     if (cmd == 'clear') {
-      setState(() {
-        _sshLines.clear();
-      });
-      if (_sshLiveConnected && _sshPtySession != null) {
-        _sshPtySession!.write(Uint8List.fromList(utf8.encode('\n')));
-      } else {
-        setState(() => _sshLines.add('$userLabel@$hostLabel:~\$ '));
-      }
+      _terminalBuffer.clear();
+      _terminalBuffer.write(_offlinePrompt);
       return;
     }
-
-    // If an interactive PTY shell is open, write directly to PTY stdin!
-    if (_sshLiveConnected && _sshPtySession != null) {
-      _sshPtySession!.write(Uint8List.fromList(utf8.encode('$cmd\n')));
-      return;
-    }
-
-    setState(() {
-      if (_sshLines.isNotEmpty && _sshLines.last.endsWith('\$ ')) {
-        _sshLines[_sshLines.length - 1] = '${_sshLines.last}$cmd';
-      } else {
-        _sshLines.add('\$ $cmd');
-      }
-    });
 
     if (cmd.isEmpty) {
-      setState(() => _sshLines.add('$userLabel@$hostLabel:~\$ '));
+      _terminalBuffer.write(_offlinePrompt);
       return;
     }
 
@@ -2100,50 +2413,551 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             .timeout(const Duration(seconds: 15));
         final decoded = utf8.decode(outputBytes, allowMalformed: true).trimRight();
         if (!mounted) return;
-        setState(() {
-          if (decoded.isNotEmpty) {
-            for (final line in decoded.split('\n')) {
-              _sshLines.add(line);
-            }
-          }
-          _sshLines.add('$userLabel@$hostLabel:~\$ ');
-          _sshBusy = false;
-        });
+        if (decoded.isNotEmpty) {
+          _terminalBuffer.write('${decoded.replaceAll('\n', '\r\n')}\r\n');
+        }
+        _terminalBuffer.write(_offlinePrompt);
+        setState(() => _sshBusy = false);
       } catch (e) {
         if (!mounted) return;
-        setState(() {
-          _sshLines.add('[ssh error] $e');
-          _sshLines.add('$userLabel@$hostLabel:~\$ ');
-          _sshBusy = false;
-        });
+        _terminalBuffer.write('\x1b[31m[ssh error] $e\x1b[0m\r\n$_offlinePrompt');
+        setState(() => _sshBusy = false);
       }
       return;
     }
 
-    // Offline preview fallback (used by widget tests and offline mode)
-    setState(() {
-      if (cmd == 'help') {
-        _sshLines.add('Commands: uptime, uname -a, docker ps, kubectl get pods, df -h, clear');
-      } else if (cmd == 'uptime') {
-        _sshLines.add(' 19:36:12 up 142 days,  7:14,  2 users,  load average: 0.18, 0.24, 0.21');
-      } else if (cmd == 'uname -a') {
-        _sshLines.add('Linux $hostLabel 6.8.0-45-generic #45-Ubuntu SMP aarch64 GNU/Linux');
-      } else if (cmd == 'docker ps') {
-        _sshLines.add('CONTAINER ID   IMAGE                     STATUS        PORTS                    NAMES');
-        _sshLines.add('a81f92c01b2e   envoyproxy/envoy:v1.31    Up 14 days    0.0.0.0:443->443/tcp     jala-zt-gw');
-        _sshLines.add('73d10c92be14   postgres:16-alpine        Up 14 days    127.0.0.1:5432->5432/tcp vault-db');
-      } else if (cmd == 'kubectl get pods') {
-        _sshLines.add('NAME                               READY   STATUS    RESTARTS   AGE');
-        _sshLines.add('jaladesk-relay-6b7f9d8c4-x92lk     2/2     Running   0          19d');
-        _sshLines.add('prometheus-node-exporter-m82qp     1/1     Running   0          45d');
-      } else if (cmd == 'df -h') {
-        _sshLines.add('Filesystem      Size  Used Avail Use% Mounted on');
-        _sshLines.add('/dev/nvme0n1p2  500G  142G  358G  29% /');
-      } else {
-        _sshLines.add('[offline] Connect to a live SSH server in Connections to execute "$cmd" remotely.');
-      }
-      _sshLines.add('$userLabel@$hostLabel:~\$ ');
-    });
+    // Offline interactive preview fallback
+    if (cmd == 'help') {
+      _terminalBuffer.write(
+        'Available preview commands: uptime, uname -a, docker ps, kubectl get pods, df -h, free -h, clear\r\n',
+      );
+    } else if (cmd == 'uptime') {
+      _terminalBuffer.write(
+        ' 19:36:12 up 142 days,  7:14,  2 users,  load average: 0.18, 0.24, 0.21\r\n',
+      );
+    } else if (cmd == 'uname -a') {
+      _terminalBuffer.write(
+        'Linux $hostLabel 6.8.0-45-generic #45-Ubuntu SMP aarch64 GNU/Linux\r\n',
+      );
+    } else if (cmd.startsWith('docker')) {
+      _terminalBuffer.write(
+        'NAMES        STATUS       PORTS\r\n'
+        'jala-zt-gw   Up 14 days   0.0.0.0:443->443/tcp\r\n'
+        'vault-db     Up 14 days   127.0.0.1:5432->5432/tcp\r\n',
+      );
+    } else if (cmd.startsWith('kubectl')) {
+      _terminalBuffer.write(
+        'NAMESPACE   NAME                              READY   STATUS    AGE\r\n'
+        'prod        jaladesk-relay-6b7f9d8c4-x92lk    2/2     Running   19d\r\n'
+        'monitoring  prometheus-node-exporter-m82qp    1/1     Running   45d\r\n',
+      );
+    } else if (cmd.startsWith('df')) {
+      _terminalBuffer.write(
+        'Filesystem      Size  Used Avail Use% Mounted on\r\n'
+        '/dev/nvme0n1p2  500G  142G  358G  29% /\r\n',
+      );
+    } else if (cmd.startsWith('free')) {
+      _terminalBuffer.write(
+        '               total        used        free      available\r\n'
+        'Mem:           31Gi       8.4Gi        14Gi           22Gi\r\n',
+      );
+    } else if (cmd.startsWith('top')) {
+      _terminalBuffer.write(
+        'top - 19:36:20 up 142 days,  2 users,  load average: 0.14, 0.20, 0.19\r\n'
+        '%Cpu(s):  2.1 us,  0.8 sy,  0.0 ni, 96.9 id\r\n',
+      );
+    } else if (cmd.startsWith('ss ') || cmd.startsWith('ip ')) {
+      _terminalBuffer.write(
+        'eth0             UP             10.28.99.203/24\r\n'
+        'lo               UNKNOWN        127.0.0.1/8\r\n',
+      );
+    } else {
+      _terminalBuffer.write(
+        '\x1b[33m[offline]\x1b[0m Connect to a live SSH server in Connections to execute "$cmd" remotely.\r\n',
+      );
+    }
+    _terminalBuffer.write(_offlinePrompt);
+  }
+
+  /// Opens the Termius-Class Terminal Theme & Typography Studio
+  void _showTerminalThemeSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: JalaPalette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.palette_outlined, size: 19, color: JalaPalette.brandGold),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text(
+                            'Terminal Appearance & Themes',
+                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: JalaPalette.text),
+                          ),
+                        ),
+                        // Font size stepper
+                        Container(
+                          decoration: BoxDecoration(
+                            color: JalaPalette.header,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: JalaPalette.lineInput),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              InkWell(
+                                borderRadius: BorderRadius.circular(7),
+                                onTap: () {
+                                  setState(() {
+                                    _terminalFontSize = (_terminalFontSize - 1.0).clamp(10.0, 18.0);
+                                  });
+                                  setSheetState(() {});
+                                  _saveVaultToDisk();
+                                },
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                                  child: Text('A−', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                                ),
+                              ),
+                              Text(
+                                '${_terminalFontSize.toInt()}pt',
+                                style: const TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: JalaPalette.brandGold,
+                                ),
+                              ),
+                              InkWell(
+                                borderRadius: BorderRadius.circular(7),
+                                onTap: () {
+                                  setState(() {
+                                    _terminalFontSize = (_terminalFontSize + 1.0).clamp(10.0, 18.0);
+                                  });
+                                  setSheetState(() {});
+                                  _saveVaultToDisk();
+                                },
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                                  child: Text('A+', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                                ),
+                              ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          IconButton(
+                            key: const ValueKey('btn_close_theme_sheet'),
+                            visualDensity: VisualDensity.compact,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                            icon: const Icon(Icons.close_rounded, size: 19, color: JalaPalette.muted),
+                            onPressed: () => Navigator.of(ctx).pop(),
+                          ),
+                        ],
+                      ),
+                    const SizedBox(height: 12),
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: MediaQuery.of(ctx).size.height * 0.46,
+                      ),
+                      child: GridView.builder(
+                        shrinkWrap: true,
+                        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                          maxCrossAxisExtent: 210,
+                          mainAxisExtent: 76,
+                          crossAxisSpacing: 8,
+                          mainAxisSpacing: 8,
+                        ),
+                        itemCount: TerminalThemePreset.presets.length,
+                        itemBuilder: (ctx, i) {
+                          final preset = TerminalThemePreset.presets[i];
+                          final selected = preset.id == _terminalThemeId;
+                          return InkWell(
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: () {
+                              setState(() => _terminalThemeId = preset.id);
+                              setSheetState(() {});
+                              _saveVaultToDisk();
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.all(9),
+                              decoration: BoxDecoration(
+                                color: preset.background,
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: selected ? JalaPalette.brandGold : preset.border,
+                                  width: selected ? 1.6 : 1.0,
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          preset.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                            color: preset.foreground,
+                                          ),
+                                        ),
+                                      ),
+                                      if (selected)
+                                        const Icon(Icons.check_circle_rounded, size: 15, color: JalaPalette.brandGold),
+                                    ],
+                                  ),
+                                  Text(
+                                    'root@host:~\$ █',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 10.5,
+                                      color: preset.ansi16[2],
+                                    ),
+                                  ),
+                                  Row(
+                                    children: [
+                                      for (final swatchIdx in [1, 2, 3, 4, 5, 6])
+                                        Container(
+                                          width: 12,
+                                          height: 6,
+                                          margin: const EdgeInsets.only(right: 3),
+                                          decoration: BoxDecoration(
+                                            color: preset.ansi16[swatchIdx],
+                                            borderRadius: BorderRadius.circular(2),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Wrap(
+                        alignment: WrapAlignment.end,
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          TextButton.icon(
+                            onPressed: () {
+                              Clipboard.setData(ClipboardData(text: _terminalBuffer.toPlainText()));
+                              Navigator.pop(ctx);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Terminal scrollback copied to clipboard.')),
+                              );
+                            },
+                            icon: const Icon(Icons.copy_all_rounded, size: 16, color: JalaPalette.brandGold),
+                            label: const Text('Copy Output', style: TextStyle(color: JalaPalette.brandGold)),
+                          ),
+                          TextButton.icon(
+                            onPressed: () {
+                              Navigator.pop(ctx);
+                              _terminalBuffer.clear();
+                              if (_sshLiveConnected && _sshPtySession != null) {
+                                _sshPtySession!.write(Uint8List.fromList([0x0C]));
+                              } else {
+                                _terminalBuffer.write(_offlinePrompt);
+                              }
+                            },
+                            icon: const Icon(Icons.cleaning_services_outlined, size: 16, color: JalaPalette.text2),
+                            label: const Text('Clear Screen', style: TextStyle(color: JalaPalette.text2)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// Opens the Categorized DevOps & Custom Command Snippets Studio
+  void _showSnippetsStudioSheet() {
+    String selectedCategory = 'All';
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: JalaPalette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            final allSnippets = [..._customSnippets, ...TerminalSnippetItem.builtIn];
+            final categories = ['All', 'System', 'Docker', 'Kubernetes', 'Network', 'Custom'];
+            final visible = selectedCategory == 'All'
+                ? allSnippets
+                : allSnippets.where((s) => s.category == selectedCategory).toList();
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                child: SizedBox(
+                  height: MediaQuery.of(ctx).size.height * 0.65,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.bolt_rounded, size: 20, color: JalaPalette.brandGold),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'Command Snippets Studio',
+                              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: JalaPalette.text),
+                            ),
+                          ),
+                          FilledButton.tonalIcon(
+                            style: FilledButton.styleFrom(
+                              backgroundColor: JalaPalette.selected,
+                              foregroundColor: JalaPalette.brandGold,
+                              visualDensity: VisualDensity.compact,
+                            ),
+                            onPressed: () async {
+                              final labelCtrl = TextEditingController();
+                              final cmdCtrl = TextEditingController();
+                              bool runNow = true;
+                              final created = await showDialog<TerminalSnippetItem>(
+                                context: ctx,
+                                builder: (dCtx) => StatefulBuilder(
+                                  builder: (dCtx, setDState) => AlertDialog(
+                                    backgroundColor: JalaPalette.surface,
+                                    title: const Text('New Command Snippet', style: TextStyle(fontSize: 15)),
+                                    content: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        _buildModalField(
+                                          controller: labelCtrl,
+                                          label: 'Short Label *',
+                                          hint: 'e.g. nginx reload',
+                                          icon: Icons.label_outline_rounded,
+                                        ),
+                                        const SizedBox(height: 10),
+                                        _buildModalField(
+                                          controller: cmdCtrl,
+                                          label: 'Shell Command *',
+                                          hint: 'sudo nginx -t && sudo systemctl reload nginx',
+                                          icon: Icons.terminal_rounded,
+                                        ),
+                                        const SizedBox(height: 8),
+                                        CheckboxListTile(
+                                          contentPadding: EdgeInsets.zero,
+                                          dense: true,
+                                          activeColor: JalaPalette.brandGold,
+                                          value: runNow,
+                                          onChanged: (v) => setDState(() => runNow = v ?? true),
+                                          title: const Text(
+                                            'Execute immediately on tap (append Enter)',
+                                            style: TextStyle(fontSize: 12),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(dCtx),
+                                        child: const Text('Cancel'),
+                                      ),
+                                      FilledButton(
+                                        onPressed: () {
+                                          if (labelCtrl.text.trim().isEmpty || cmdCtrl.text.trim().isEmpty) return;
+                                          Navigator.pop(
+                                            dCtx,
+                                            TerminalSnippetItem(
+                                              id: 'cust-${DateTime.now().millisecondsSinceEpoch}',
+                                              label: labelCtrl.text.trim(),
+                                              command: cmdCtrl.text.trim(),
+                                              category: 'Custom',
+                                              runImmediately: runNow,
+                                            ),
+                                          );
+                                        },
+                                        child: const Text('Save Snippet'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                              if (created != null) {
+                                setState(() => _customSnippets.insert(0, created));
+                                setSheetState(() {});
+                                _saveVaultToDisk();
+                              }
+                            },
+                            icon: const Icon(Icons.add_rounded, size: 16),
+                            label: const Text('New Snippet', style: TextStyle(fontSize: 12)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            for (final cat in categories)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 6),
+                                child: ChoiceChip(
+                                  label: Text(cat, style: const TextStyle(fontSize: 11.5)),
+                                  selected: selectedCategory == cat,
+                                  selectedColor: JalaPalette.selected,
+                                  backgroundColor: JalaPalette.header,
+                                  onSelected: (_) => setSheetState(() => selectedCategory = cat),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Expanded(
+                        child: visible.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  'No snippets in this category yet. Tap "New Snippet" to create one.',
+                                  style: TextStyle(fontSize: 12.5, color: JalaPalette.muted),
+                                ),
+                              )
+                            : ListView.separated(
+                                itemCount: visible.length,
+                                separatorBuilder: (_, __) => const Divider(height: 1, color: JalaPalette.line),
+                                itemBuilder: (ctx, i) {
+                                  final snip = visible[i];
+                                  final isCustom = snip.category == 'Custom';
+                                  return ListTile(
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                    title: Row(
+                                      children: [
+                                        Text(
+                                          snip.label,
+                                          style: const TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w700,
+                                            color: JalaPalette.text,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                          decoration: BoxDecoration(
+                                            color: JalaPalette.header,
+                                            borderRadius: BorderRadius.circular(4),
+                                            border: Border.all(color: JalaPalette.line),
+                                          ),
+                                          child: Text(
+                                            snip.category,
+                                            style: const TextStyle(fontSize: 9.5, color: JalaPalette.brandGold),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    subtitle: Padding(
+                                      padding: const EdgeInsets.only(top: 3),
+                                      child: Text(
+                                        snip.command,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontFamily: 'monospace',
+                                          fontSize: 11.5,
+                                          color: JalaPalette.muted,
+                                        ),
+                                      ),
+                                    ),
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (isCustom)
+                                          IconButton(
+                                            visualDensity: VisualDensity.compact,
+                                            tooltip: 'Delete Snippet',
+                                            icon: const Icon(
+                                              Icons.delete_outline_rounded,
+                                              size: 17,
+                                              color: JalaPalette.danger,
+                                            ),
+                                            onPressed: () {
+                                              setState(() {
+                                                _customSnippets.removeWhere((c) => c.id == snip.id);
+                                              });
+                                              setSheetState(() {});
+                                              _saveVaultToDisk();
+                                            },
+                                          ),
+                                        IconButton(
+                                          visualDensity: VisualDensity.compact,
+                                          tooltip: 'Insert without Enter',
+                                          icon: const Icon(
+                                            Icons.edit_note_rounded,
+                                            size: 18,
+                                            color: JalaPalette.text2,
+                                          ),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            if (_sshSubMode == 'sftp') {
+                                              setState(() => _sshSubMode = 'terminal');
+                                            }
+                                            _sendRawTerminalInput(snip.command);
+                                          },
+                                        ),
+                                        FilledButton.tonal(
+                                          style: FilledButton.styleFrom(
+                                            backgroundColor: JalaPalette.selected,
+                                            foregroundColor: JalaPalette.brandGold,
+                                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                                            minimumSize: const Size(0, 30),
+                                          ),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            _runTerminalSnippet(snip);
+                                          },
+                                          child: const Text('Run', style: TextStyle(fontSize: 11.5)),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   /// Dispatches mouse coordinates & clicks to the active FreeRDP or VNC engine
@@ -2867,6 +3681,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         final q = _searchQuery.toLowerCase();
         return h.name.toLowerCase().contains(q) ||
             h.address.toLowerCase().contains(q) ||
+            h.username.toLowerCase().contains(q) ||
+            h.domain.toLowerCase().contains(q) ||
             h.folder.toLowerCase().contains(q);
       }
       return true;
@@ -2878,10 +3694,22 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         ? '—'
         : '${(latencies.reduce((a, b) => a + b) / latencies.length).toStringAsFixed(0)} ms';
 
+    // Group filtered hosts by folder (preserving insertion order)
+    final Map<String, List<RemoteHostItem>> groupedByFolder = {};
+    for (final h in filtered) {
+      final folderName = h.folder.trim().isEmpty ? 'Default' : h.folder.trim();
+      groupedByFolder.putIfAbsent(folderName, () => <RemoteHostItem>[]).add(h);
+    }
+
+    int countForProto(String proto) {
+      if (proto == 'ALL') return _hosts.length;
+      return _hosts.where((h) => h.protocol.name.toUpperCase() == proto).length;
+    }
+
     return LayoutBuilder(
       builder: (ctx, constraints) {
         final double availW = constraints.maxWidth;
-        final int columns = availW >= 980 ? 3 : (availW >= 600 ? 2 : 1);
+        final int columns = availW >= 980 ? 3 : (availW >= 620 ? 2 : 1);
         const double spacing = 10.0;
         const double horizontalPad = 14.0;
         final double cardW = columns == 1
@@ -2889,32 +3717,26 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             : ((availW - horizontalPad * 2 - spacing * (columns - 1)) / columns);
 
         return ListView(
-          padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
           children: [
+            // Executive Compact Vault Telemetry Header
             Container(
-              padding: const EdgeInsets.all(14),
+              padding: const EdgeInsets.fromLTRB(13, 12, 13, 11),
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
                   colors: [JalaPalette.chip, JalaPalette.surface],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
-                borderRadius: BorderRadius.circular(13),
-                border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.35)),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.25),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.32)),
               ),
               child: Column(
                 children: [
                   Row(
                     children: [
-                      _buildJalaBrandLogo(size: 40, radius: 10),
-                      const SizedBox(width: 11),
+                      _buildJalaBrandLogo(size: 36, radius: 9),
+                      const SizedBox(width: 10),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2922,14 +3744,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                             const Text(
                               'JalaDesk Enterprise Vault',
                               style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w700,
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: -0.2,
                                 color: JalaPalette.text,
                               ),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
-                            const SizedBox(height: 2),
+                            const SizedBox(height: 1),
                             Text(
                               _pairedDesktopInfo,
                               style: const TextStyle(fontSize: 11, color: JalaPalette.text2),
@@ -2939,37 +3762,40 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                           ],
                         ),
                       ),
-                      const SizedBox(width: 6),
-                      FilledButton.tonal(
+                      const SizedBox(width: 8),
+                      FilledButton.icon(
                         style: FilledButton.styleFrom(
-                          backgroundColor: JalaPalette.selected,
-                          foregroundColor: JalaPalette.brandGold,
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          backgroundColor: JalaPalette.accent,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
                           minimumSize: const Size(0, 32),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(8),
-                            side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.4)),
+                            side: const BorderSide(color: JalaPalette.accentLine, width: 0.8),
                           ),
                         ),
                         onPressed: () => _showHostEditorDialog(),
-                        child: const Text('+ Add Host', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                        icon: const Icon(Icons.add_rounded, size: 16),
+                        label: const Text('Add Host', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 10),
                   Row(
                     children: [
                       _buildTelemetryMetricPill('${_hosts.length} SAVED', '$onlineCount Reachable', JalaPalette.ok),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 7),
                       _buildTelemetryMetricPill(avgRtt, 'Live TCP RTT', JalaPalette.accentLine),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 7),
                       _buildTelemetryMetricPill('AES-256', 'Zero-Trust GCM', JalaPalette.brandGold),
                     ],
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
+            // Search + Live Latency Probe Row
             Row(
               children: [
                 Expanded(
@@ -2977,75 +3803,114 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                     onChanged: (v) => setState(() => _searchQuery = v),
                     style: const TextStyle(fontSize: 13, color: JalaPalette.text),
                     decoration: InputDecoration(
-                      hintText: 'Search servers, IPs, folders...',
-                      hintStyle: const TextStyle(fontSize: 12.5, color: JalaPalette.muted),
+                      hintText: 'Search hosts, users, IPs, folders...',
+                      hintStyle: const TextStyle(fontSize: 12, color: JalaPalette.muted),
                       prefixIcon: const Icon(Icons.search_rounded, size: 18, color: JalaPalette.brandGold),
+                      prefixIconConstraints: const BoxConstraints(minWidth: 38, minHeight: 38),
                       filled: true,
                       fillColor: JalaPalette.aside,
                       isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 11, horizontal: 12),
+                      contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
                       enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(9),
                         borderSide: const BorderSide(color: JalaPalette.lineInput, width: 1),
                       ),
                       focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: JalaPalette.accentLine, width: 1.5),
+                        borderRadius: BorderRadius.circular(9),
+                        borderSide: const BorderSide(color: JalaPalette.accentLine, width: 1.4),
                       ),
                     ),
                   ),
                 ),
                 if (_hosts.isNotEmpty) ...[
                   const SizedBox(width: 8),
-                  IconButton(
-                    tooltip: 'Probe Live TCP Latency',
-                    onPressed: _probingAll ? null : _probeAllHosts,
-                    style: IconButton.styleFrom(
-                      backgroundColor: JalaPalette.surface,
-                      side: const BorderSide(color: JalaPalette.lineInput),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    ),
-                    icon: Icon(
-                      Icons.network_ping_rounded,
-                      size: 18,
-                      color: _probingAll ? JalaPalette.muted : JalaPalette.brandGold,
+                  SizedBox(
+                    height: 38,
+                    width: 38,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      tooltip: 'Probe Live TCP Latency',
+                      onPressed: _probingAll ? null : _probeAllHosts,
+                      style: IconButton.styleFrom(
+                        backgroundColor: JalaPalette.surface,
+                        side: const BorderSide(color: JalaPalette.lineInput),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                      ),
+                      icon: Icon(
+                        Icons.network_ping_rounded,
+                        size: 17,
+                        color: _probingAll ? JalaPalette.muted : JalaPalette.brandGold,
+                      ),
                     ),
                   ),
                 ],
               ],
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 9),
+            // Protocol Filter Strip with Counts
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
                   for (final proto in ['ALL', 'SSH', 'RDP', 'VNC', 'SFTP', 'HYPERVISOR'])
-                    Padding(
-                      padding: const EdgeInsets.only(right: 6),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(8),
-                        onTap: () => setState(() => _protocolFilter = proto),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 140),
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: _protocolFilter == proto ? JalaPalette.selected : JalaPalette.surface,
+                    Builder(
+                      builder: (ctx) {
+                        final selected = _protocolFilter == proto;
+                        final count = countForProto(proto);
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: InkWell(
                             borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: _protocolFilter == proto ? JalaPalette.brandGold : JalaPalette.line,
-                              width: 1,
+                            onTap: () => setState(() => _protocolFilter = proto),
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 140),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5.5),
+                              decoration: BoxDecoration(
+                                color: selected ? JalaPalette.selected : JalaPalette.surface,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: selected ? JalaPalette.brandGold : JalaPalette.line,
+                                  width: 1,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    proto,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                                      color: selected ? JalaPalette.brandGold : JalaPalette.text2,
+                                    ),
+                                  ),
+                                  if (count > 0) ...[
+                                    const SizedBox(width: 5),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 4.5, vertical: 1),
+                                      decoration: BoxDecoration(
+                                        color: selected
+                                            ? JalaPalette.brandGold.withValues(alpha: 0.2)
+                                            : JalaPalette.header,
+                                        borderRadius: BorderRadius.circular(99),
+                                      ),
+                                      child: Text(
+                                        '$count',
+                                        style: TextStyle(
+                                          fontSize: 9.5,
+                                          fontWeight: FontWeight.w700,
+                                          fontFeatures: const [FontFeature.tabularFigures()],
+                                          color: selected ? JalaPalette.brandGold : JalaPalette.muted,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
                             ),
                           ),
-                          child: Text(
-                            proto,
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              fontWeight: _protocolFilter == proto ? FontWeight.w700 : FontWeight.w500,
-                              color: _protocolFilter == proto ? JalaPalette.brandGold : JalaPalette.text2,
-                            ),
-                          ),
-                        ),
-                      ),
+                        );
+                      },
                     ),
                 ],
               ),
@@ -3069,23 +3934,35 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 ),
               )
             else ...[
-              if (columns == 1)
-                for (final host in filtered) _buildHostCard(host)
-              else
-                Wrap(
-                  spacing: spacing,
-                  runSpacing: 0,
-                  children: [
-                    for (final host in filtered)
-                      SizedBox(
-                        width: cardW,
-                        child: _buildHostCard(host),
+              for (final folderEntry in groupedByFolder.entries) ...[
+                _buildFolderGroupHeader(folderEntry.key, folderEntry.value.length),
+                if (!_collapsedFolders.contains(folderEntry.key)) ...[
+                  if (columns == 1)
+                    for (final host in folderEntry.value) _buildHostCard(host)
+                  else
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Wrap(
+                        spacing: spacing,
+                        runSpacing: 0,
+                        children: [
+                          for (final host in folderEntry.value)
+                            SizedBox(
+                              width: cardW,
+                              child: _buildHostCard(host),
+                            ),
+                        ],
                       ),
-                  ],
-                ),
-              const SizedBox(height: 6),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    ),
+                ],
+                const SizedBox(height: 4),
+              ],
+              const SizedBox(height: 4),
+              Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 2,
                 children: [
                   TextButton.icon(
                     onPressed: () => _showHostEditorDialog(),
@@ -3116,6 +3993,70 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           ],
         );
       },
+    );
+  }
+
+  Widget _buildFolderGroupHeader(String folderName, int count) {
+    final collapsed = _collapsedFolders.contains(folderName);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6, top: 2),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(7),
+        onTap: () {
+          setState(() {
+            if (collapsed) {
+              _collapsedFolders.remove(folderName);
+            } else {
+              _collapsedFolders.add(folderName);
+            }
+          });
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+          child: Row(
+            children: [
+              Icon(
+                collapsed ? Icons.keyboard_arrow_right_rounded : Icons.keyboard_arrow_down_rounded,
+                size: 16,
+                color: JalaPalette.muted,
+              ),
+              const SizedBox(width: 4),
+              const Icon(Icons.folder_outlined, size: 13.5, color: JalaPalette.brandGold),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  folderName.toUpperCase(),
+                  style: const TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                    color: JalaPalette.text2,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: JalaPalette.surface,
+                  borderRadius: BorderRadius.circular(99),
+                  border: Border.all(color: JalaPalette.line),
+                ),
+                child: Text(
+                  '$count',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                    color: JalaPalette.muted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -3187,9 +4128,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   Widget _buildTelemetryMetricPill(String value, String label, Color accentColor) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 8),
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
         decoration: BoxDecoration(
-          color: JalaPalette.header.withValues(alpha: 0.65),
+          color: JalaPalette.header.withValues(alpha: 0.68),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: JalaPalette.line),
         ),
@@ -3199,8 +4140,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             Text(
               value,
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 11.5,
                 fontWeight: FontWeight.w800,
+                fontFeatures: const [FontFeature.tabularFigures()],
                 color: accentColor,
               ),
               maxLines: 1,
@@ -3209,7 +4151,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             const SizedBox(height: 1),
             Text(
               label,
-              style: const TextStyle(fontSize: 10, color: JalaPalette.muted),
+              style: const TextStyle(fontSize: 9.5, color: JalaPalette.muted),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -3219,140 +4161,178 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     );
   }
 
+  /// World-Class Single-Surface Host Row (Termius / Jump Desktop / Royal TSX Craft)
   Widget _buildHostCard(RemoteHostItem host) {
     final isGold = host.accentTint == 'gold';
     final badgeColor = isGold ? JalaPalette.brandGold : JalaPalette.accentLine;
-    final protoLabel = host.protocol.name.toUpperCase();
+    final shortProto = host.protocol == RemoteProtocol.hypervisor ? 'HV' : host.protocol.name.toUpperCase();
+    final fullProto = host.protocol.name.toUpperCase();
 
     final bool? online = host.isOnline;
     final Color statusColor = online == true
         ? JalaPalette.ok
         : (online == false ? JalaPalette.amber : JalaPalette.accentLine);
     final String statusText = host.latencyMs != null && online != false
-        ? '● ${host.latencyMs} ms'
-        : (online == false ? '○ UNREACHABLE' : '● READY');
+        ? '${host.latencyMs}ms'
+        : (online == false ? 'Offline' : 'Ready');
+
+    final defaultGeneratedLabelPrefix = '$fullProto • ';
+    final bool hasCustomOsLabel = host.osLabel.trim().isNotEmpty &&
+        !host.osLabel.startsWith(defaultGeneratedLabelPrefix);
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(13),
+      margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
         color: JalaPalette.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: JalaPalette.line),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: JalaPalette.lineInput),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: JalaPalette.header,
-                  borderRadius: BorderRadius.circular(9),
-                  border: Border.all(color: badgeColor.withValues(alpha: 0.45)),
-                ),
-                child: Icon(_iconForProtocol(host.protocol), color: badgeColor, size: 18),
-              ),
-              const SizedBox(width: 11),
-              Expanded(
-                child: InkWell(
-                  onTap: () => _showHostEditorDialog(existing: host),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(11),
+          onTap: () => _connectToHost(host),
+          onLongPress: () => _showHostActionsSheet(host),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+            child: Row(
+              children: [
+                // Protocol Icon + Micro Protocol Pill
+                Container(
+                  width: 40,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: JalaPalette.header,
+                    borderRadius: BorderRadius.circular(9),
+                    border: Border.all(color: badgeColor.withValues(alpha: 0.42)),
+                  ),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Text(
-                        host.name,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13.5,
-                          color: JalaPalette.text,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      Icon(_iconForProtocol(host.protocol), color: badgeColor, size: 16),
                       const SizedBox(height: 2),
                       Text(
-                        '${host.folder} • ${host.displayAccount}@${host.address}:${host.port}',
-                        style: const TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                        shortProto,
+                        style: TextStyle(
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.3,
+                          color: badgeColor,
+                        ),
                       ),
                     ],
                   ),
                 ),
-              ),
-              const SizedBox(width: 6),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                decoration: BoxDecoration(
-                  color: statusColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(99),
-                  border: Border.all(color: statusColor.withValues(alpha: 0.4)),
-                ),
-                child: Text(
-                  statusText,
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: statusColor,
-                    fontWeight: FontWeight.w700,
+                const SizedBox(width: 11),
+                // Host Identity & Monospace Endpoint
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              host.name,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13.5,
+                                color: JalaPalette.text,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 7),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                            decoration: BoxDecoration(
+                              color: statusColor.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(99),
+                              border: Border.all(color: statusColor.withValues(alpha: 0.36)),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  width: 5,
+                                  height: 5,
+                                  decoration: BoxDecoration(
+                                    color: statusColor,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  statusText,
+                                  style: TextStyle(
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.w700,
+                                    fontFeatures: const [FontFeature.tabularFigures()],
+                                    color: statusColor,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        host.formattedEndpoint,
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontFamily: 'monospace',
+                          color: JalaPalette.text2,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (hasCustomOsLabel) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          host.osLabel,
+                          style: const TextStyle(fontSize: 10.5, color: JalaPalette.muted),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ],
                   ),
                 ),
-              ),
-              const SizedBox(width: 4),
-              InkWell(
-                borderRadius: BorderRadius.circular(6),
-                onTap: () => _showHostEditorDialog(existing: host),
-                child: const Padding(
-                  padding: EdgeInsets.all(4),
-                  child: Icon(Icons.edit_outlined, size: 16, color: JalaPalette.muted),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-            decoration: BoxDecoration(
-              color: JalaPalette.aside,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: JalaPalette.line),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: JalaPalette.selected,
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: Text(
-                    protoLabel,
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                      color: badgeColor,
+                const SizedBox(width: 6),
+                // Quick SFTP Jump on SSH Hosts
+                if (host.protocol == RemoteProtocol.ssh) ...[
+                  SizedBox(
+                    height: 30,
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: JalaPalette.brandGold,
+                        side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+                      ),
+                      onPressed: () => _connectToHost(host, initialSshSubMode: 'sftp'),
+                      child: const Text(
+                        'SFTP',
+                        style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800),
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    host.osLabel,
-                    style: const TextStyle(fontSize: 11.5, color: JalaPalette.text2),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(width: 8),
+                  const SizedBox(width: 5),
+                ],
+                // Primary Connect Action
                 SizedBox(
                   height: 30,
                   child: FilledButton(
                     style: FilledButton.styleFrom(
                       backgroundColor: JalaPalette.accent,
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(7),
                         side: const BorderSide(color: JalaPalette.accentLine, width: 0.8),
@@ -3361,17 +4341,172 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                     onPressed: () => _connectToHost(host),
                     child: Text(
                       host.protocol == RemoteProtocol.ssh ? 'SSH' : 'Connect',
-                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                      style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
                     ),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                // Context Menu Trigger (`⋯`)
+                InkWell(
+                  borderRadius: BorderRadius.circular(7),
+                  onTap: () => _showHostActionsSheet(host),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+                    child: Icon(Icons.more_vert_rounded, size: 17, color: JalaPalette.muted),
                   ),
                 ),
               ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }
+
+  void _duplicateHost(RemoteHostItem source) {
+    final clone = source.copyWith(
+      id: 'host-${DateTime.now().microsecondsSinceEpoch}',
+      name: '${source.name} (Copy)',
+    );
+    setState(() {
+      _hosts.add(clone);
+    });
+    _saveVaultToDisk();
+    _probeSingleHost(clone);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Duplicated "${source.name}"')),
+    );
+  }
+
+  void _showHostActionsSheet(RemoteHostItem host) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: JalaPalette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                child: Row(
+                  children: [
+                    Icon(_iconForProtocol(host.protocol), size: 18, color: JalaPalette.brandGold),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            host.name,
+                            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: JalaPalette.text),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          Text(
+                            '${host.folder} • ${host.formattedEndpoint}',
+                            style: const TextStyle(fontSize: 11, fontFamily: 'monospace', color: JalaPalette.muted),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(color: JalaPalette.line, height: 1),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.bolt_rounded, color: JalaPalette.ok, size: 19),
+                title: Text(
+                  host.protocol == RemoteProtocol.ssh ? 'Open Interactive SSH Terminal' : 'Connect Now',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+                ),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _connectToHost(host);
+                },
+              ),
+              if (host.protocol == RemoteProtocol.ssh)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.folder_special_outlined, color: JalaPalette.brandGold, size: 19),
+                  title: const Text(
+                    'Open Direct SFTP File Browser',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+                  ),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    _connectToHost(host, initialSshSubMode: 'sftp');
+                  },
+                ),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.edit_outlined, color: JalaPalette.accentLine, size: 19),
+                title: const Text('Edit Connection', style: TextStyle(fontSize: 13, color: JalaPalette.text)),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _showHostEditorDialog(existing: host);
+                },
+              ),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.password_rounded, color: JalaPalette.brandGold, size: 19),
+                title: const Text('Update Credentials & Reconnect', style: TextStyle(fontSize: 13, color: JalaPalette.text)),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _connectToHost(host, forceCredentialPrompt: true);
+                },
+              ),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.network_ping_rounded, color: JalaPalette.text2, size: 19),
+                title: const Text('Probe TCP Latency', style: TextStyle(fontSize: 13, color: JalaPalette.text)),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _probeSingleHost(host);
+                },
+              ),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.copy_all_rounded, color: JalaPalette.text2, size: 19),
+                title: const Text('Duplicate Host', style: TextStyle(fontSize: 13, color: JalaPalette.text)),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _duplicateHost(host);
+                },
+              ),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.content_copy_rounded, color: JalaPalette.text2, size: 19),
+                title: const Text('Copy Endpoint Address', style: TextStyle(fontSize: 13, color: JalaPalette.text)),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  Clipboard.setData(ClipboardData(text: '${host.address}:${host.port}'));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Copied ${host.address}:${host.port}')),
+                  );
+                },
+              ),
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.delete_outline_rounded, color: JalaPalette.danger, size: 19),
+                title: const Text('Delete Connection', style: TextStyle(fontSize: 13, color: JalaPalette.danger)),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _deleteHost(host);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
 
   /// Show Jump Desktop-style Display Resolution & Aspect Ratio Sheet
   void _showDisplaySizingModal() {
@@ -4330,54 +5465,42 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     );
   }
 
-  /// Termius-style Mobile SSHv2 Terminal + SFTP Studio (`dartssh2`)
-  /// Supports side-by-side Split SSH + SFTP mode on foldables & tablets (`isWideScreen == true`)
+  /// Termius-style Mobile SSHv2 Interactive Terminal + SFTP Studio (`dartssh2`)
+  /// Supports side-by-side Split SSH + SFTP mode on foldables & tablets (`constraints.maxWidth >= 700`)
   Widget _buildTermiusSshTab({bool isFullScreen = false, bool isWideScreen = false}) {
     final hostDesc = _activeSshHost != null
-        ? '${_activeSshHost!.displayAccount}@${_activeSshHost!.address}:${_activeSshHost!.port}'
-        : 'No SSH Host Selected';
+        ? _activeSshHost!.formattedEndpoint
+        : 'Interactive Terminal Preview';
+    final activeTheme = TerminalThemePreset.byId(_terminalThemeId);
 
     return LayoutBuilder(
       builder: (ctx, constraints) {
         final canSplitSshSftp = constraints.maxWidth >= 700;
+        final isTerminalVisible = _sshSubMode != 'sftp' || (canSplitSshSftp && _sshSubMode == 'split');
 
         Widget buildTerminalPane() {
-          return Container(
-            width: double.infinity,
-            margin: EdgeInsets.all(isFullScreen ? 4 : 10),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: JalaPalette.header,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: _sshLiveConnected ? JalaPalette.ok.withValues(alpha: 0.5) : JalaPalette.lineInput,
-              ),
-            ),
-            child: ListView.builder(
-              controller: _sshScrollCtrl,
-              itemCount: _sshLines.length,
-              itemBuilder: (ctx, i) => Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Text(
-                  _sshLines[i],
-                  style: TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    color: _sshLines[i].contains('@') && _sshLines[i].endsWith('\$ ')
-                        ? JalaPalette.brandGold
-                        : (_sshLines[i].startsWith('✓') ? JalaPalette.ok : JalaPalette.text),
-                    height: 1.35,
-                  ),
-                ),
-              ),
-            ),
+          return TermiusInteractiveTerminal(
+            buffer: _terminalBuffer,
+            theme: activeTheme,
+            fontSize: _terminalFontSize,
+            isLiveSshConnected: _sshLiveConnected,
+            snippets: [..._customSnippets, ...TerminalSnippetItem.builtIn],
+            onSendRaw: _sendRawTerminalInput,
+            onRunSnippet: _runTerminalSnippet,
+            onOpenThemePicker: _showTerminalThemeSheet,
+            onOpenSnippetsStudio: _showSnippetsStudioSheet,
+            onTerminalResize: (cols, rows) {
+              try {
+                _sshPtySession?.resizeTerminal(cols, rows);
+              } catch (_) {}
+            },
           );
         }
 
         return Column(
           children: [
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
               decoration: const BoxDecoration(
                 color: JalaPalette.bar,
                 border: Border(bottom: BorderSide(color: JalaPalette.line)),
@@ -4385,7 +5508,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               child: Row(
                 children: [
                   Icon(
-                    Icons.terminal_rounded,
+                    _sshSubMode == 'sftp' && !canSplitSshSftp
+                        ? Icons.folder_special_rounded
+                        : Icons.terminal_rounded,
                     size: 16,
                     color: _sshLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
                   ),
@@ -4393,7 +5518,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   Expanded(
                     child: Text(
                       hostDesc,
-                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w700,
+                        color: JalaPalette.text,
+                      ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -4411,16 +5541,49 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           ),
                           onPressed: () => _connectToHost(_activeSshHost!),
-                          child: const Text('Connect SSH', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700)),
+                          child: Text(
+                            constraints.maxWidth >= 420 ? 'Connect SSH' : 'Connect',
+                            style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700),
+                          ),
                         ),
                       ),
                     ),
+                  if (isTerminalVisible && constraints.maxWidth >= 430) ...[
+                    InkWell(
+                      borderRadius: BorderRadius.circular(6),
+                      onTap: _showTerminalThemeSheet,
+                      child: const Tooltip(
+                        message: 'Terminal Themes',
+                        child: Padding(
+                          padding: EdgeInsets.all(5),
+                          child: Icon(Icons.palette_outlined, size: 16, color: JalaPalette.text2),
+                        ),
+                      ),
+                    ),
+                    InkWell(
+                      borderRadius: BorderRadius.circular(6),
+                      onTap: _showSnippetsStudioSheet,
+                      child: const Tooltip(
+                        message: 'Snippets Studio',
+                        child: Padding(
+                          padding: EdgeInsets.all(5),
+                          child: Icon(Icons.bolt_rounded, size: 16, color: JalaPalette.brandGold),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 2),
+                  ],
                   TextButton.icon(
                     style: TextButton.styleFrom(
                       foregroundColor: JalaPalette.brandGold,
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                      backgroundColor: JalaPalette.surface,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       minimumSize: Size.zero,
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(7),
+                        side: const BorderSide(color: JalaPalette.lineInput),
+                      ),
                     ),
                     onPressed: () {
                       setState(() {
@@ -4438,13 +5601,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                       _sshSubMode == 'sftp'
                           ? Icons.terminal_rounded
                           : (canSplitSshSftp ? Icons.vertical_split_rounded : Icons.folder_shared_outlined),
-                      size: 14,
+                      size: 13.5,
                     ),
                     label: Text(
                       canSplitSshSftp
                           ? (_sshSubMode == 'split' ? 'Single Terminal' : 'Split SSH+SFTP')
                           : (_sshSubMode == 'sftp' ? 'Terminal' : 'SFTP Check'),
-                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
                     ),
                   ),
                   const SizedBox(width: 4),
@@ -4480,99 +5643,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                     )
                   : (_sshSubMode == 'sftp' ? _buildSftpMobileBrowser() : buildTerminalPane()),
             ),
-            // Quick-Key Strip
-            Container(
-              decoration: const BoxDecoration(
-                color: JalaPalette.header,
-                border: Border(top: BorderSide(color: JalaPalette.line)),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    if (_sshLiveConnected && _sshPtySession != null)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: ActionChip(
-                          backgroundColor: JalaPalette.selected,
-                          side: const BorderSide(color: JalaPalette.danger),
-                          label: const Text(
-                            'Ctrl+C',
-                            style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: JalaPalette.danger),
-                          ),
-                          onPressed: () {
-                            _sshPtySession?.write(Uint8List.fromList([0x03]));
-                          },
-                        ),
-                      ),
-                    for (final quick in [
-                      'uptime',
-                      'docker ps',
-                      'kubectl get pods',
-                      'uname -a',
-                      'df -h',
-                      'clear',
-                    ])
-                      Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: ActionChip(
-                          backgroundColor: JalaPalette.surface,
-                          side: const BorderSide(color: JalaPalette.lineInput),
-                          label: Text(
-                            quick,
-                            style: const TextStyle(
-                              fontSize: 11,
-                              fontFamily: 'monospace',
-                              color: JalaPalette.brandGold,
-                            ),
-                          ),
-                          onPressed: () {
-                            if (!canSplitSshSftp) {
-                              setState(() => _sshSubMode = 'terminal');
-                            }
-                            _runSshCommand(quick);
-                          },
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _sshInputCtrl,
-                      onSubmitted: _runSshCommand,
-                      style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5, color: JalaPalette.text),
-                      decoration: InputDecoration(
-                        hintText: _sshLiveConnected ? 'Execute remote SSH command...' : 'Enter SSH command...',
-                        hintStyle: const TextStyle(color: JalaPalette.muted, fontSize: 12),
-                        isDense: true,
-                        filled: true,
-                        fillColor: JalaPalette.aside,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: JalaPalette.lineInput),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: JalaPalette.accent,
-                      foregroundColor: Colors.white,
-                    ),
-                    onPressed: () => _runSshCommand(_sshInputCtrl.text),
-                    child: const Text('Run'),
-                  ),
-                ],
-              ),
-            ),
           ],
         );
       },
@@ -4580,135 +5650,23 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   }
 
   Widget _buildSftpMobileBrowser() {
-    final entries = _sshLiveConnected && _sftpEntries.isNotEmpty
-        ? _sftpEntries
-        : const [
-            RemoteSftpEntry(
-              name: '/etc/nginx/conf.d',
-              fullPath: '/etc/nginx/conf.d',
-              permissions: 'drwxr-xr-x',
-              sizeLabel: '4.0 KB',
-              isDirectory: true,
-            ),
-            RemoteSftpEntry(
-              name: '/home/ribato/.ssh',
-              fullPath: '/home/ribato/.ssh',
-              permissions: 'drwxr-x---',
-              sizeLabel: '4.0 KB',
-              isDirectory: true,
-            ),
-            RemoteSftpEntry(
-              name: 'docker-compose.prod.yml',
-              fullPath: 'docker-compose.prod.yml',
-              permissions: '-rw-r-----',
-              sizeLabel: '6.8 KB',
-              isDirectory: false,
-            ),
-            RemoteSftpEntry(
-              name: '.env.production.sealed',
-              fullPath: '.env.production.sealed',
-              permissions: '-rw-------',
-              sizeLabel: '2.1 KB',
-              isDirectory: false,
-            ),
-            RemoteSftpEntry(
-              name: 'jaladesk-audit-2026.jsonl',
-              fullPath: 'jaladesk-audit-2026.jsonl',
-              permissions: '-rw-r--r--',
-              sizeLabel: '1.4 MB',
-              isDirectory: false,
-            ),
-          ];
+    final activeEntries = (_sshLiveConnected ? _sftpEntries : _offlineSftpEntries)
+        .map((e) => e.toExplorerEntry())
+        .toList();
 
-    return Column(
-      children: [
-        if (_sshLiveConnected)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            color: JalaPalette.aside,
-            child: Row(
-              children: [
-                const Icon(Icons.folder_open_rounded, size: 15, color: JalaPalette.brandGold),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Remote Path: $_sftpCurrentPath',
-                    style: const TextStyle(fontSize: 11.5, fontFamily: 'monospace', color: JalaPalette.text),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                TextButton(
-                  onPressed: () {
-                    final parent = _sftpCurrentPath.contains('/')
-                        ? _sftpCurrentPath.substring(0, _sftpCurrentPath.lastIndexOf('/'))
-                        : '..';
-                    _browseRemoteSftpPath(parent.isEmpty ? '/' : parent);
-                  },
-                  child: const Text('Up (..)', style: TextStyle(fontSize: 11, color: JalaPalette.brandGold)),
-                ),
-              ],
-            ),
-          ),
-        Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.all(12),
-            itemCount: entries.length,
-            itemBuilder: (ctx, i) {
-              final item = entries[i];
-              return Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                decoration: BoxDecoration(
-                  color: JalaPalette.surface,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: JalaPalette.line),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      item.isDirectory ? Icons.folder_rounded : Icons.insert_drive_file_outlined,
-                      color: item.isDirectory ? JalaPalette.brandGold : JalaPalette.accentLine,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            item.name,
-                            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: JalaPalette.text),
-                          ),
-                          Text(
-                            '${item.permissions} • ${item.sizeLabel}',
-                            style: const TextStyle(fontSize: 11, fontFamily: 'monospace', color: JalaPalette.muted),
-                          ),
-                        ],
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () {
-                        if (_sshLiveConnected && item.isDirectory) {
-                          _browseRemoteSftpPath(item.fullPath);
-                        } else if (_sshLiveConnected && !item.isDirectory) {
-                          _viewRemoteSftpFile(item);
-                        } else {
-                          setState(() => _sshSubMode = 'terminal');
-                          _runSshCommand('ls -la ${item.fullPath}');
-                        }
-                      },
-                      child: Text(
-                        _sshLiveConnected ? (item.isDirectory ? 'Open' : 'View') : 'Inspect',
-                        style: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-      ],
+    return SftpExplorerView(
+      currentPath: _sftpCurrentPath,
+      isLiveSftp: _sshLiveConnected,
+      isLoading: _sshBusy,
+      entries: activeEntries,
+      onNavigatePath: _browseRemoteSftpPath,
+      onNavigateUp: _navigateSftpUp,
+      onRefresh: () => _browseRemoteSftpPath(_sftpCurrentPath),
+      onCreateFolder: _createSftpFolder,
+      onReadTextFile: _readSftpTextFile,
+      onWriteTextFile: _writeSftpTextFile,
+      onRenameEntry: _renameSftpEntry,
+      onDeleteEntry: _deleteSftpEntry,
     );
   }
 
