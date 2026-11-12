@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' show max, min;
 import 'dart:ui' as ui;
 
 import 'package:crypto/crypto.dart';
@@ -520,10 +521,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   String _desktopProtocolBanner = 'No active remote desktop session';
   int _desktopServerWidth = 1280;
   int _desktopServerHeight = 800;
+  static const String _kDesktopImeSentinel = '\u200B\u200B';
   bool _trackpadMode = true;
   bool _viewOnly = false;
   bool _showDesktopKeyboardBar = false;
   final TextEditingController _desktopKeyInputCtrl = TextEditingController();
+  late final TextEditingController _desktopImeCtrl;
+  final FocusNode _desktopImeFocusNode = FocusNode(debugLabel: 'DesktopLiveRemoteKeyboard');
+  bool _suppressDesktopImeCallback = false;
+  bool _desktopImeFocused = false;
   bool _ctrlLocked = false;
   bool _altLocked = false;
   bool _winLocked = false;
@@ -639,6 +645,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _desktopImeCtrl = TextEditingController(text: _kDesktopImeSentinel);
+    _desktopImeCtrl.selection = const TextSelection.collapsed(offset: _kDesktopImeSentinel.length);
+    _desktopImeFocusNode.addListener(() {
+      if (mounted && _desktopImeFocused != _desktopImeFocusNode.hasFocus) {
+        setState(() => _desktopImeFocused = _desktopImeFocusNode.hasFocus);
+      }
+    });
     _terminalBuffer.write(
       '\x1b[1;33mJalaDesk Interactive SSHv2 PTY\x1b[0m (xterm-256color)\r\n'
       'Tap anywhere on the terminal to type directly, or connect to a live SSH server.\r\n'
@@ -736,7 +749,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     }
   }
 
-  /// Sends a live MS-RDPEDISP / fast-reconnect resolution update to the active RDP session
+  /// Sends a live MS-RDPEDISP / VNC ExtendedDesktopSize resolution update to the active session
   void _applyTargetResolutionToActiveSession({Size? viewportOverride}) {
     final (targetW, targetH) = _resolveTargetDesktopDimensions(viewportOverride: viewportOverride);
     if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
@@ -748,6 +761,22 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       setState(() {
         _lastRdpAction = 'Jump Display Sizing → ${targetW}x$targetH (${_resolutionPreset.shortLabel})';
       });
+    } else if (_vncRfbClient != null && _vncRfbClient!.isConnected) {
+      if (_vncRfbClient!.supportsExtendedDesktopSize) {
+        _vncRfbClient!.requestResolution(targetW, targetH);
+        setState(() {
+          _lastRdpAction = 'VNC Dynamic Display Sizing → ${targetW}x$targetH (${_resolutionPreset.shortLabel})';
+        });
+      } else {
+        // Fixed hardware VNC monitor: preserve true server geometry so aspect ratio & pointer mapping stay 1:1
+        setState(() {
+          _desktopServerWidth = _vncRfbClient!.width;
+          _desktopServerHeight = _vncRfbClient!.height;
+          _canvasTransformCtrl.value = Matrix4.identity();
+          _lastRdpAction =
+              'VNC Fixed Display (${_vncRfbClient!.width}x${_vncRfbClient!.height}) • ${_canvasFitMode.label}';
+        });
+      }
     } else {
       setState(() {
         _desktopServerWidth = targetW;
@@ -761,32 +790,51 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   void _onViewportDimensionsMeasured(Size newSize) {
     final dw = (newSize.width - _lastMeasuredCanvasSize.width).abs();
     final dh = (newSize.height - _lastMeasuredCanvasSize.height).abs();
-    if (dw < 12 && dh < 12) return;
+    if (dw < 16 && dh < 16) return;
     _lastMeasuredCanvasSize = newSize;
 
-    if (_rdpFfiClient != null &&
-        _rdpFfiClient!.isConnected &&
+    final canResizeRdp = _rdpFfiClient != null && _rdpFfiClient!.isConnected;
+    final canResizeVnc = _vncRfbClient != null &&
+        _vncRfbClient!.isConnected &&
+        _vncRfbClient!.supportsExtendedDesktopSize;
+    if ((canResizeRdp || canResizeVnc) &&
         (_resolutionPreset == JumpResolutionPreset.matchDisplay ||
             _resolutionPreset == JumpResolutionPreset.matchHiDpi)) {
       _autoResizeDebounce?.cancel();
-      _autoResizeDebounce = Timer(const Duration(milliseconds: 160), () {
+      _autoResizeDebounce = Timer(const Duration(milliseconds: 180), () {
         if (!mounted) return;
         _applyTargetResolutionToActiveSession(viewportOverride: newSize);
       });
     }
   }
 
-  /// Computes the exact destination `Rect` of the remote desktop frame inside the viewport
+  /// Computes the exact destination `Rect` of the remote desktop frame inside the viewport.
+  /// - `aspectFit` (`Fit`): Fits entire desktop inside viewport at 1:1 aspect ratio.
+  /// - `cropCover` (`Fill` / Jump Pan): Fills 100% of screen at true 1:1 aspect ratio (zero distortion!)
+  ///   and smoothly pans across the full width/height as you move the cursor or drag with 2 fingers.
+  /// - `stretchFill` (`Stretch`): Stretches edge-to-edge.
   Rect _computeRenderedDesktopRect(Size viewportSize) {
     final srvW = _desktopServerWidth.clamp(64, 8192).toDouble();
     final srvH = _desktopServerHeight.clamp(64, 8192).toDouble();
     if (_canvasFitMode == JumpCanvasFitMode.stretchFill) {
       return Rect.fromLTWH(0, 0, viewportSize.width, viewportSize.height);
     }
-    final boxFit = _canvasFitMode == JumpCanvasFitMode.cropCover ? BoxFit.cover : BoxFit.contain;
-    final fitted = applyBoxFit(boxFit, Size(srvW, srvH), viewportSize);
-    final dstW = fitted.destination.width.clamp(1.0, viewportSize.width);
-    final dstH = fitted.destination.height.clamp(1.0, viewportSize.height);
+    if (_canvasFitMode == JumpCanvasFitMode.cropCover) {
+      final coverScale = max(viewportSize.width / srvW, viewportSize.height / srvH);
+      final dstW = (srvW * coverScale).clamp(1.0, 16384.0);
+      final dstH = (srvH * coverScale).clamp(1.0, 16384.0);
+      final dx = (viewportSize.width - dstW) / 2.0;
+      final dy = (viewportSize.height - dstH) / 2.0;
+      return Rect.fromLTWH(dx, dy, dstW, dstH);
+    }
+    if (_canvasFitMode == JumpCanvasFitMode.pixel1to1) {
+      final dx = (viewportSize.width - srvW) / 2.0;
+      final dy = (viewportSize.height - srvH) / 2.0;
+      return Rect.fromLTWH(dx, dy, srvW, srvH);
+    }
+    final fitScale = min(viewportSize.width / srvW, viewportSize.height / srvH);
+    final dstW = (srvW * fitScale).clamp(1.0, viewportSize.width);
+    final dstH = (srvH * fitScale).clamp(1.0, viewportSize.height);
     final dx = (viewportSize.width - dstW) / 2.0;
     final dy = (viewportSize.height - dstH) / 2.0;
     return Rect.fromLTWH(dx, dy, dstW, dstH);
@@ -1060,6 +1108,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     _canvasTransformCtrl.dispose();
     _terminalBuffer.dispose();
     _desktopKeyInputCtrl.dispose();
+    _desktopImeCtrl.dispose();
+    _desktopImeFocusNode.dispose();
     _closeDesktopSession();
     _closeSshClient();
     for (final pf in _activePortForwards.toList()) {
@@ -2834,11 +2884,27 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             _closeDesktopSession();
             _canvasTransformCtrl.value = Matrix4.identity();
           });
+          final wantAutoMatchVnc = _resolutionPreset == JumpResolutionPreset.matchDisplay ||
+              _resolutionPreset == JumpResolutionPreset.matchHiDpi;
+          final (vncInitW, vncInitH) = _resolveTargetDesktopDimensions();
           final vncClient = VncRfbClient(
             host: effectiveTargetHost,
             port: effectiveTargetPort,
             username: vncUser,
             password: host.password,
+            initialTargetWidth: wantAutoMatchVnc ? vncInitW : null,
+            initialTargetHeight: wantAutoMatchVnc ? vncInitH : null,
+            onDesktopGeometryChanged: (int w, int h, bool dynamicResizeOk) {
+              if (!mounted) return;
+              setState(() {
+                _desktopServerWidth = w;
+                _desktopServerHeight = h;
+                if (dynamicResizeOk && _canvasFitMode == JumpCanvasFitMode.cropCover) {
+                  _canvasFitMode = JumpCanvasFitMode.aspectFit;
+                  _canvasTransformCtrl.value = Matrix4.identity();
+                }
+              });
+            },
             onFrame: (ui.Image img, int w, int h, String status) {
               if (!mounted) return;
               setState(() {
@@ -2884,6 +2950,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             _desktopLiveConnected = true;
             _desktopServerWidth = vncClient.width;
             _desktopServerHeight = vncClient.height;
+            // Jump Desktop Smart Adaptation: if a widescreen fixed-monitor VNC server (>= 800px) connects
+            // on a portrait phone without ExtendedDesktopSize, enable Smart Fill & Cursor-Follow Pan!
+            final winSize = MediaQuery.sizeOf(context);
+            final isPortraitPhone = winSize.height > winSize.width * 1.12 && winSize.width < 600;
+            if (!vncClient.supportsExtendedDesktopSize &&
+                isPortraitPhone &&
+                vncClient.width >= 800 &&
+                vncClient.width > vncClient.height * 1.18) {
+              _canvasFitMode = JumpCanvasFitMode.cropCover;
+            }
             _desktopProtocolBanner =
                 '${vncClient.negotiatedAuthLabel} • ${vncClient.desktopName} (${vncClient.width}x${vncClient.height})${activeRouteLabel.isNotEmpty ? " • $activeRouteLabel" : ""}';
             _lastRdpAction =
@@ -5148,46 +5224,218 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     }
   }
 
-  /// Dispatches special keys or typed text to the active FreeRDP or VNC engine
-  void _dispatchDesktopKey(String keyLabel) {
+  /// Dispatches special keys or live typed characters directly to the active FreeRDP or VNC engine.
+  /// Automatically clears one-shot sticky modifiers (`Ctrl`, `Alt`, `Win`, `Shift`) after use.
+  void _dispatchDesktopKey(String keyLabel, {bool autoClearStickyModifiers = true}) {
+    if (_viewOnly) return;
+    final ctrl = _ctrlLocked;
+    final alt = _altLocked;
+    final win = _winLocked;
+    final shift = _shiftLocked;
+
     if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
       _rdpFfiClient!.sendSpecialKey(
         keyLabel,
-        ctrl: _ctrlLocked,
-        alt: _altLocked,
-        win: _winLocked,
-        shift: _shiftLocked,
+        ctrl: ctrl,
+        alt: alt,
+        win: win,
+        shift: shift,
       );
     } else if (_vncRfbClient != null && _vncRfbClient!.isConnected) {
-      switch (keyLabel) {
-        case 'Esc':
-          _vncRfbClient!.sendKeySym(0xFF1B);
-          break;
-        case 'Tab':
-          _vncRfbClient!.sendKeySym(0xFF09);
-          break;
-        case 'Enter':
-          _vncRfbClient!.sendKeySym(0xFF0D);
-          break;
-        case 'Bksp':
-          _vncRfbClient!.sendKeySym(0xFF08);
-          break;
-        case '←':
-          _vncRfbClient!.sendKeySym(0xFF51);
-          break;
-        case '↑':
-          _vncRfbClient!.sendKeySym(0xFF52);
-          break;
-        case '→':
-          _vncRfbClient!.sendKeySym(0xFF53);
-          break;
-        case '↓':
-          _vncRfbClient!.sendKeySym(0xFF54);
-          break;
-        default:
-          _vncRfbClient!.sendText(keyLabel);
+      _vncRfbClient!.sendSpecialKey(
+        keyLabel,
+        ctrl: ctrl,
+        alt: alt,
+        win: win,
+        shift: shift,
+      );
+    }
+
+    if (autoClearStickyModifiers && (ctrl || alt || win || shift)) {
+      setState(() {
+        _ctrlLocked = false;
+        _altLocked = false;
+        _winLocked = false;
+        _shiftLocked = false;
+      });
+    }
+  }
+
+  void _resetDesktopImeSentinel() {
+    _suppressDesktopImeCallback = true;
+    _desktopImeCtrl.value = const TextEditingValue(
+      text: _kDesktopImeSentinel,
+      selection: TextSelection.collapsed(offset: _kDesktopImeSentinel.length),
+    );
+    _suppressDesktopImeCallback = false;
+  }
+
+  /// Opens or hides the native Android/iOS soft keyboard for 0ms direct live remote typing.
+  void _toggleDesktopLiveKeyboard([bool? forceOpen]) {
+    if (_viewOnly) return;
+    final shouldOpen = forceOpen ?? !_desktopImeFocusNode.hasFocus;
+    if (shouldOpen) {
+      _resetDesktopImeSentinel();
+      _desktopImeFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+      setState(() => _desktopImeFocused = true);
+    } else {
+      _desktopImeFocusNode.unfocus();
+      SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+      setState(() => _desktopImeFocused = false);
+    }
+    if (_isFullScreen && _fullScreenChromeVisible && !_pinFullScreenChrome) {
+      _scheduleFullScreenAutoHide();
+    }
+  }
+
+  void _handleDesktopImeChanged(String val) {
+    if (_suppressDesktopImeCallback || val == _kDesktopImeSentinel || _viewOnly) return;
+    if (_isFullScreen && _fullScreenChromeVisible && !_pinFullScreenChrome) {
+      _scheduleFullScreenAutoHide();
+    }
+
+    if (_kDesktopImeSentinel.startsWith(val)) {
+      final deletedCount = _kDesktopImeSentinel.length - val.length;
+      for (int i = 0; i < deletedCount; i++) {
+        _dispatchDesktopKey('Bksp');
+      }
+      setState(() => _lastRdpAction = 'Live Key: [Bksp]');
+    } else if (val.startsWith(_kDesktopImeSentinel)) {
+      final inserted = val.substring(_kDesktopImeSentinel.length);
+      for (final rune in inserted.runes) {
+        final ch = String.fromCharCode(rune);
+        if (ch == '\n' || ch == '\r') {
+          _dispatchDesktopKey('Enter');
+        } else {
+          _dispatchDesktopKey(ch);
+        }
+      }
+      setState(() => _lastRdpAction = 'Live Key: typed ${inserted.runes.length} char(s)');
+    } else {
+      final cleaned = val.replaceAll('\u200B', '');
+      if (cleaned.isEmpty) {
+        _dispatchDesktopKey('Bksp');
+      } else {
+        for (final rune in cleaned.runes) {
+          final ch = String.fromCharCode(rune);
+          if (ch == '\n' || ch == '\r') {
+            _dispatchDesktopKey('Enter');
+          } else {
+            _dispatchDesktopKey(ch);
+          }
+        }
       }
     }
+    _resetDesktopImeSentinel();
+  }
+
+  KeyEventResult _handleDesktopHardwareKey(FocusNode node, KeyEvent event) {
+    if (_viewOnly || (event is! KeyDownEvent && event is! KeyRepeatEvent)) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    final hwCtrl = HardwareKeyboard.instance.isControlPressed || _ctrlLocked;
+    final hwAlt = HardwareKeyboard.instance.isAltPressed || _altLocked;
+    final hwWin = HardwareKeyboard.instance.isMetaPressed || _winLocked;
+    final hwShift = HardwareKeyboard.instance.isShiftPressed || _shiftLocked;
+
+    String? special;
+    if (key == LogicalKeyboardKey.escape) {
+      special = 'Esc';
+    } else if (key == LogicalKeyboardKey.tab) {
+      special = 'Tab';
+    } else if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter) {
+      special = 'Enter';
+    } else if (key == LogicalKeyboardKey.backspace) {
+      special = 'Bksp';
+    } else if (key == LogicalKeyboardKey.delete) {
+      special = 'Del';
+    } else if (key == LogicalKeyboardKey.insert) {
+      special = 'Ins';
+    } else if (key == LogicalKeyboardKey.home) {
+      special = 'Home';
+    } else if (key == LogicalKeyboardKey.end) {
+      special = 'End';
+    } else if (key == LogicalKeyboardKey.pageUp) {
+      special = 'PgUp';
+    } else if (key == LogicalKeyboardKey.pageDown) {
+      special = 'PgDn';
+    } else if (key == LogicalKeyboardKey.arrowLeft) {
+      special = '←';
+    } else if (key == LogicalKeyboardKey.arrowUp) {
+      special = '↑';
+    } else if (key == LogicalKeyboardKey.arrowRight) {
+      special = '→';
+    } else if (key == LogicalKeyboardKey.arrowDown) {
+      special = '↓';
+    } else if (key == LogicalKeyboardKey.f1) {
+      special = 'F1';
+    } else if (key == LogicalKeyboardKey.f2) {
+      special = 'F2';
+    } else if (key == LogicalKeyboardKey.f3) {
+      special = 'F3';
+    } else if (key == LogicalKeyboardKey.f4) {
+      special = 'F4';
+    } else if (key == LogicalKeyboardKey.f5) {
+      special = 'F5';
+    } else if (key == LogicalKeyboardKey.f6) {
+      special = 'F6';
+    } else if (key == LogicalKeyboardKey.f7) {
+      special = 'F7';
+    } else if (key == LogicalKeyboardKey.f8) {
+      special = 'F8';
+    } else if (key == LogicalKeyboardKey.f9) {
+      special = 'F9';
+    } else if (key == LogicalKeyboardKey.f10) {
+      special = 'F10';
+    } else if (key == LogicalKeyboardKey.f11) {
+      special = 'F11';
+    } else if (key == LogicalKeyboardKey.f12) {
+      special = 'F12';
+    } else if ((hwCtrl || hwAlt || hwWin) && key.keyLabel.length == 1) {
+      special = key.keyLabel;
+    }
+
+    if (special != null) {
+      if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
+        _rdpFfiClient!.sendSpecialKey(special, ctrl: hwCtrl, alt: hwAlt, win: hwWin, shift: hwShift);
+      } else if (_vncRfbClient != null && _vncRfbClient!.isConnected) {
+        _vncRfbClient!.sendSpecialKey(special, ctrl: hwCtrl, alt: hwAlt, win: hwWin, shift: hwShift);
+      }
+      if (_ctrlLocked || _altLocked || _winLocked || _shiftLocked) {
+        setState(() {
+          _ctrlLocked = false;
+          _altLocked = false;
+          _winLocked = false;
+          _shiftLocked = false;
+        });
+      }
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  Future<void> _pasteClipboardToRemoteDesktop() async {
+    if (_viewOnly) return;
+    final clip = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = clip?.text ?? '';
+    if (text.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Clipboard is empty.')),
+      );
+      return;
+    }
+    if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
+      _rdpFfiClient!.sendUnicodeText(text);
+    } else if (_vncRfbClient != null && _vncRfbClient!.isConnected) {
+      _vncRfbClient!.sendText(text);
+    }
+    if (!mounted) return;
+    setState(() {
+      _lastRdpAction = 'Pasted ${text.length} character(s) to remote desktop';
+    });
   }
 
   void _showQrPairDialog() {
@@ -5450,12 +5698,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         // True 100% edge-to-edge Immersive Full Screen Mode for RDP/VNC and SSH/SFTP
         if (activeFullScreen) {
           return Scaffold(
+            resizeToAvoidBottomInset: _tabIndex != 1,
             backgroundColor: JalaPalette.splashBg,
             body: activeTabBody,
           );
         }
 
         return Scaffold(
+          resizeToAvoidBottomInset: _tabIndex != 1,
           appBar: PreferredSize(
             preferredSize: const Size.fromHeight(56),
             child: Container(
@@ -7237,6 +7487,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         ? '${_activeRdpHost!.name} (${_activeRdpHost!.address}:${_activeRdpHost!.port})'
         : 'No Remote Desktop Selected';
     final isVncHost = _activeRdpHost?.protocol == RemoteProtocol.vnc;
+    final double keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final bool overlayBottomShortcuts = isFullScreen || keyboardInset > 0;
     final showBottomShortcuts = !isFullScreen || (_showFullScreenModifierBar && _fullScreenChromeVisible);
     final showTopKeyboardBar = _showDesktopKeyboardBar && (!isFullScreen || _fullScreenChromeVisible);
 
@@ -7278,7 +7530,42 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         child: _buildDesktopSecondaryControlsStrip(),
                       ),
                     ],
-                    const SizedBox(width: 5),
+                    const SizedBox(width: 4),
+                    // Direct Live Remote Keyboard Toggle (pinned so always visible on phones without scrolling!)
+                    InkWell(
+                      key: const ValueKey('btn_toggle_desktop_keyboard'),
+                      borderRadius: BorderRadius.circular(7),
+                      onTap: () => _toggleDesktopLiveKeyboard(),
+                      onLongPress: () => setState(() => _showDesktopKeyboardBar = !_showDesktopKeyboardBar),
+                      child: Container(
+                        height: 26,
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: _desktopImeFocused ? JalaPalette.selected : JalaPalette.header,
+                          borderRadius: BorderRadius.circular(7),
+                          border: Border.all(
+                            color: _desktopImeFocused ? JalaPalette.brandGold : JalaPalette.lineInput,
+                          ),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.keyboard_alt_outlined, size: 14, color: JalaPalette.brandGold),
+                            SizedBox(width: 3),
+                            Text(
+                              'KB',
+                              style: TextStyle(
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w800,
+                                color: JalaPalette.brandGold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
                     // Immersive Edge-to-Edge Full Screen Toggle (always visible without scrolling)
                     InkWell(
                       key: const ValueKey('btn_toggle_fullscreen'),
@@ -7411,7 +7698,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         Expanded(
           child: LayoutBuilder(
             builder: (ctx, constraints) {
-              final margin = isFullScreen ? 0.0 : (isWideScreen ? 6.0 : 8.0);
+              final margin = (isFullScreen || _remoteDesktopFrame != null) ? 0.0 : (isWideScreen ? 6.0 : 8.0);
               final canvasW = (constraints.maxWidth - margin * 2).clamp(160.0, 4096.0);
               final canvasH = (constraints.maxHeight - margin * 2).clamp(120.0, 4096.0);
               final viewportSize = Size(canvasW, canvasH);
@@ -7430,6 +7717,41 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
               return Stack(
                 fit: StackFit.expand,
                 children: [
+                  // Hidden 0px-opacity Direct Live IME Bridge + Hardware Keyboard Listener (Jump / Termius style)
+                  Positioned(
+                    left: 2,
+                    top: 2,
+                    width: 12,
+                    height: 12,
+                    child: IgnorePointer(
+                      child: Opacity(
+                        opacity: 0.0,
+                        child: Focus(
+                          onKeyEvent: _handleDesktopHardwareKey,
+                          child: TextField(
+                            key: const ValueKey('desktop_hidden_ime_input'),
+                            controller: _desktopImeCtrl,
+                            focusNode: _desktopImeFocusNode,
+                            readOnly: _viewOnly,
+                            autocorrect: false,
+                            enableSuggestions: false,
+                            enableIMEPersonalizedLearning: false,
+                            keyboardType: TextInputType.visiblePassword,
+                            textInputAction: TextInputAction.newline,
+                            textCapitalization: TextCapitalization.none,
+                            onChanged: _handleDesktopImeChanged,
+                            onSubmitted: (_) {
+                              if (!_viewOnly) {
+                                _dispatchDesktopKey('Enter');
+                              }
+                              _resetDesktopImeSentinel();
+                              if (mounted) _desktopImeFocusNode.requestFocus();
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                   DesktopGestureSurface(
                     key: const ValueKey('desktop_gesture_surface'),
                     transformationController: _canvasTransformCtrl,
@@ -7439,6 +7761,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     isTrackpadMode: _trackpadMode,
                     viewOnly: _viewOnly,
                     cursorNorm: _cursorNorm,
+                    bottomObstructionPx: keyboardInset > 0
+                        ? (keyboardInset + (showBottomShortcuts ? 48.0 : 0.0))
+                        : 0.0,
+                    onThreeFingerTap: () => _toggleDesktopLiveKeyboard(),
                     onUserCanvasInteraction: isFullScreen && _fullScreenChromeVisible && !_pinFullScreenChrome
                         ? _scheduleFullScreenAutoHide
                         : null,
@@ -7504,8 +7830,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                 end: Alignment.bottomRight,
                               )
                             : null,
-                        borderRadius: BorderRadius.circular(isFullScreen ? 0 : 12),
-                        border: isFullScreen
+                        borderRadius: BorderRadius.circular((isFullScreen || _remoteDesktopFrame != null) ? 0 : 12),
+                        border: (isFullScreen || _remoteDesktopFrame != null)
                             ? null
                             : Border.all(
                                 color: _desktopLiveConnected
@@ -7513,9 +7839,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                     : JalaPalette.accentLine.withValues(alpha: 0.55),
                               ),
                       ),
-                      clipBehavior: Clip.antiAlias,
+                      clipBehavior: _remoteDesktopFrame != null ? Clip.none : Clip.antiAlias,
                       child: Stack(
                         fit: StackFit.expand,
+                        clipBehavior: Clip.none,
                         children: [
                           // REAL LIVE REMOTE DESKTOP PIXEL FRAMEBUFFER (FreeRDP 3.x / VNC RFB 3.8)
                           // Positioned at the exact Jump aspect-fitted rectangle so Direct Touch & Trackpad coordinates
@@ -7523,10 +7850,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                           if (_remoteDesktopFrame != null)
                             Positioned.fromRect(
                               rect: desktopRect,
-                              child: RawImage(
-                                image: _remoteDesktopFrame,
-                                fit: BoxFit.fill,
-                                filterQuality: FilterQuality.low,
+                              child: RepaintBoundary(
+                                child: RawImage(
+                                  image: _remoteDesktopFrame,
+                                  fit: BoxFit.fill,
+                                  filterQuality: FilterQuality.low,
+                                ),
                               ),
                             ),
                           // Top overlay HUD (only shown when no pixel frame has arrived yet)
@@ -7629,8 +7958,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                           // Precision Virtual Pointer (always shown in Trackpad mode; subtle indicator when offline)
                           if (_trackpadMode || _remoteDesktopFrame == null)
                             Positioned(
-                              left: pointerPx.dx.clamp(2.0, (canvasW - 44.0).clamp(2.0, 4096.0)),
-                              top: pointerPx.dy.clamp(2.0, (canvasH - 36.0).clamp(2.0, 4096.0)),
+                              left: pointerPx.dx.clamp(
+                                desktopRect.left,
+                                max(desktopRect.left, desktopRect.right - 18.0),
+                              ),
+                              top: pointerPx.dy.clamp(
+                                desktopRect.top,
+                                max(desktopRect.top, desktopRect.bottom - 18.0),
+                              ),
                               child: IgnorePointer(
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -7658,8 +7993,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                 ),
                               ),
                             ),
-                          // Bottom status bar (hidden in Full Screen mode for unobstructed view)
-                          if (!isFullScreen)
+                          // Bottom status bar (only shown when no live remote desktop frame is active)
+                          if (!isFullScreen && _remoteDesktopFrame == null)
                             Positioned(
                               left: 0,
                               right: 0,
@@ -7822,14 +8157,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                         ),
                                         const SizedBox(width: 6),
                                         InkWell(
+                                          key: const ValueKey('btn_fullscreen_keyboard'),
                                           onTap: () {
-                                            setState(() => _showDesktopKeyboardBar = !_showDesktopKeyboardBar);
+                                            _toggleDesktopLiveKeyboard();
                                             _scheduleFullScreenAutoHide();
                                           },
                                           child: Icon(
                                             Icons.keyboard_alt_outlined,
                                             size: 15,
-                                            color: _showDesktopKeyboardBar ? JalaPalette.brandGold : JalaPalette.text2,
+                                            color: _desktopImeFocused ? JalaPalette.brandGold : JalaPalette.text2,
                                           ),
                                         ),
                                         const SizedBox(width: 6),
@@ -7948,101 +8284,161 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         ),
                       ),
                     ),
+                  // Zero-Flicker Overlay Modifier & Shortcut Strip (in Full Screen or floating above live Soft Keyboard)
+                  if (overlayBottomShortcuts && showBottomShortcuts)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: keyboardInset,
+                      child: SafeArea(
+                        top: false,
+                        bottom: keyboardInset == 0,
+                        child: _buildDesktopBottomShortcutBar(isFullScreen: isFullScreen),
+                      ),
+                    ),
                 ],
               );
             },
           ),
         ),
-        // Extended On-Screen Modifier & Function Key Strip (auto-hides in Full Screen after 3.5s unless pinned)
-        if (showBottomShortcuts)
-          Container(
-            key: const ValueKey('desktop_bottom_shortcut_bar'),
-            decoration: const BoxDecoration(
-              color: JalaPalette.header,
-              border: Border(top: BorderSide(color: JalaPalette.line)),
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: ActionChip(
-                      backgroundColor: JalaPalette.selected,
-                      side: const BorderSide(color: JalaPalette.brandGold),
-                      label: const Text(
-                        'R-Click',
-                        style: TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
-                      ),
-                      onPressed: _viewOnly
-                          ? null
-                          : () {
-                              HapticFeedback.lightImpact();
-                              if (isFullScreen) _scheduleFullScreenAutoHide();
-                              _dispatchDesktopPointer(normX: _cursorNorm.dx, normY: _cursorNorm.dy, rightClick: true);
-                            },
+        // Docked Bottom Shortcut Bar in normal non-fullscreen mode when soft keyboard is closed
+        if (!overlayBottomShortcuts && showBottomShortcuts)
+          _buildDesktopBottomShortcutBar(isFullScreen: isFullScreen),
+      ],
+    );
+  }
+
+  Widget _buildDesktopBottomShortcutBar({required bool isFullScreen}) {
+    return Container(
+      key: const ValueKey('desktop_bottom_shortcut_bar'),
+      decoration: BoxDecoration(
+        color: JalaPalette.header.withValues(alpha: isFullScreen ? 0.94 : 1.0),
+        border: const Border(top: BorderSide(color: JalaPalette.line)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            if (_desktopImeFocused)
+              Padding(
+                padding: const EdgeInsets.only(right: 5),
+                child: ActionChip(
+                  key: const ValueKey('btn_hide_live_keyboard'),
+                  visualDensity: VisualDensity.compact,
+                  backgroundColor: JalaPalette.selected,
+                  side: const BorderSide(color: JalaPalette.brandGold),
+                  label: const Icon(Icons.keyboard_hide_rounded, size: 15, color: JalaPalette.brandGold),
+                  onPressed: () => _toggleDesktopLiveKeyboard(false),
+                ),
+              ),
+            _buildModifierChip('Ctrl', _ctrlLocked, (v) {
+              setState(() => _ctrlLocked = v);
+              if (isFullScreen) _scheduleFullScreenAutoHide();
+            }),
+            _buildModifierChip('Alt', _altLocked, (v) {
+              setState(() => _altLocked = v);
+              if (isFullScreen) _scheduleFullScreenAutoHide();
+            }),
+            _buildModifierChip('⌘/Win', _winLocked, (v) {
+              setState(() => _winLocked = v);
+              if (isFullScreen) _scheduleFullScreenAutoHide();
+            }),
+            _buildModifierChip('Shift', _shiftLocked, (v) {
+              setState(() => _shiftLocked = v);
+              if (isFullScreen) _scheduleFullScreenAutoHide();
+            }),
+            Padding(
+              padding: const EdgeInsets.only(right: 5),
+              child: ActionChip(
+                key: const ValueKey('btn_paste_clipboard_desktop'),
+                visualDensity: VisualDensity.compact,
+                backgroundColor: JalaPalette.surface,
+                side: const BorderSide(color: JalaPalette.accentLine),
+                label: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.content_paste_rounded, size: 12, color: JalaPalette.brandGold),
+                    SizedBox(width: 3),
+                    Text(
+                      'Paste',
+                      style: TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
                     ),
-                  ),
-                  _buildModifierChip('Ctrl', _ctrlLocked, (v) {
-                    setState(() => _ctrlLocked = v);
-                    if (isFullScreen) _scheduleFullScreenAutoHide();
-                  }),
-                  _buildModifierChip('Alt', _altLocked, (v) {
-                    setState(() => _altLocked = v);
-                    if (isFullScreen) _scheduleFullScreenAutoHide();
-                  }),
-                  _buildModifierChip('⌘/Win', _winLocked, (v) {
-                    setState(() => _winLocked = v);
-                    if (isFullScreen) _scheduleFullScreenAutoHide();
-                  }),
-                  _buildModifierChip('Shift', _shiftLocked, (v) {
-                    setState(() => _shiftLocked = v);
-                    if (isFullScreen) _scheduleFullScreenAutoHide();
-                  }),
-                  for (final keyLabel in [
-                    'Esc',
-                    'Tab',
-                    'Enter',
-                    'Bksp',
-                    'Ctrl+Alt+Del',
-                    'Win+D',
-                    '←',
-                    '↑',
-                    '↓',
-                    '→',
-                    'F1',
-                    'F5',
-                    'F11',
-                    'F12',
-                  ])
-                    Padding(
-                      padding: const EdgeInsets.only(right: 6),
-                      child: ActionChip(
-                        backgroundColor: JalaPalette.surface,
-                        side: const BorderSide(color: JalaPalette.lineInput),
-                        label: Text(
-                          keyLabel,
-                          style: const TextStyle(fontSize: 11.5, color: JalaPalette.text, fontWeight: FontWeight.w600),
-                        ),
-                        onPressed: _viewOnly
-                            ? null
-                            : () {
-                                HapticFeedback.lightImpact();
-                                if (isFullScreen) _scheduleFullScreenAutoHide();
-                                _dispatchDesktopKey(keyLabel);
-                                setState(() {
-                                  _lastRdpAction =
-                                      'Sent Key: [${_activeModifierSummary()}$keyLabel] to ${_activeRdpHost?.name ?? "session"}';
-                                });
-                              },
-                      ),
-                    ),
-                ],
+                  ],
+                ),
+                onPressed: _viewOnly
+                    ? null
+                    : () {
+                        if (isFullScreen) _scheduleFullScreenAutoHide();
+                        _pasteClipboardToRemoteDesktop();
+                      },
               ),
             ),
-          ),
-      ],
+            Padding(
+              padding: const EdgeInsets.only(right: 5),
+              child: ActionChip(
+                visualDensity: VisualDensity.compact,
+                backgroundColor: JalaPalette.selected,
+                side: const BorderSide(color: JalaPalette.brandGold),
+                label: const Text(
+                  'R-Click',
+                  style: TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
+                ),
+                onPressed: _viewOnly
+                    ? null
+                    : () {
+                        HapticFeedback.lightImpact();
+                        if (isFullScreen) _scheduleFullScreenAutoHide();
+                        _dispatchDesktopPointer(normX: _cursorNorm.dx, normY: _cursorNorm.dy, rightClick: true);
+                      },
+              ),
+            ),
+            for (final keyLabel in [
+              'Esc',
+              'Tab',
+              'Enter',
+              'Bksp',
+              'Del',
+              'Ctrl+Alt+Del',
+              'Win+D',
+              '←',
+              '↑',
+              '↓',
+              '→',
+              'Home',
+              'End',
+              'PgUp',
+              'PgDn',
+              'F1',
+              'F5',
+              'F11',
+              'F12',
+            ])
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ActionChip(
+                  backgroundColor: JalaPalette.surface,
+                  side: const BorderSide(color: JalaPalette.lineInput),
+                  label: Text(
+                    keyLabel,
+                    style: const TextStyle(fontSize: 11.5, color: JalaPalette.text, fontWeight: FontWeight.w600),
+                  ),
+                  onPressed: _viewOnly
+                      ? null
+                      : () {
+                          HapticFeedback.lightImpact();
+                          if (isFullScreen) _scheduleFullScreenAutoHide();
+                          _dispatchDesktopKey(keyLabel);
+                          setState(() {
+                            _lastRdpAction =
+                                'Sent Key: [${_activeModifierSummary()}$keyLabel] to ${_activeRdpHost?.name ?? "session"}';
+                          });
+                        },
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -8097,7 +8493,53 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   const Icon(Icons.aspect_ratio_rounded, size: 13, color: JalaPalette.brandGold),
                   const SizedBox(width: 4),
                   Text(
-                    '${_resolutionPreset.shortLabel} • ${_canvasFitMode.shortLabel}',
+                    _resolutionPreset.shortLabel,
+                    style: const TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w700,
+                      color: JalaPalette.brandGold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          // 1-Tap Quick Fit <-> Fill (Jump Pan) <-> Stretch Toggle
+          InkWell(
+            key: const ValueKey('btn_quick_cycle_fit'),
+            borderRadius: BorderRadius.circular(7),
+            onTap: () {
+              const modes = JumpCanvasFitMode.values;
+              final next = modes[(_canvasFitMode.index + 1) % modes.length];
+              setState(() {
+                _canvasFitMode = next;
+                _canvasTransformCtrl.value = Matrix4.identity();
+                _lastRdpAction = 'Canvas Fit: ${next.shortLabel} (${_desktopServerWidth}x$_desktopServerHeight)';
+              });
+            },
+            child: Container(
+              height: 25,
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: _canvasFitMode == JumpCanvasFitMode.cropCover ? JalaPalette.selected : JalaPalette.header,
+                borderRadius: BorderRadius.circular(7),
+                border: Border.all(
+                  color: _canvasFitMode == JumpCanvasFitMode.cropCover ? JalaPalette.brandGold : JalaPalette.lineInput,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _canvasFitMode == JumpCanvasFitMode.cropCover ? Icons.crop_free_rounded : Icons.fit_screen_rounded,
+                    size: 12,
+                    color: JalaPalette.brandGold,
+                  ),
+                  const SizedBox(width: 3),
+                  Text(
+                    _canvasFitMode.shortLabel,
                     style: const TextStyle(
                       fontSize: 9.5,
                       fontWeight: FontWeight.w700,
@@ -8143,25 +8585,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
               );
             },
           ),
-          // Keyboard Input Bar Toggle
-          InkWell(
-            borderRadius: BorderRadius.circular(7),
-            onTap: () => setState(() => _showDesktopKeyboardBar = !_showDesktopKeyboardBar),
-            child: Container(
-              width: 25,
-              height: 25,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: _showDesktopKeyboardBar ? JalaPalette.selected : JalaPalette.header,
-                borderRadius: BorderRadius.circular(7),
-                border: Border.all(
-                  color: _showDesktopKeyboardBar ? JalaPalette.brandGold : JalaPalette.lineInput,
-                ),
-              ),
-              child: const Icon(Icons.keyboard_alt_outlined, size: 14, color: JalaPalette.brandGold),
-            ),
-          ),
-          const SizedBox(width: 4),
           // Rotate Landscape / Portrait Toggle
           InkWell(
             key: const ValueKey('btn_rotate_orientation'),
@@ -8232,8 +8655,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
   Widget _buildModifierChip(String label, bool active, ValueChanged<bool> onSelected) {
     return Padding(
-      padding: const EdgeInsets.only(right: 6),
+      padding: const EdgeInsets.only(right: 5),
       child: FilterChip(
+        visualDensity: VisualDensity.compact,
+        showCheckmark: false,
         selectedColor: JalaPalette.selected,
         backgroundColor: JalaPalette.surface,
         checkmarkColor: JalaPalette.brandGold,

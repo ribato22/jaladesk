@@ -40,6 +40,7 @@ class DesktopGestureSurface extends StatefulWidget {
   final Rect desktopRect;
   final Size viewportSize;
   final double canvasMargin;
+  final double bottomObstructionPx;
   final bool isTrackpadMode;
   final bool viewOnly;
   final Offset cursorNorm;
@@ -50,6 +51,7 @@ class DesktopGestureSurface extends StatefulWidget {
   final void Function(Offset norm) onLeftDragStart;
   final void Function(Offset norm) onLeftDragEnd;
   final void Function(Offset norm, int wheelDelta) onMouseWheel;
+  final VoidCallback? onThreeFingerTap;
   final VoidCallback? onUserCanvasInteraction;
 
   const DesktopGestureSurface({
@@ -59,6 +61,7 @@ class DesktopGestureSurface extends StatefulWidget {
     required this.desktopRect,
     required this.viewportSize,
     required this.canvasMargin,
+    this.bottomObstructionPx = 0.0,
     required this.isTrackpadMode,
     required this.viewOnly,
     required this.cursorNorm,
@@ -68,6 +71,7 @@ class DesktopGestureSurface extends StatefulWidget {
     required this.onLeftDragStart,
     required this.onLeftDragEnd,
     required this.onMouseWheel,
+    this.onThreeFingerTap,
     this.onUserCanvasInteraction,
   });
 
@@ -97,7 +101,7 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
   Offset _lastQuickTapNorm = const Offset(0.5, 0.5);
   bool _armedTrackpadTapDrag = false;
 
-  // Two-finger pinch / scroll / right-click state
+  // Two-finger & three-finger pinch / pan / scroll / right-click / keyboard toggle state
   DateTime _twoFingerStartAt = DateTime.fromMillisecondsSinceEpoch(0);
   double _twoFingerInitialSpan = 0.0;
   double _twoFingerPrevSpan = 0.0;
@@ -105,6 +109,7 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
   double _twoFingerMaxDelta = 0.0;
   bool _pinchRecognized = false;
   double _wheelCarryPx = 0.0;
+  int _maxPointersInGesture = 0;
 
   // Subtle visual ripple feedback for Direct Touch
   final List<_TouchRipplePulse> _ripples = <_TouchRipplePulse>[];
@@ -124,6 +129,96 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
   double get _currentZoomScale {
     final m = widget.transformationController.value.storage;
     return m[0].clamp(1.0, 5.0);
+  }
+
+  bool get _hasPannableOverflow {
+    if (_currentZoomScale > 1.01 || widget.bottomObstructionPx > 8.0) return true;
+    return widget.desktopRect.width > widget.viewportSize.width + 2.0 ||
+        widget.desktopRect.height > widget.viewportSize.height + 2.0;
+  }
+
+  (double minTx, double maxTx, double minTy, double maxTy) _computePanBounds(double scale) {
+    final fullW = widget.viewportSize.width + widget.canvasMargin * 2;
+    final fullH = widget.viewportSize.height + widget.canvasMargin * 2;
+    final visibleH = (fullH - widget.bottomObstructionPx).clamp(80.0, fullH);
+
+    final contentLeft = (widget.canvasMargin + widget.desktopRect.left) * scale;
+    final contentRight = (widget.canvasMargin + widget.desktopRect.right) * scale;
+    final contentTop = (widget.canvasMargin + widget.desktopRect.top) * scale;
+    final contentBottom = (widget.canvasMargin + widget.desktopRect.bottom) * scale;
+
+    double minTx, maxTx;
+    if (contentRight - contentLeft > fullW + 0.5) {
+      minTx = fullW - contentRight;
+      maxTx = -contentLeft;
+    } else {
+      minTx = fullW * (1.0 - scale);
+      maxTx = 0.0;
+    }
+    if (minTx > maxTx) {
+      final mid = (minTx + maxTx) * 0.5;
+      minTx = mid;
+      maxTx = mid;
+    }
+
+    double minTy, maxTy;
+    if (contentBottom - contentTop > visibleH + 0.5) {
+      minTy = visibleH - contentBottom;
+      maxTy = -contentTop > 0.0 ? -contentTop : 0.0;
+    } else {
+      minTy = visibleH - fullH * scale;
+      maxTy = 0.0;
+    }
+    if (minTy > maxTy) {
+      final mid = (minTy + maxTy) * 0.5;
+      minTy = mid;
+      maxTy = mid;
+    }
+    return (minTx, maxTx, minTy, maxTy);
+  }
+
+  /// Jump Desktop-style smooth camera follow when desktop overflows viewport (Fill mode, Zoom, or Keyboard open).
+  void _autoPanViewportToFollowCursor(Offset norm) {
+    if (!_hasPannableOverflow) return;
+    final current = widget.transformationController.value;
+    final scale = current.storage[0].clamp(1.0, 5.0);
+    double tx = current.storage[12];
+    double ty = current.storage[13];
+
+    final fullW = widget.viewportSize.width + widget.canvasMargin * 2;
+    final fullH = widget.viewportSize.height + widget.canvasMargin * 2;
+    final visibleH = (fullH - widget.bottomObstructionPx).clamp(80.0, fullH);
+
+    final unzoomedX = widget.canvasMargin + widget.desktopRect.left + norm.dx * widget.desktopRect.width;
+    final unzoomedY = widget.canvasMargin + widget.desktopRect.top + norm.dy * widget.desktopRect.height;
+    final screenX = tx + unzoomedX * scale;
+    final screenY = ty + unzoomedY * scale;
+
+    final padX = (fullW * 0.12).clamp(16.0, 46.0);
+    final padY = (visibleH * 0.12).clamp(16.0, 42.0);
+
+    double newTx = tx;
+    double newTy = ty;
+    if (screenX < padX) {
+      newTx += (padX - screenX);
+    } else if (screenX > fullW - padX) {
+      newTx -= (screenX - (fullW - padX));
+    }
+    if (screenY < padY) {
+      newTy += (padY - screenY);
+    } else if (screenY > visibleH - padY) {
+      newTy -= (screenY - (visibleH - padY));
+    }
+
+    final (minTx, maxTx, minTy, maxTy) = _computePanBounds(scale);
+    final clampedTx = newTx.clamp(minTx, maxTx);
+    final clampedTy = newTy.clamp(minTy, maxTy);
+    if ((clampedTx - tx).abs() < 0.25 && (clampedTy - ty).abs() < 0.25) return;
+
+    final next = Matrix4.identity()
+      ..translateByDouble(clampedTx, clampedTy, 0.0, 1.0)
+      ..scaleByDouble(scale, scale, 1.0, 1.0);
+    widget.transformationController.value = next;
   }
 
   /// Maps a widget-local touch coordinate through the inverse zoom `Matrix4` onto `[0..1]` remote desktop norm.
@@ -167,23 +262,18 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
     final targetScale = (currentScale * scaleFactor).clamp(1.0, 5.0);
     final effectiveRatio = targetScale / currentScale;
 
-    // Translate pan + scale around `focalPoint`
     double tx = current.storage[12] + panDelta.dx;
     double ty = current.storage[13] + panDelta.dy;
     tx = focalPoint.dx - (focalPoint.dx - tx) * effectiveRatio;
     ty = focalPoint.dy - (focalPoint.dy - ty) * effectiveRatio;
 
-    // Clamp translation so zoomed canvas never leaves empty black void outside bounds
-    final fullW = widget.viewportSize.width + widget.canvasMargin * 2;
-    final fullH = widget.viewportSize.height + widget.canvasMargin * 2;
-    if (targetScale <= 1.005) {
+    final (minTx, maxTx, minTy, maxTy) = _computePanBounds(targetScale);
+    if (targetScale <= 1.005 && (maxTx - minTx).abs() < 0.5 && (maxTy - minTy).abs() < 0.5) {
       widget.transformationController.value = Matrix4.identity();
       return;
     }
-    final minTx = fullW * (1.0 - targetScale);
-    final minTy = fullH * (1.0 - targetScale);
-    final clampedTx = tx.clamp(minTx, 0.0);
-    final clampedTy = ty.clamp(minTy, 0.0);
+    final clampedTx = tx.clamp(minTx, maxTx);
+    final clampedTy = ty.clamp(minTy, maxTy);
 
     final next = Matrix4.identity()
       ..translateByDouble(clampedTx, clampedTy, 0.0, 1.0)
@@ -208,8 +298,12 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
   void _handlePointerDown(PointerDownEvent event) {
     widget.onUserCanvasInteraction?.call();
     _activePointers[event.pointer] = event.localPosition;
+    if (_activePointers.length > _maxPointersInGesture) {
+      _maxPointersInGesture = _activePointers.length;
+    }
 
     if (_activePointers.length == 1) {
+      _maxPointersInGesture = 1;
       final now = DateTime.now();
       _primaryPointerId = event.pointer;
       _primaryDownLocal = event.localPosition;
@@ -293,7 +387,10 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
         _pinchRecognized = true;
       }
 
-      if (_pinchRecognized || (!widget.isTrackpadMode && _currentZoomScale > 1.03)) {
+      final horizontalPanDominant = centroidDelta.dx.abs() > centroidDelta.dy.abs() * 1.25;
+      if (_pinchRecognized ||
+          (!widget.isTrackpadMode && _hasPannableOverflow) ||
+          (_hasPannableOverflow && horizontalPanDominant)) {
         final ratio = _twoFingerPrevSpan > 1.0 ? (span / _twoFingerPrevSpan) : 1.0;
         _applyZoomAndPan(
           focalPoint: centroid,
@@ -334,14 +431,14 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
     }
 
     if (widget.viewOnly) {
-      if (_currentZoomScale > 1.02) {
+      if (_hasPannableOverflow) {
         _applyZoomAndPan(focalPoint: event.localPosition, scaleFactor: 1.0, panDelta: stepDelta);
       }
       return;
     }
 
     if (widget.isTrackpadMode) {
-      // Trackpad Mode: immediate relative ballistic cursor movement
+      // Trackpad Mode: immediate relative ballistic cursor movement + Jump camera follow
       if (stepDelta.dx == 0.0 && stepDelta.dy == 0.0) return;
 
       if (_armedTrackpadTapDrag && !_isLeftButtonDragging && _primaryMaxTravel >= 4.5) {
@@ -358,9 +455,12 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
 
       final rw = widget.desktopRect.width.clamp(64.0, 16384.0);
       final rh = widget.desktopRect.height.clamp(64.0, 16384.0);
-      final nextX = (widget.cursorNorm.dx + (stepDelta.dx * gain) / rw).clamp(0.0, 1.0);
-      final nextY = (widget.cursorNorm.dy + (stepDelta.dy * gain) / rh).clamp(0.0, 1.0);
-      widget.onCursorMoved(Offset(nextX, nextY), isDragging: _isLeftButtonDragging);
+      final nextNorm = Offset(
+        (widget.cursorNorm.dx + (stepDelta.dx * gain) / rw).clamp(0.0, 1.0),
+        (widget.cursorNorm.dy + (stepDelta.dy * gain) / rh).clamp(0.0, 1.0),
+      );
+      _autoPanViewportToFollowCursor(nextNorm);
+      widget.onCursorMoved(nextNorm, isDragging: _isLeftButtonDragging);
     } else {
       // Direct Touch Mode: 1-finger drag = remote Left-Button Drag
       if (_longPressFired) return;
@@ -370,6 +470,7 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
       }
       if (_isLeftButtonDragging) {
         final norm = _localToDesktopNorm(event.localPosition);
+        _autoPanViewportToFollowCursor(norm);
         widget.onCursorMoved(norm, isDragging: true);
       }
     }
@@ -379,19 +480,25 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
     _activePointers.remove(event.pointer);
     _longPressTimer?.cancel();
 
-    // Check for quick 2-finger tap -> Right Click!
+    // Check for quick 3-finger tap (Keyboard toggle) or 2-finger tap (Right Click)!
     if (_hadMultiTouch) {
       if (_activePointers.isEmpty) {
         final elapsedMs = DateTime.now().difference(_twoFingerStartAt).inMilliseconds;
-        if (!widget.viewOnly && !_pinchRecognized && elapsedMs <= 270 && _twoFingerMaxDelta < 16.0) {
-          HapticFeedback.selectionClick();
-          final norm = widget.isTrackpadMode
-              ? widget.cursorNorm
-              : _localToDesktopNorm(_twoFingerPrevCentroid);
-          _spawnTouchRipple(_twoFingerPrevCentroid, isRightClick: true);
-          widget.onRightClick(norm);
+        if (!_pinchRecognized && elapsedMs <= 290 && _twoFingerMaxDelta < 22.0) {
+          if (_maxPointersInGesture >= 3 && widget.onThreeFingerTap != null) {
+            HapticFeedback.mediumImpact();
+            widget.onThreeFingerTap!();
+          } else if (_maxPointersInGesture == 2 && !widget.viewOnly) {
+            HapticFeedback.selectionClick();
+            final norm = widget.isTrackpadMode
+                ? widget.cursorNorm
+                : _localToDesktopNorm(_twoFingerPrevCentroid);
+            _spawnTouchRipple(_twoFingerPrevCentroid, isRightClick: true);
+            widget.onRightClick(norm);
+          }
         }
         _hadMultiTouch = false;
+        _maxPointersInGesture = 0;
       }
       return;
     }

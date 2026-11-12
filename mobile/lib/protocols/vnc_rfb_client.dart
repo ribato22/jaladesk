@@ -394,14 +394,21 @@ class VncRfbClient {
   final int port;
   final String username;
   final String password;
+  final int? initialTargetWidth;
+  final int? initialTargetHeight;
   final void Function(ui.Image image, int width, int height, String status) onFrame;
   final void Function(String status, {bool isError}) onStatus;
+  final void Function(int width, int height, bool supportsDynamicResize)? onDesktopGeometryChanged;
 
   Socket? _socket;
   SocketByteReader? _reader;
   bool _running = false;
   int width = 1024;
   int height = 768;
+  bool supportsExtendedDesktopSize = false;
+  int _primaryScreenId = 0;
+  int _primaryScreenFlags = 0;
+  bool _appliedInitialTargetSize = false;
   String desktopName = 'VNC Remote Desktop';
   String negotiatedAuthLabel = 'RFB 3.8';
   late Uint8List _rgbaBuffer;
@@ -415,8 +422,11 @@ class VncRfbClient {
     required this.port,
     this.username = '',
     required this.password,
+    this.initialTargetWidth,
+    this.initialTargetHeight,
     required this.onFrame,
     required this.onStatus,
+    this.onDesktopGeometryChanged,
   });
 
   bool get isConnected => _running && _socket != null;
@@ -805,8 +815,9 @@ class VncRfbClient {
     sock.add(setPf.buffer.asUint8List());
 
     // 6. Send SetEncodings (msgType = 2):
-    // ZRLE (16), Zlib (6), Hextile (5), RRE (2), CopyRect (1), Raw (0), DesktopSize (-223), LastRect (-224), Cursor (-239)
-    const encodings = <int>[16, 6, 5, 2, 1, 0, -223, -224, -239];
+    // ZRLE (16), Zlib (6), Hextile (5), RRE (2), CopyRect (1), Raw (0),
+    // ExtendedDesktopSize (-308), DesktopSize (-223), LastRect (-224), Cursor (-239)
+    const encodings = <int>[16, 6, 5, 2, 1, 0, -308, -223, -224, -239];
     final setEnc = ByteData(4 + encodings.length * 4);
     setEnc.setUint8(0, 2);
     setEnc.setUint16(2, encodings.length, Endian.big);
@@ -815,6 +826,8 @@ class VncRfbClient {
     }
     sock.add(setEnc.buffer.asUint8List());
 
+    supportsExtendedDesktopSize = false;
+    _appliedInitialTargetSize = false;
     _running = true;
     onStatus('Connected to $desktopName (${width}x$height • ${describeSecurityType(chosenSec)})');
     _sendFramebufferUpdateRequest(incremental: false);
@@ -1059,15 +1072,46 @@ class VncRfbClient {
             if (encoding == -224) {
               // LastRect pseudo-encoding
               break;
-            } else if (encoding == -223) {
-              // DesktopSize pseudo-encoding
-              if (rw > 0 && rh > 0) {
+            } else if (encoding == -308) {
+              // ExtendedDesktopSize pseudo-encoding (TigerVNC / RealVNC / TightVNC / x11vnc / KasmVNC / GNOME)
+              final extHdr = await reader.readExact(4);
+              final numScreens = extHdr[0];
+              if (numScreens > 0) {
+                final screensBuf = await reader.readExact(numScreens * 16);
+                final sbd = ByteData.sublistView(screensBuf);
+                _primaryScreenId = sbd.getUint32(0, Endian.big);
+                _primaryScreenFlags = sbd.getUint32(12, Endian.big);
+              }
+              supportsExtendedDesktopSize = true;
+              // rx = reason (0=server layout, 1=client requested), ry = status (0=no error)
+              if ((ry == 0 || rx == 0) && rw > 0 && rh > 0 && (rw != width || rh != height)) {
                 width = rw;
                 height = rh;
                 _rgbaBuffer = Uint8List(width * height * 4);
                 for (int i = 3; i < _rgbaBuffer.length; i += 4) {
                   _rgbaBuffer[i] = 255;
                 }
+                _sendFramebufferUpdateRequest(incremental: false);
+              }
+              onDesktopGeometryChanged?.call(width, height, true);
+              if (!_appliedInitialTargetSize &&
+                  initialTargetWidth != null &&
+                  initialTargetHeight != null) {
+                _appliedInitialTargetSize = true;
+                requestResolution(initialTargetWidth!, initialTargetHeight!);
+              }
+              continue;
+            } else if (encoding == -223) {
+              // DesktopSize pseudo-encoding
+              if (rw > 0 && rh > 0 && (rw != width || rh != height)) {
+                width = rw;
+                height = rh;
+                _rgbaBuffer = Uint8List(width * height * 4);
+                for (int i = 3; i < _rgbaBuffer.length; i += 4) {
+                  _rgbaBuffer[i] = 255;
+                }
+                _sendFramebufferUpdateRequest(incremental: false);
+                onDesktopGeometryChanged?.call(width, height, supportsExtendedDesktopSize);
               }
               continue;
             } else if (encoding == -239) {
@@ -1276,6 +1320,37 @@ class VncRfbClient {
     }
   }
 
+  /// Dynamically resizes remote VNC desktop resolution via RFC 6143 / Tight `SetDesktopSize` (`msgType = 251`)
+  /// when the server advertised `ExtendedDesktopSize (-308)`. Returns `true` if sent.
+  bool requestResolution(int newWidth, int newHeight) {
+    final sock = _socket;
+    if (sock == null || !_running || !supportsExtendedDesktopSize) return false;
+    final alignedW = (((newWidth.clamp(320, 4096) + 3) ~/ 4) * 4);
+    final alignedH = (((newHeight.clamp(240, 4096) + 1) ~/ 2) * 2);
+    if ((alignedW - width).abs() < 4 && (alignedH - height).abs() < 4) return true;
+
+    final pkt = ByteData(24);
+    pkt.setUint8(0, 251); // SetDesktopSize
+    pkt.setUint8(1, 0); // padding
+    pkt.setUint16(2, alignedW, Endian.big);
+    pkt.setUint16(4, alignedH, Endian.big);
+    pkt.setUint8(6, 1); // number-of-screens = 1
+    // bytes 7..9 = 0 padding
+    pkt.setUint32(8, _primaryScreenId, Endian.big);
+    pkt.setUint16(12, 0, Endian.big); // x-position
+    pkt.setUint16(14, 0, Endian.big); // y-position
+    pkt.setUint16(16, alignedW, Endian.big);
+    pkt.setUint16(18, alignedH, Endian.big);
+    pkt.setUint32(20, _primaryScreenFlags, Endian.big);
+    try {
+      sock.add(pkt.buffer.asUint8List());
+      _sendFramebufferUpdateRequest(incremental: false);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   void sendKeySym(int keysym, {bool? down}) {
     final sock = _socket;
     if (sock == null || !_running) return;
@@ -1289,10 +1364,140 @@ class VncRfbClient {
     }
   }
 
+  static int runeToX11KeySym(int rune) {
+    if (rune == 10 || rune == 13) return 0xFF0D; // Return
+    if (rune == 8 || rune == 127) return 0xFF08; // BackSpace
+    if (rune == 9) return 0xFF09; // Tab
+    if (rune == 27) return 0xFF1B; // Escape
+    if (rune >= 0x20 && rune <= 0xFF) return rune; // Latin-1 / ASCII matches X11 keysym directly
+    return 0x01000000 | (rune & 0xFFFFFF); // X11 Unicode keysym convention
+  }
+
   void sendText(String text) {
     for (final rune in text.runes) {
-      sendKeySym(rune);
+      final ks = runeToX11KeySym(rune);
+      // Uppercase ASCII or shifted punctuation on strict X11 VNC servers (x11vnc / TigerVNC)
+      final needsShift = (rune >= 0x41 && rune <= 0x5A) ||
+          '~!@#\$%^&*()_+{}|:"<>?'.codeUnits.contains(rune);
+      if (needsShift) sendKeySym(0xFFE1, down: true); // Shift_L
+      sendKeySym(ks);
+      if (needsShift) sendKeySym(0xFFE1, down: false);
     }
+  }
+
+  void sendSpecialKey(String label, {bool ctrl = false, bool alt = false, bool win = false, bool shift = false}) {
+    if (!_running || _socket == null) return;
+    if (label == 'Ctrl+Alt+Del') {
+      sendKeySym(0xFFE3, down: true); // Control_L
+      sendKeySym(0xFFE9, down: true); // Alt_L
+      sendKeySym(0xFFFF); // Delete
+      sendKeySym(0xFFE9, down: false);
+      sendKeySym(0xFFE3, down: false);
+      return;
+    }
+    if (label == 'Win+D') {
+      sendKeySym(0xFFEB, down: true); // Super_L / Command
+      sendKeySym(0x64); // 'd'
+      sendKeySym(0xFFEB, down: false);
+      return;
+    }
+
+    if (ctrl) sendKeySym(0xFFE3, down: true);
+    if (alt) sendKeySym(0xFFE9, down: true);
+    if (win) sendKeySym(0xFFEB, down: true);
+    if (shift) sendKeySym(0xFFE1, down: true);
+
+    switch (label) {
+      case 'Esc':
+        sendKeySym(0xFF1B);
+        break;
+      case 'Tab':
+        sendKeySym(0xFF09);
+        break;
+      case 'Enter':
+        sendKeySym(0xFF0D);
+        break;
+      case 'Bksp':
+        sendKeySym(0xFF08);
+        break;
+      case 'Del':
+        sendKeySym(0xFFFF);
+        break;
+      case 'Ins':
+        sendKeySym(0xFF63);
+        break;
+      case 'Home':
+        sendKeySym(0xFF50);
+        break;
+      case 'End':
+        sendKeySym(0xFF57);
+        break;
+      case 'PgUp':
+        sendKeySym(0xFF55);
+        break;
+      case 'PgDn':
+        sendKeySym(0xFF56);
+        break;
+      case '←':
+        sendKeySym(0xFF51);
+        break;
+      case '↑':
+        sendKeySym(0xFF52);
+        break;
+      case '→':
+        sendKeySym(0xFF53);
+        break;
+      case '↓':
+        sendKeySym(0xFF54);
+        break;
+      case 'F1':
+        sendKeySym(0xFFBE);
+        break;
+      case 'F2':
+        sendKeySym(0xFFBF);
+        break;
+      case 'F3':
+        sendKeySym(0xFFC0);
+        break;
+      case 'F4':
+        sendKeySym(0xFFC1);
+        break;
+      case 'F5':
+        sendKeySym(0xFFC2);
+        break;
+      case 'F6':
+        sendKeySym(0xFFC3);
+        break;
+      case 'F7':
+        sendKeySym(0xFFC4);
+        break;
+      case 'F8':
+        sendKeySym(0xFFC5);
+        break;
+      case 'F9':
+        sendKeySym(0xFFC6);
+        break;
+      case 'F10':
+        sendKeySym(0xFFC7);
+        break;
+      case 'F11':
+        sendKeySym(0xFFC8);
+        break;
+      case 'F12':
+        sendKeySym(0xFFC9);
+        break;
+      default:
+        if ((ctrl || alt || win) && label.length == 1) {
+          sendKeySym(runeToX11KeySym(label.toLowerCase().runes.first));
+        } else {
+          sendText(label);
+        }
+    }
+
+    if (shift) sendKeySym(0xFFE1, down: false);
+    if (win) sendKeySym(0xFFEB, down: false);
+    if (alt) sendKeySym(0xFFE9, down: false);
+    if (ctrl) sendKeySym(0xFFE3, down: false);
   }
 
   Future<void> _cleanupSocket() async {

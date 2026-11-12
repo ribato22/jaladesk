@@ -499,11 +499,70 @@ class RdpFfiClient {
     }
   }
 
+  static const Map<int, (int scancode, bool needsShift)> _usAsciiSet1Scancodes = <int, (int, bool)>{
+    0x61: (0x1E, false), 0x41: (0x1E, true), // a / A
+    0x62: (0x30, false), 0x42: (0x30, true), // b / B
+    0x63: (0x2E, false), 0x43: (0x2E, true), // c / C
+    0x64: (0x20, false), 0x44: (0x20, true), // d / D
+    0x65: (0x12, false), 0x45: (0x12, true), // e / E
+    0x66: (0x21, false), 0x46: (0x21, true), // f / F
+    0x67: (0x22, false), 0x47: (0x22, true), // g / G
+    0x68: (0x23, false), 0x48: (0x23, true), // h / H
+    0x69: (0x17, false), 0x49: (0x17, true), // i / I
+    0x6A: (0x24, false), 0x4A: (0x24, true), // j / J
+    0x6B: (0x25, false), 0x4B: (0x25, true), // k / K
+    0x6C: (0x26, false), 0x4C: (0x26, true), // l / L
+    0x6D: (0x32, false), 0x4D: (0x32, true), // m / M
+    0x6E: (0x31, false), 0x4E: (0x31, true), // n / N
+    0x6F: (0x18, false), 0x4F: (0x18, true), // o / O
+    0x70: (0x19, false), 0x50: (0x19, true), // p / P
+    0x71: (0x10, false), 0x51: (0x10, true), // q / Q
+    0x72: (0x13, false), 0x52: (0x13, true), // r / R
+    0x73: (0x1F, false), 0x53: (0x1F, true), // s / S
+    0x74: (0x14, false), 0x54: (0x14, true), // t / T
+    0x75: (0x16, false), 0x55: (0x16, true), // u / U
+    0x76: (0x2F, false), 0x56: (0x2F, true), // v / V
+    0x77: (0x11, false), 0x57: (0x11, true), // w / W
+    0x78: (0x2D, false), 0x58: (0x2D, true), // x / X
+    0x79: (0x15, false), 0x59: (0x15, true), // y / Y
+    0x7A: (0x2C, false), 0x5A: (0x2C, true), // z / Z
+    0x31: (0x02, false), 0x21: (0x02, true), // 1 / !
+    0x32: (0x03, false), 0x40: (0x03, true), // 2 / @
+    0x33: (0x04, false), 0x23: (0x04, true), // 3 / #
+    0x34: (0x05, false), 0x24: (0x05, true), // 4 / $
+    0x35: (0x06, false), 0x25: (0x06, true), // 5 / %
+    0x36: (0x07, false), 0x5E: (0x07, true), // 6 / ^
+    0x37: (0x08, false), 0x26: (0x08, true), // 7 / &
+    0x38: (0x09, false), 0x2A: (0x09, true), // 8 / *
+    0x39: (0x0A, false), 0x28: (0x0A, true), // 9 / (
+    0x30: (0x0B, false), 0x29: (0x0B, true), // 0 / )
+    0x2D: (0x0C, false), 0x5F: (0x0C, true), // - / _
+    0x3D: (0x0D, false), 0x2B: (0x0D, true), // = / +
+    0x5B: (0x1A, false), 0x7B: (0x1A, true), // [ / {
+    0x5D: (0x1B, false), 0x7D: (0x1B, true), // ] / }
+    0x5C: (0x2B, false), 0x7C: (0x2B, true), // \ / |
+    0x3B: (0x27, false), 0x3A: (0x27, true), // ; / :
+    0x27: (0x28, false), 0x22: (0x28, true), // ' / "
+    0x60: (0x29, false), 0x7E: (0x29, true), // ` / ~
+    0x2C: (0x33, false), 0x3C: (0x33, true), // , / <
+    0x2E: (0x34, false), 0x3E: (0x34, true), // . / >
+    0x2F: (0x35, false), 0x3F: (0x35, true), // / / ?
+    0x20: (0x39, false), // Space
+  };
+
   void sendUnicodeText(String text) {
     if (_disposed || _handle == ffi.nullptr) return;
     for (final unit in text.codeUnits) {
       if (unit == 10 || unit == 13) {
         sendScancode(0x1C); // Enter
+      } else if (unit == 8 || unit == 127) {
+        sendScancode(0x0E); // Backspace
+      } else if (unit == 9) {
+        sendScancode(0x0F); // Tab
+      } else if (unit == 27) {
+        sendScancode(0x01); // Esc
+      } else if (unit == 32) {
+        sendScancode(0x39); // Spacebar scancode (works in games/UAC/lock screens too!)
       } else {
         _fnSendUnicode(_handle, RdpKeyFlags.down, unit);
         _fnSendUnicode(_handle, RdpKeyFlags.release, unit);
@@ -530,6 +589,7 @@ class RdpFfiClient {
       return;
     }
 
+    final hasModifier = ctrl || alt || win || shift;
     if (ctrl) sendScancode(0x1D, down: true);
     if (alt) sendScancode(0x38, down: true);
     if (win) sendScancode(0x5B, extended: true, down: true);
@@ -548,6 +608,24 @@ class RdpFfiClient {
       case 'Bksp':
         sendScancode(0x0E);
         break;
+      case 'Del':
+        sendScancode(0x53, extended: true);
+        break;
+      case 'Ins':
+        sendScancode(0x52, extended: true);
+        break;
+      case 'Home':
+        sendScancode(0x47, extended: true);
+        break;
+      case 'End':
+        sendScancode(0x4F, extended: true);
+        break;
+      case 'PgUp':
+        sendScancode(0x49, extended: true);
+        break;
+      case 'PgDn':
+        sendScancode(0x51, extended: true);
+        break;
       case '←':
         sendScancode(0x4B, extended: true);
         break;
@@ -563,8 +641,32 @@ class RdpFfiClient {
       case 'F1':
         sendScancode(0x3B);
         break;
+      case 'F2':
+        sendScancode(0x3C);
+        break;
+      case 'F3':
+        sendScancode(0x3D);
+        break;
+      case 'F4':
+        sendScancode(0x3E);
+        break;
       case 'F5':
         sendScancode(0x3F);
+        break;
+      case 'F6':
+        sendScancode(0x40);
+        break;
+      case 'F7':
+        sendScancode(0x41);
+        break;
+      case 'F8':
+        sendScancode(0x42);
+        break;
+      case 'F9':
+        sendScancode(0x43);
+        break;
+      case 'F10':
+        sendScancode(0x44);
         break;
       case 'F11':
         sendScancode(0x57);
@@ -573,6 +675,17 @@ class RdpFfiClient {
         sendScancode(0x58);
         break;
       default:
+        // When Ctrl/Alt/Win/Shift is held, Windows requires PC Set-1 scancodes (e.g. Ctrl+C, Win+R)!
+        if (hasModifier && label.length == 1) {
+          final mapped = _usAsciiSet1Scancodes[label.codeUnitAt(0)];
+          if (mapped != null) {
+            final (sc, needsShift) = mapped;
+            if (needsShift && !shift) sendScancode(0x2A, down: true);
+            sendScancode(sc);
+            if (needsShift && !shift) sendScancode(0x2A, down: false);
+            break;
+          }
+        }
         sendUnicodeText(label);
     }
 

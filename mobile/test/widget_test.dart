@@ -1729,4 +1729,342 @@ void main() {
       await vncServer.close();
     });
   });
+
+  test('VncRfbClient negotiates ExtendedDesktopSize (-308), sends SetDesktopSize (251), and dispatches live KeySyms + modifiers', () async {
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close());
+
+    final advertisedEncodings = <int>[];
+    final setDesktopSizes = <(int, int, int)>[];
+    final keyEvents = <(bool, int)>[];
+    final setDesktopSizeCompleter = Completer<void>();
+    final keysDoneCompleter = Completer<void>();
+
+    server.listen((Socket sock) async {
+      sock.done.catchError((_) {});
+      sock.add(ascii.encode('RFB 003.008\n'));
+      final buf = <int>[];
+      int stage = 0;
+      await for (final chunk in sock) {
+        buf.addAll(chunk);
+        if (stage == 0 && buf.length >= 12) {
+          buf.removeRange(0, 12);
+          stage = 1;
+          sock.add([1, 1]); // Security None
+        }
+        if (stage == 1 && buf.isNotEmpty) {
+          buf.removeAt(0);
+          stage = 2;
+          sock.add([0, 0, 0, 0]); // OK
+        }
+        if (stage == 2 && buf.isNotEmpty) {
+          buf.removeAt(0);
+          stage = 3;
+          // Initial 1920x1080 ServerInit + ExtendedDesktopSize (-308) rect (screenId = 7)
+          final name = utf8.encode('TIGER-VNC');
+          final init = ByteData(24 + name.length + 4 + 12 + 4 + 16)
+            ..setUint16(0, 1920)
+            ..setUint16(2, 1080)
+            ..setUint8(4, 32)
+            ..setUint8(5, 24)
+            ..setUint8(7, 1)
+            ..setUint16(8, 255)
+            ..setUint16(10, 255)
+            ..setUint16(12, 255)
+            ..setUint8(14, 16)
+            ..setUint8(15, 8)
+            ..setUint32(20, name.length);
+          final out = init.buffer.asUint8List();
+          out.setRange(24, 24 + name.length, name);
+          int o = 24 + name.length;
+          init.setUint8(o, 0); // FramebufferUpdate
+          init.setUint16(o + 2, 1); // 1 rect
+          o += 4;
+          init.setUint16(o, 0); // x = status 0
+          init.setUint16(o + 2, 0); // y = reason server
+          init.setUint16(o + 4, 1920);
+          init.setUint16(o + 6, 1080);
+          init.setInt32(o + 8, -308); // ExtendedDesktopSize
+          o += 12;
+          init.setUint8(o, 1); // 1 screen
+          o += 4;
+          init.setUint32(o, 7); // screenId = 7
+          init.setUint16(o + 4, 0);
+          init.setUint16(o + 6, 0);
+          init.setUint16(o + 8, 1920);
+          init.setUint16(o + 10, 1080);
+          init.setUint32(o + 12, 0);
+          sock.add(out);
+        }
+        while (stage == 3 && buf.isNotEmpty) {
+          final msgType = buf[0];
+          if (msgType == 0) {
+            if (buf.length < 20) break;
+            buf.removeRange(0, 20);
+          } else if (msgType == 2) {
+            if (buf.length < 4) break;
+            final n = (buf[2] << 8) | buf[3];
+            if (buf.length < 4 + n * 4) break;
+            final bd = ByteData.sublistView(Uint8List.fromList(buf.sublist(0, 4 + n * 4)));
+            for (int i = 0; i < n; i++) {
+              advertisedEncodings.add(bd.getInt32(4 + i * 4));
+            }
+            buf.removeRange(0, 4 + n * 4);
+          } else if (msgType == 3) {
+            if (buf.length < 10) break;
+            buf.removeRange(0, 10);
+          } else if (msgType == 251) {
+            // SetDesktopSize!
+            if (buf.length < 8) break;
+            final numScreens = buf[6];
+            final total = 8 + numScreens * 16;
+            if (buf.length < total) break;
+            final bd = ByteData.sublistView(Uint8List.fromList(buf.sublist(0, total)));
+            final reqW = bd.getUint16(2);
+            final reqH = bd.getUint16(4);
+            final scrId = numScreens > 0 ? bd.getUint32(8) : 0;
+            setDesktopSizes.add((reqW, reqH, scrId));
+            buf.removeRange(0, total);
+            // Acknowledge resize via ExtendedDesktopSize (-308)
+            final ack = ByteData(4 + 12 + 4 + 16)
+              ..setUint8(0, 0)
+              ..setUint16(2, 1)
+              ..setUint16(4, 1) // x=1 client requested
+              ..setUint16(6, 0) // y=0 NoError
+              ..setUint16(8, reqW)
+              ..setUint16(10, reqH)
+              ..setInt32(12, -308)
+              ..setUint8(16, 1)
+              ..setUint32(20, scrId)
+              ..setUint16(28, reqW)
+              ..setUint16(30, reqH);
+            sock.add(ack.buffer.asUint8List());
+            if (!setDesktopSizeCompleter.isCompleted) setDesktopSizeCompleter.complete();
+          } else if (msgType == 4) {
+            if (buf.length < 8) break;
+            final bd = ByteData.sublistView(Uint8List.fromList(buf.sublist(0, 8)));
+            keyEvents.add((bd.getUint8(1) != 0, bd.getUint32(4)));
+            buf.removeRange(0, 8);
+            if (keyEvents.length >= 8 && !keysDoneCompleter.isCompleted) {
+              keysDoneCompleter.complete();
+            }
+          } else {
+            break;
+          }
+        }
+      }
+    });
+
+    final geometryUpdates = <(int, int, bool)>[];
+    final client = VncRfbClient(
+      host: '127.0.0.1',
+      port: server.port,
+      password: '',
+      initialTargetWidth: 540,
+      initialTargetHeight: 1188,
+      onFrame: (img, w, h, status) {},
+      onStatus: (s, {isError = false}) {},
+      onDesktopGeometryChanged: (w, h, supportsDynamicResize) {
+        geometryUpdates.add((w, h, supportsDynamicResize));
+      },
+    );
+    addTearDown(() => client.dispose());
+
+    await client.connect();
+    await setDesktopSizeCompleter.future.timeout(const Duration(seconds: 3));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(advertisedEncodings, contains(-308));
+    expect(setDesktopSizes.first, equals((540, 1188, 7)));
+    expect(client.supportsExtendedDesktopSize, isTrue);
+    expect(client.width, 540);
+    expect(client.height, 1188);
+    expect(geometryUpdates.any((g) => g.$1 == 540 && g.$2 == 1188 && g.$3), isTrue);
+
+    client.sendText('A'); // Shift_L down, 'A' down, 'A' up, Shift_L up (4 events)
+    client.sendSpecialKey('c', ctrl: true); // Control_L down, 'c' down, 'c' up, Control_L up (4 events)
+    await keysDoneCompleter.future.timeout(const Duration(seconds: 3));
+
+    expect(
+      keyEvents.take(8).toList(),
+      equals([
+        (true, 0xFFE1),
+        (true, 0x41),
+        (false, 0x41),
+        (false, 0xFFE1),
+        (true, 0xFFE3),
+        (true, 0x63),
+        (false, 0x63),
+        (false, 0xFFE3),
+      ]),
+    );
+  });
+
+  testWidgets(
+      'Direct Live Remote Keyboard (0ms IME + Sticky Ctrl), Zero-Flicker Full-Screen Auto-Hide (0.0px delta), and Jump VNC Smart Fill work end-to-end',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    // Fixed widescreen 1920x1080 VNC server (no -308) to verify Jump Smart Fill & live 0ms keyboard input
+    final receivedKeyEvents = <(bool, int)>[];
+    final List<Socket> serverSockets = <Socket>[];
+    late ServerSocket vncServer;
+    await tester.runAsync(() async {
+      vncServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      vncServer.listen(
+        (Socket sock) async {
+          sock.done.catchError((_) {});
+          serverSockets.add(sock);
+          try {
+            sock.add(ascii.encode('RFB 003.008\n'));
+            final buf = <int>[];
+            int stage = 0;
+            await for (final chunk in sock) {
+              buf.addAll(chunk);
+              if (stage == 0 && buf.length >= 12) {
+                buf.removeRange(0, 12);
+                stage = 1;
+                sock.add([1, 1]);
+              }
+              if (stage == 1 && buf.isNotEmpty) {
+                buf.removeAt(0);
+                stage = 2;
+                sock.add([0, 0, 0, 0]);
+              }
+              if (stage == 2 && buf.isNotEmpty) {
+                buf.removeAt(0);
+                stage = 3;
+                final name = utf8.encode('FIXED-1080P-VNC');
+                final init = ByteData(24 + name.length)
+                  ..setUint16(0, 1920)
+                  ..setUint16(2, 1080)
+                  ..setUint8(4, 32)
+                  ..setUint8(5, 24)
+                  ..setUint8(7, 1)
+                  ..setUint16(8, 255)
+                  ..setUint16(10, 255)
+                  ..setUint16(12, 255)
+                  ..setUint8(14, 16)
+                  ..setUint8(15, 8)
+                  ..setUint32(20, name.length);
+                final out = init.buffer.asUint8List();
+                out.setRange(24, 24 + name.length, name);
+                sock.add(out);
+              }
+              while (stage == 3 && buf.isNotEmpty) {
+                final t = buf[0];
+                if (t == 0) {
+                  if (buf.length < 20) break;
+                  buf.removeRange(0, 20);
+                } else if (t == 2) {
+                  if (buf.length < 4) break;
+                  final n = (buf[2] << 8) | buf[3];
+                  if (buf.length < 4 + n * 4) break;
+                  buf.removeRange(0, 4 + n * 4);
+                } else if (t == 3) {
+                  if (buf.length < 10) break;
+                  buf.removeRange(0, 10);
+                } else if (t == 5) {
+                  if (buf.length < 6) break;
+                  buf.removeRange(0, 6);
+                } else if (t == 4) {
+                  if (buf.length < 8) break;
+                  final bd = ByteData.sublistView(Uint8List.fromList(buf.sublist(0, 8)));
+                  receivedKeyEvents.add((bd.getUint8(1) != 0, bd.getUint32(4)));
+                  buf.removeRange(0, 8);
+                } else {
+                  break;
+                }
+              }
+            }
+          } catch (_) {}
+        },
+        onError: (_) {},
+      );
+    });
+
+    await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: false));
+    await tester.pumpAndSettle();
+
+    // Add & connect to fixed 1920x1080 VNC host on portrait phone
+    await tester.tap(find.text('New Connection'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('VNC')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextField, 'Display Name (optional)'), 'Fixed 1080p VNC');
+    await tester.enterText(find.widgetWithText(TextField, 'Host / IP Address *'), '127.0.0.1');
+    await tester.enterText(find.widgetWithText(TextField, 'Port *'), '${vncServer.port}');
+    await tester.ensureVisible(find.widgetWithText(TextField, 'Password'));
+    await tester.enterText(find.widgetWithText(TextField, 'Password'), 'secret');
+    await tester.tap(find.text('Save Host'));
+    await tester.pump();
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 80)));
+    await tester.pumpAndSettle();
+
+    await tester.runAsync(() async {
+      tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Connect')).onPressed!();
+      for (int i = 0; i < 30 && serverSockets.isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // 1. Verify Jump Smart Cover (`Cover` / cropCover) auto-enabled for widescreen VNC on portrait phone!
+    expect(
+      find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Cover')),
+      findsOneWidget,
+    );
+
+    // 2. Tap `KB` button (`btn_toggle_desktop_keyboard`) -> focuses direct live IME input & sends keys immediately without any "Send" button!
+    await tester.tap(find.byKey(const ValueKey('btn_toggle_desktop_keyboard')));
+    await tester.pump();
+    final imeFinder = find.byKey(const ValueKey('desktop_hidden_ime_input'));
+    expect(tester.widget<TextField>(imeFinder).focusNode!.hasFocus, isTrue);
+
+    // Type 'z' and Backspace directly into the live IME bridge
+    await tester.enterText(imeFinder, '\u200B\u200Bz');
+    await tester.pump();
+    await tester.enterText(imeFinder, '\u200B');
+    await tester.pump();
+
+    // Lock sticky `Ctrl` and type 'v' -> sends real Control_L (0xFFE3) + 'v' and auto-releases Ctrl!
+    await tester.tap(find.text('Ctrl'));
+    await tester.pump();
+    await tester.enterText(imeFinder, '\u200B\u200Bv');
+    await tester.pump();
+
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+    expect(receivedKeyEvents, contains((true, 0x7A))); // 'z'
+    expect(receivedKeyEvents, contains((true, 0xFF08))); // BackSpace
+    expect(receivedKeyEvents, contains((true, 0xFFE3))); // Control_L
+    expect(receivedKeyEvents, contains((true, 0x76))); // 'v'
+
+    // 3. Enter Full Screen -> assert `desktop_gesture_surface` size has ZERO pixel change (0.0px delta) when controls auto-hide!
+    await tester.tap(find.byKey(const ValueKey('btn_toggle_fullscreen')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('desktop_bottom_shortcut_bar')), findsOneWidget);
+    final sizeWithControls = tester.getSize(find.byKey(const ValueKey('desktop_gesture_surface')));
+
+    await tester.pump(const Duration(milliseconds: 3700));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('desktop_bottom_shortcut_bar')), findsNothing);
+    final sizeAfterAutoHide = tester.getSize(find.byKey(const ValueKey('desktop_gesture_surface')));
+
+    expect(sizeAfterAutoHide, equals(sizeWithControls));
+
+    await tester.runAsync(() async {
+      for (final s in serverSockets) {
+        try {
+          s.destroy();
+        } catch (_) {}
+      }
+      await vncServer.close();
+    });
+  });
 }
