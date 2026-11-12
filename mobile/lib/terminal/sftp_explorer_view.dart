@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'sftp_transfer_service.dart';
+
 class SftpFileEntry {
   final String name;
   final String permissions;
@@ -37,6 +39,11 @@ class SftpExplorerView extends StatefulWidget {
   final Future<String> Function(SftpFileEntry entry)? onReadTextFile;
   final Future<void> Function(SftpFileEntry entry, String newName)? onRenameEntry;
   final Future<void> Function(SftpFileEntry entry)? onDeleteEntry;
+  final Future<void> Function()? onUploadFiles;
+  final Future<void> Function()? onUploadFolder;
+  final Future<void> Function()? onOpenLocalWorkspaceTransfer;
+  final Future<void> Function(SftpFileEntry entry)? onDownloadEntry;
+  final SftpTransferProgress? activeTransfer;
 
   const SftpExplorerView({
     super.key,
@@ -52,6 +59,11 @@ class SftpExplorerView extends StatefulWidget {
     this.onReadTextFile,
     this.onRenameEntry,
     this.onDeleteEntry,
+    this.onUploadFiles,
+    this.onUploadFolder,
+    this.onOpenLocalWorkspaceTransfer,
+    this.onDownloadEntry,
+    this.activeTransfer,
   });
 
   @override
@@ -359,6 +371,32 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                   ),
                 ),
                 const Divider(height: 1, color: Color(0xFF1E2B40)),
+                if (widget.onDownloadEntry != null)
+                  ListTile(
+                    leading: const Icon(
+                      Icons.download_rounded,
+                      color: Color(0xFF4ADE80),
+                    ),
+                    title: Text(
+                      entry.isDirectory
+                          ? 'Download Folder (Recursive)'
+                          : 'Download File to Device',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFFE6EDF7),
+                      ),
+                    ),
+                    subtitle: Text(
+                      entry.isDirectory
+                          ? 'Saves entire directory tree to Downloads/JalaDesk/${entry.name}'
+                          : 'Saves ${entry.sizeLabel} to Downloads/JalaDesk/${entry.name}',
+                      style: const TextStyle(fontSize: 11, color: Color(0xFF8CA2C0)),
+                    ),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      await widget.onDownloadEntry!(entry);
+                    },
+                  ),
                 if (entry.isDirectory)
                   ListTile(
                     leading: const Icon(Icons.folder_open_rounded),
@@ -618,53 +656,61 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                   ],
                 ),
                 const SizedBox(height: 6),
-                // Secondary utility strip: Dotfiles toggle, Sort toggle, New Folder, New File
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: [
+                // Secondary utility strip: responsive Wrap so every action stays on-screen on 360px+ phones
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (widget.onUploadFiles != null ||
+                        widget.onUploadFolder != null ||
+                        widget.onOpenLocalWorkspaceTransfer != null)
                       _buildToolbarPill(
-                        key: const ValueKey('btn_sftp_toggle_dotfiles'),
-                        icon: _showDotfiles
-                            ? Icons.visibility_rounded
-                            : Icons.visibility_off_outlined,
-                        label: hiddenCount > 0 ? '.dotfiles ($hiddenCount)' : '.dotfiles',
-                        active: _showDotfiles,
-                        onTap: () => setState(() => _showDotfiles = !_showDotfiles),
+                        key: const ValueKey('btn_sftp_upload_menu'),
+                        icon: Icons.cloud_upload_outlined,
+                        label: 'Upload',
+                        active: true,
+                        onTap: _showUploadSourceSheet,
                       ),
-                      const SizedBox(width: 6),
+                    if (widget.onCreateFolder != null)
                       _buildToolbarPill(
-                        icon: Icons.swap_vert_rounded,
-                        label: _sortMode == SftpSortMode.name ? 'Sort: Name' : 'Sort: Size',
-                        onTap: () => setState(() {
-                          _sortMode = _sortMode == SftpSortMode.name
-                              ? SftpSortMode.size
-                              : SftpSortMode.name;
-                        }),
+                        icon: Icons.create_new_folder_outlined,
+                        label: 'New Folder',
+                        onTap: _promptCreateFolder,
                       ),
-                      if (widget.onCreateFolder != null) ...[
-                        const SizedBox(width: 6),
-                        _buildToolbarPill(
-                          icon: Icons.create_new_folder_outlined,
-                          label: 'New Folder',
-                          onTap: _promptCreateFolder,
-                        ),
-                      ],
-                      if (widget.onWriteTextFile != null) ...[
-                        const SizedBox(width: 6),
-                        _buildToolbarPill(
-                          icon: Icons.note_add_outlined,
-                          label: 'New File',
-                          onTap: () => _promptCreateOrEditFile(),
-                        ),
-                      ],
-                      const SizedBox(width: 10),
-                      Text(
-                        '${visibleEntries.length} shown',
-                        style: const TextStyle(fontSize: 11, color: Color(0xFF6E829F)),
+                    if (widget.onWriteTextFile != null)
+                      _buildToolbarPill(
+                        icon: Icons.note_add_outlined,
+                        label: 'New File',
+                        onTap: () => _promptCreateOrEditFile(),
                       ),
-                    ],
-                  ),
+                    _buildToolbarPill(
+                      key: const ValueKey('btn_sftp_toggle_dotfiles'),
+                      icon: _showDotfiles
+                          ? Icons.visibility_rounded
+                          : Icons.visibility_off_outlined,
+                      label: hiddenCount > 0 ? '.dotfiles ($hiddenCount)' : '.dotfiles',
+                      active: _showDotfiles,
+                      onTap: () => setState(() => _showDotfiles = !_showDotfiles),
+                    ),
+                    _buildToolbarPill(
+                      icon: Icons.swap_vert_rounded,
+                      label: _sortMode == SftpSortMode.name ? 'Sort: Name' : 'Sort: Size',
+                      onTap: () => setState(() {
+                        _sortMode = _sortMode == SftpSortMode.name
+                            ? SftpSortMode.size
+                            : SftpSortMode.name;
+                      }),
+                    ),
+                    Text(
+                      '${visibleEntries.length} items',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                        color: Color(0xFF6E829F),
+                      ),
+                    ),
+                  ],
                 ),
                 if (_showSearchField) ...[
                   const SizedBox(height: 8),
@@ -700,6 +746,9 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
               color: Color(0xFFE0B454),
               backgroundColor: Color(0xFF141E2E),
             ),
+
+          if (widget.activeTransfer != null)
+            _buildLiveTransferBanner(widget.activeTransfer!),
 
           // High-Density File & Directory List
           Expanded(
@@ -816,7 +865,24 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                                     color: Color(0xFF8CA2C0),
                                   ),
                                 ),
-                              const SizedBox(width: 4),
+                              if (widget.onDownloadEntry != null) ...[
+                                const SizedBox(width: 4),
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                                  padding: EdgeInsets.zero,
+                                  tooltip: item.isDirectory
+                                      ? 'Download Folder (${item.name})'
+                                      : 'Download File (${item.name})',
+                                  icon: const Icon(
+                                    Icons.download_rounded,
+                                    size: 17,
+                                    color: Color(0xFF8CA2C0),
+                                  ),
+                                  onPressed: () => widget.onDownloadEntry!(item),
+                                ),
+                              ],
+                              const SizedBox(width: 2),
                               IconButton(
                                 visualDensity: VisualDensity.compact,
                                 constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
@@ -836,6 +902,154 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                     },
                   ),
           ),
+        ],
+      ),
+    );
+  }
+
+  void _showUploadSourceSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF121A28),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.cloud_upload_rounded, color: Color(0xFFE0B454)),
+                title: const Text(
+                  'Upload to Remote Server',
+                  style: TextStyle(fontWeight: FontWeight.w700, color: Color(0xFFE6EDF7)),
+                ),
+                subtitle: Text(
+                  'Destination: ${widget.currentPath}',
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: Color(0xFF8CA2C0)),
+                ),
+              ),
+              const Divider(height: 1, color: Color(0xFF1E2B40)),
+              if (widget.onUploadFiles != null)
+                ListTile(
+                  key: const ValueKey('btn_sftp_pick_files'),
+                  leading: const Icon(Icons.upload_file_rounded, color: Color(0xFF60A5FA)),
+                  title: const Text('Upload File(s) from Device'),
+                  subtitle: const Text(
+                    'Select one or multiple files via system picker (64KB streaming)',
+                    style: TextStyle(fontSize: 11.5, color: Color(0xFF8CA2C0)),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    widget.onUploadFiles!();
+                  },
+                ),
+              if (widget.onUploadFolder != null)
+                ListTile(
+                  key: const ValueKey('btn_sftp_pick_folder'),
+                  leading: const Icon(Icons.drive_folder_upload_rounded, color: Color(0xFFE0B454)),
+                  title: const Text('Upload Entire Folder (Recursive)'),
+                  subtitle: const Text(
+                    'Select a local folder and upload all nested subdirectories & files',
+                    style: TextStyle(fontSize: 11.5, color: Color(0xFF8CA2C0)),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    widget.onUploadFolder!();
+                  },
+                ),
+              if (widget.onOpenLocalWorkspaceTransfer != null)
+                ListTile(
+                  key: const ValueKey('btn_sftp_local_workspace'),
+                  leading: const Icon(Icons.folder_copy_outlined, color: Color(0xFF4ADE80)),
+                  title: const Text('Local JalaDesk Transfer Workspace'),
+                  subtitle: const Text(
+                    'Browse or stage local files & folders directly inside app storage',
+                    style: TextStyle(fontSize: 11.5, color: Color(0xFF8CA2C0)),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    widget.onOpenLocalWorkspaceTransfer!();
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLiveTransferBanner(SftpTransferProgress tx) {
+    final isUpload = tx.direction == SftpTransferDirection.upload;
+    final pct = tx.fraction != null ? '${(tx.fraction! * 100).round()}%' : '';
+    final accent = tx.errorMessage != null
+        ? const Color(0xFFF06A6A)
+        : (tx.isDone ? const Color(0xFF4ADE80) : const Color(0xFFE0B454));
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      decoration: const BoxDecoration(
+        color: Color(0xFF111B2B),
+        border: Border(bottom: BorderSide(color: Color(0xFF22334D))),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                tx.errorMessage != null
+                    ? Icons.error_outline_rounded
+                    : (tx.isDone
+                        ? Icons.check_circle_outline_rounded
+                        : (isUpload ? Icons.upload_rounded : Icons.download_rounded)),
+                size: 15,
+                color: accent,
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  tx.errorMessage != null
+                      ? 'Transfer failed: ${tx.errorMessage}'
+                      : (tx.isDone
+                          ? '${isUpload ? "Uploaded" : "Downloaded"} ${tx.rootName}${tx.savedDestination != null ? " → ${tx.savedDestination}" : ""}'
+                          : '${isUpload ? "Uploading" : "Downloading"} ${tx.rootName} • ${tx.currentItem}'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFFE6EDF7),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${tx.filesCompleted}/${tx.totalFiles} • ${SftpTransferProgress.formatBytes(tx.bytesTransferred)} $pct',
+                style: TextStyle(
+                  fontSize: 10.5,
+                  fontFamily: 'monospace',
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                  color: accent,
+                ),
+              ),
+            ],
+          ),
+          if (!tx.isDone && tx.errorMessage == null) ...[
+            const SizedBox(height: 5),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: tx.fraction,
+                minHeight: 3,
+                color: accent,
+                backgroundColor: const Color(0xFF1B2940),
+              ),
+            ),
+          ],
         ],
       ),
     );

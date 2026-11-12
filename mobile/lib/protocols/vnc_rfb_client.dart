@@ -405,6 +405,10 @@ class VncRfbClient {
   String desktopName = 'VNC Remote Desktop';
   String negotiatedAuthLabel = 'RFB 3.8';
   late Uint8List _rgbaBuffer;
+  RawZLibFilter? _zlibFilter;
+  RawZLibFilter? _zrleFilter;
+  Timer? _initialFramePulse;
+  bool _receivedAnyFrame = false;
 
   VncRfbClient({
     required this.host,
@@ -779,35 +783,52 @@ class VncRfbClient {
     for (int i = 3; i < _rgbaBuffer.length; i += 4) {
       _rgbaBuffer[i] = 255;
     }
+    _zlibFilter = RawZLibFilter.inflateFilter();
+    _zrleFilter = RawZLibFilter.inflateFilter();
+    _receivedAnyFrame = false;
 
-    // 5. Send SetPixelFormat (msgType = 0): 32bpp, depth 24, little-endian, true-color, R@0, G@8, B@16
+    // 5. Send SetPixelFormat (msgType = 0):
+    // Standard universal VNC 32bpp little-endian BGRA (depth 24, R@16, G@8, B@0)
+    // Required for zero-quirk compatibility with macOS Screen Sharing (RFB 003.889), TigerVNC, TightVNC & UltraVNC.
     final setPf = ByteData(20);
     setPf.setUint8(0, 0);
     setPf.setUint8(4, 32);
     setPf.setUint8(5, 24);
-    setPf.setUint8(6, 0);
-    setPf.setUint8(7, 1);
+    setPf.setUint8(6, 0); // little-endian
+    setPf.setUint8(7, 1); // true-colour
     setPf.setUint16(8, 255, Endian.big);
     setPf.setUint16(10, 255, Endian.big);
     setPf.setUint16(12, 255, Endian.big);
-    setPf.setUint8(14, 0);
-    setPf.setUint8(15, 8);
-    setPf.setUint8(16, 16);
+    setPf.setUint8(14, 16); // redShift = 16 (byte 2)
+    setPf.setUint8(15, 8); // greenShift = 8 (byte 1)
+    setPf.setUint8(16, 0); // blueShift = 0 (byte 0)
     sock.add(setPf.buffer.asUint8List());
 
-    // 6. Send SetEncodings (msgType = 2): CopyRect (1), Raw (0), DesktopSize (-223)
-    final setEnc = ByteData(16);
+    // 6. Send SetEncodings (msgType = 2):
+    // ZRLE (16), Zlib (6), Hextile (5), RRE (2), CopyRect (1), Raw (0), DesktopSize (-223), LastRect (-224), Cursor (-239)
+    const encodings = <int>[16, 6, 5, 2, 1, 0, -223, -224, -239];
+    final setEnc = ByteData(4 + encodings.length * 4);
     setEnc.setUint8(0, 2);
-    setEnc.setUint16(2, 3, Endian.big);
-    setEnc.setInt32(4, 1, Endian.big);
-    setEnc.setInt32(8, 0, Endian.big);
-    setEnc.setInt32(12, -223, Endian.big);
+    setEnc.setUint16(2, encodings.length, Endian.big);
+    for (int i = 0; i < encodings.length; i++) {
+      setEnc.setInt32(4 + i * 4, encodings[i], Endian.big);
+    }
     sock.add(setEnc.buffer.asUint8List());
-    await sock.flush();
 
     _running = true;
     onStatus('Connected to $desktopName (${width}x$height • ${describeSecurityType(chosenSec)})');
     _sendFramebufferUpdateRequest(incremental: false);
+    await sock.flush();
+
+    _initialFramePulse?.cancel();
+    _initialFramePulse = Timer.periodic(const Duration(milliseconds: 850), (t) {
+      if (!_running || _receivedAnyFrame || t.tick > 6) {
+        t.cancel();
+        return;
+      }
+      _sendFramebufferUpdateRequest(incremental: false);
+    });
+
     unawaited(_receiveLoop());
   }
 
@@ -821,7 +842,198 @@ class VncRfbClient {
     req.setUint16(4, 0, Endian.big);
     req.setUint16(6, width, Endian.big);
     req.setUint16(8, height, Endian.big);
-    sock.add(req.buffer.asUint8List());
+    try {
+      sock.add(req.buffer.asUint8List());
+    } catch (_) {}
+  }
+
+  Uint8List _inflateStateful(RawZLibFilter filter, Uint8List compressed) {
+    if (compressed.isEmpty) return Uint8List(0);
+    filter.process(compressed, 0, compressed.length);
+    final out = BytesBuilder(copy: false);
+    List<int>? chunk;
+    while ((chunk = filter.processed(flush: true, end: false)) != null && chunk!.isNotEmpty) {
+      out.add(chunk);
+    }
+    return out.takeBytes();
+  }
+
+  void _blitBgraPixels(int rx, int ry, int rw, int rh, Uint8List bgraBytes) {
+    for (int row = 0; row < rh; row++) {
+      final dstY = ry + row;
+      if (dstY >= height) break;
+      final srcOff = row * rw * 4;
+      final dstOff = (dstY * width + rx) * 4;
+      final copyPixels = (rx + rw <= width) ? rw : (width - rx);
+      for (int col = 0; col < copyPixels; col++) {
+        final sIdx = srcOff + col * 4;
+        if (sIdx + 2 >= bgraBytes.length) return;
+        final dIdx = dstOff + col * 4;
+        _rgbaBuffer[dIdx] = bgraBytes[sIdx + 2]; // R
+        _rgbaBuffer[dIdx + 1] = bgraBytes[sIdx + 1]; // G
+        _rgbaBuffer[dIdx + 2] = bgraBytes[sIdx]; // B
+        _rgbaBuffer[dIdx + 3] = 255;
+      }
+    }
+  }
+
+  void _fillSolidRect(int rx, int ry, int rw, int rh, int r, int g, int b) {
+    final endY = (ry + rh <= height) ? (ry + rh) : height;
+    final endX = (rx + rw <= width) ? (rx + rw) : width;
+    for (int y = ry; y < endY; y++) {
+      int dIdx = (y * width + rx) * 4;
+      for (int x = rx; x < endX; x++) {
+        _rgbaBuffer[dIdx] = r;
+        _rgbaBuffer[dIdx + 1] = g;
+        _rgbaBuffer[dIdx + 2] = b;
+        _rgbaBuffer[dIdx + 3] = 255;
+        dIdx += 4;
+      }
+    }
+  }
+
+  void _decodeZrleRect(int rx, int ry, int rw, int rh, Uint8List data) {
+    int pos = 0;
+    final palR = Uint8List(128);
+    final palG = Uint8List(128);
+    final palB = Uint8List(128);
+
+    for (int ty = 0; ty < rh; ty += 64) {
+      final th = (ty + 64 <= rh) ? 64 : (rh - ty);
+      for (int tx = 0; tx < rw; tx += 64) {
+        final tw = (tx + 64 <= rw) ? 64 : (rw - tx);
+        if (pos >= data.length) return;
+        final sub = data[pos++];
+
+        if (sub == 0) {
+          // Raw 3-byte CPIXELs ([B, G, R])
+          for (int y = 0; y < th; y++) {
+            final dy = ry + ty + y;
+            for (int x = 0; x < tw; x++) {
+              if (pos + 2 >= data.length) return;
+              final b = data[pos++];
+              final g = data[pos++];
+              final r = data[pos++];
+              final dx = rx + tx + x;
+              if (dx < width && dy < height) {
+                final dIdx = (dy * width + dx) * 4;
+                _rgbaBuffer[dIdx] = r;
+                _rgbaBuffer[dIdx + 1] = g;
+                _rgbaBuffer[dIdx + 2] = b;
+                _rgbaBuffer[dIdx + 3] = 255;
+              }
+            }
+          }
+        } else if (sub == 1) {
+          // Solid tile (1 CPIXEL)
+          if (pos + 2 >= data.length) return;
+          final b = data[pos++];
+          final g = data[pos++];
+          final r = data[pos++];
+          _fillSolidRect(rx + tx, ry + ty, tw, th, r, g, b);
+        } else if (sub >= 2 && sub <= 16) {
+          // Packed palette tile
+          final palSize = sub;
+          for (int p = 0; p < palSize; p++) {
+            if (pos + 2 >= data.length) return;
+            palB[p] = data[pos++];
+            palG[p] = data[pos++];
+            palR[p] = data[pos++];
+          }
+          final bpp = palSize == 2 ? 1 : (palSize <= 4 ? 2 : 4);
+          final mask = (1 << bpp) - 1;
+          for (int y = 0; y < th; y++) {
+            final dy = ry + ty + y;
+            int shift = 0;
+            int currentByte = 0;
+            for (int x = 0; x < tw; x++) {
+              if (shift == 0) {
+                if (pos >= data.length) return;
+                currentByte = data[pos++];
+                shift = 8;
+              }
+              shift -= bpp;
+              final idx = (currentByte >> shift) & mask;
+              final dx = rx + tx + x;
+              if (dx < width && dy < height && idx < palSize) {
+                final dIdx = (dy * width + dx) * 4;
+                _rgbaBuffer[dIdx] = palR[idx];
+                _rgbaBuffer[dIdx + 1] = palG[idx];
+                _rgbaBuffer[dIdx + 2] = palB[idx];
+                _rgbaBuffer[dIdx + 3] = 255;
+              }
+            }
+          }
+        } else if (sub == 128) {
+          // Plain RLE
+          int pixDone = 0;
+          final totalPix = tw * th;
+          while (pixDone < totalPix) {
+            if (pos + 2 >= data.length) return;
+            final b = data[pos++];
+            final g = data[pos++];
+            final r = data[pos++];
+            int runLen = 1;
+            int rb;
+            do {
+              if (pos >= data.length) return;
+              rb = data[pos++];
+              runLen += rb;
+            } while (rb == 255);
+            for (int k = 0; k < runLen && pixDone < totalPix; k++, pixDone++) {
+              final dx = rx + tx + (pixDone % tw);
+              final dy = ry + ty + (pixDone ~/ tw);
+              if (dx < width && dy < height) {
+                final dIdx = (dy * width + dx) * 4;
+                _rgbaBuffer[dIdx] = r;
+                _rgbaBuffer[dIdx + 1] = g;
+                _rgbaBuffer[dIdx + 2] = b;
+                _rgbaBuffer[dIdx + 3] = 255;
+              }
+            }
+          }
+        } else if (sub >= 130) {
+          // Palette RLE
+          final palSize = sub - 128;
+          for (int p = 0; p < palSize; p++) {
+            if (pos + 2 >= data.length) return;
+            palB[p] = data[pos++];
+            palG[p] = data[pos++];
+            palR[p] = data[pos++];
+          }
+          int pixDone = 0;
+          final totalPix = tw * th;
+          while (pixDone < totalPix) {
+            if (pos >= data.length) return;
+            final code = data[pos++];
+            final palIdx = code & 0x7F;
+            int runLen = 1;
+            if ((code & 0x80) != 0) {
+              int rb;
+              do {
+                if (pos >= data.length) return;
+                rb = data[pos++];
+                runLen += rb;
+              } while (rb == 255);
+            }
+            final r = palIdx < palSize ? palR[palIdx] : 0;
+            final g = palIdx < palSize ? palG[palIdx] : 0;
+            final b = palIdx < palSize ? palB[palIdx] : 0;
+            for (int k = 0; k < runLen && pixDone < totalPix; k++, pixDone++) {
+              final dx = rx + tx + (pixDone % tw);
+              final dy = ry + ty + (pixDone ~/ tw);
+              if (dx < width && dy < height) {
+                final dIdx = (dy * width + dx) * 4;
+                _rgbaBuffer[dIdx] = r;
+                _rgbaBuffer[dIdx + 1] = g;
+                _rgbaBuffer[dIdx + 2] = b;
+                _rgbaBuffer[dIdx + 3] = 255;
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   Future<void> _receiveLoop() async {
@@ -834,6 +1046,7 @@ class VncRfbClient {
         if (msgType == 0) {
           final hdr = await reader.readExact(3);
           final numRects = ByteData.sublistView(hdr).getUint16(1, Endian.big);
+          bool drewPixels = false;
           for (int r = 0; r < numRects; r++) {
             final rectHdr = await reader.readExact(12);
             final rbd = ByteData.sublistView(rectHdr);
@@ -843,32 +1056,36 @@ class VncRfbClient {
             final rh = rbd.getUint16(6, Endian.big);
             final encoding = rbd.getInt32(8, Endian.big);
 
-            if (encoding == -223) {
-              width = rw;
-              height = rh;
-              _rgbaBuffer = Uint8List(width * height * 4);
-              for (int i = 3; i < _rgbaBuffer.length; i += 4) {
-                _rgbaBuffer[i] = 255;
+            if (encoding == -224) {
+              // LastRect pseudo-encoding
+              break;
+            } else if (encoding == -223) {
+              // DesktopSize pseudo-encoding
+              if (rw > 0 && rh > 0) {
+                width = rw;
+                height = rh;
+                _rgbaBuffer = Uint8List(width * height * 4);
+                for (int i = 3; i < _rgbaBuffer.length; i += 4) {
+                  _rgbaBuffer[i] = 255;
+                }
+              }
+              continue;
+            } else if (encoding == -239) {
+              // Cursor / RichCursor pseudo-encoding: consume pixel + bitmask bytes to keep stream aligned
+              if (rw > 0 && rh > 0) {
+                final cursorBytes = rw * rh * 4 + ((rw + 7) ~/ 8) * rh;
+                await reader.readExact(cursorBytes);
               }
               continue;
             } else if (encoding == 0) {
-              final rawBytes = await reader.readExact(rw * rh * 4);
-              for (int row = 0; row < rh; row++) {
-                final dstY = ry + row;
-                if (dstY >= height) break;
-                final srcOff = row * rw * 4;
-                final dstOff = (dstY * width + rx) * 4;
-                final copyPixels = (rx + rw <= width) ? rw : (width - rx);
-                for (int col = 0; col < copyPixels; col++) {
-                  final sIdx = srcOff + col * 4;
-                  final dIdx = dstOff + col * 4;
-                  _rgbaBuffer[dIdx] = rawBytes[sIdx];
-                  _rgbaBuffer[dIdx + 1] = rawBytes[sIdx + 1];
-                  _rgbaBuffer[dIdx + 2] = rawBytes[sIdx + 2];
-                  _rgbaBuffer[dIdx + 3] = 255;
-                }
+              // Raw (32bpp BGRA)
+              if (rw > 0 && rh > 0) {
+                final rawBytes = await reader.readExact(rw * rh * 4);
+                _blitBgraPixels(rx, ry, rw, rh, rawBytes);
+                drewPixels = true;
               }
             } else if (encoding == 1) {
+              // CopyRect
               final cpBytes = await reader.readExact(4);
               final cpBd = ByteData.sublistView(cpBytes);
               final srcX = cpBd.getUint16(0, Endian.big);
@@ -902,9 +1119,104 @@ class VncRfbClient {
                   _rgbaBuffer[dIdx + 3] = 255;
                 }
               }
+              drewPixels = true;
+            } else if (encoding == 2) {
+              // RRE (Rise-and-Run-length Encoding)
+              final rreHdr = await reader.readExact(8);
+              final numSub = ByteData.sublistView(rreHdr).getUint32(0, Endian.big);
+              _fillSolidRect(rx, ry, rw, rh, rreHdr[6], rreHdr[5], rreHdr[4]);
+              if (numSub > 0 && numSub < 262144) {
+                final subBuf = await reader.readExact(numSub * 12);
+                final sbd = ByteData.sublistView(subBuf);
+                for (int s = 0; s < numSub; s++) {
+                  final base = s * 12;
+                  final sr = subBuf[base + 2];
+                  final sg = subBuf[base + 1];
+                  final sb = subBuf[base];
+                  final sx = sbd.getUint16(base + 4, Endian.big);
+                  final sy = sbd.getUint16(base + 6, Endian.big);
+                  final sw = sbd.getUint16(base + 8, Endian.big);
+                  final sh = sbd.getUint16(base + 10, Endian.big);
+                  _fillSolidRect(rx + sx, ry + sy, sw, sh, sr, sg, sb);
+                }
+              }
+              drewPixels = true;
+            } else if (encoding == 5) {
+              // Hextile (RFC 6143 Section 7.7.4)
+              int bgR = 0, bgG = 0, bgB = 0;
+              int fgR = 255, fgG = 255, fgB = 255;
+              for (int ty = 0; ty < rh; ty += 16) {
+                final th = (ty + 16 <= rh) ? 16 : (rh - ty);
+                for (int tx = 0; tx < rw; tx += 16) {
+                  final tw = (tx + 16 <= rw) ? 16 : (rw - tx);
+                  final subMask = (await reader.readExact(1))[0];
+                  if ((subMask & 0x01) != 0) {
+                    final tileRaw = await reader.readExact(tw * th * 4);
+                    _blitBgraPixels(rx + tx, ry + ty, tw, th, tileRaw);
+                    continue;
+                  }
+                  if ((subMask & 0x02) != 0) {
+                    final bgPx = await reader.readExact(4);
+                    bgB = bgPx[0];
+                    bgG = bgPx[1];
+                    bgR = bgPx[2];
+                  }
+                  _fillSolidRect(rx + tx, ry + ty, tw, th, bgR, bgG, bgB);
+                  if ((subMask & 0x04) != 0) {
+                    final fgPx = await reader.readExact(4);
+                    fgB = fgPx[0];
+                    fgG = fgPx[1];
+                    fgR = fgPx[2];
+                  }
+                  if ((subMask & 0x08) != 0) {
+                    final nSub = (await reader.readExact(1))[0];
+                    final coloured = (subMask & 0x10) != 0;
+                    final perSub = coloured ? 6 : 2;
+                    final subData = await reader.readExact(nSub * perSub);
+                    for (int s = 0; s < nSub; s++) {
+                      final off = s * perSub;
+                      final sr = coloured ? subData[off + 2] : fgR;
+                      final sg = coloured ? subData[off + 1] : fgG;
+                      final sb = coloured ? subData[off] : fgB;
+                      final xy = subData[off + (coloured ? 4 : 0)];
+                      final wh = subData[off + (coloured ? 5 : 1)];
+                      final sx = (xy >> 4) & 0x0F;
+                      final sy = xy & 0x0F;
+                      final sw = ((wh >> 4) & 0x0F) + 1;
+                      final sh = (wh & 0x0F) + 1;
+                      _fillSolidRect(rx + tx + sx, ry + ty + sy, sw, sh, sr, sg, sb);
+                    }
+                  }
+                }
+              }
+              drewPixels = true;
+            } else if (encoding == 6) {
+              // Zlib (stateful stream)
+              final zLenBuf = await reader.readExact(4);
+              final zLen = ByteData.sublistView(zLenBuf).getUint32(0, Endian.big);
+              if (zLen > 0) {
+                final comp = await reader.readExact(zLen);
+                final rawBytes = _inflateStateful(_zlibFilter!, comp);
+                _blitBgraPixels(rx, ry, rw, rh, rawBytes);
+                drewPixels = true;
+              }
+            } else if (encoding == 16) {
+              // ZRLE (RFC 6143 Section 7.7.6 stateful zlib + 64x64 CPIXEL tiles)
+              final zLenBuf = await reader.readExact(4);
+              final zLen = ByteData.sublistView(zLenBuf).getUint32(0, Endian.big);
+              if (zLen > 0) {
+                final comp = await reader.readExact(zLen);
+                final tileBytes = _inflateStateful(_zrleFilter!, comp);
+                _decodeZrleRect(rx, ry, rw, rh, tileBytes);
+                drewPixels = true;
+              }
             }
           }
-          await _emitDecodedImage();
+          if (drewPixels || !_receivedAnyFrame) {
+            _receivedAnyFrame = true;
+            _initialFramePulse?.cancel();
+            await _emitDecodedImage();
+          }
           _sendFramebufferUpdateRequest(incremental: true);
         } else if (msgType == 1) {
           final hdr = await reader.readExact(5);
@@ -953,6 +1265,17 @@ class VncRfbClient {
     sock.add(pkt.buffer.asUint8List());
   }
 
+  /// Sends VNC RFB vertical scroll wheel ticks (Bit 3 = `0x08` Wheel Up, Bit 4 = `0x10` Wheel Down).
+  void sendMouseWheel(int x, int y, int delta) {
+    if (delta == 0) return;
+    final mask = delta > 0 ? 0x08 : 0x10;
+    final steps = (delta.abs() / 90).ceil().clamp(1, 4);
+    for (int i = 0; i < steps; i++) {
+      sendPointerEvent(x, y, mask);
+      sendPointerEvent(x, y, 0);
+    }
+  }
+
   void sendKeySym(int keysym, {bool? down}) {
     final sock = _socket;
     if (sock == null || !_running) return;
@@ -974,6 +1297,10 @@ class VncRfbClient {
 
   Future<void> _cleanupSocket() async {
     _running = false;
+    _initialFramePulse?.cancel();
+    _initialFramePulse = null;
+    _zlibFilter = null;
+    _zrleFilter = null;
     await _reader?.dispose();
     _reader = null;
     try {

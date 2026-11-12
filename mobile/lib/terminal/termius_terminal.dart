@@ -830,6 +830,9 @@ class TermiusInteractiveTerminal extends StatefulWidget {
   final VoidCallback onOpenThemePicker;
   final VoidCallback onOpenSnippetsStudio;
   final void Function(int cols, int rows)? onTerminalResize;
+  final bool showAccessoryDeck;
+  final ValueChanged<double>? onFontSizeChanged;
+  final VoidCallback? onUserInteraction;
 
   const TermiusInteractiveTerminal({
     super.key,
@@ -843,6 +846,9 @@ class TermiusInteractiveTerminal extends StatefulWidget {
     required this.onOpenThemePicker,
     required this.onOpenSnippetsStudio,
     this.onTerminalResize,
+    this.showAccessoryDeck = true,
+    this.onFontSizeChanged,
+    this.onUserInteraction,
   });
 
   @override
@@ -860,6 +866,9 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
   bool _stickyAlt = false;
   bool _cursorBlinkVisible = true;
   bool _showQuickSnippetsStrip = true;
+  bool _softWrapLines = true;
+  bool _isScrolledUp = false;
+  double _pinchBaseFont = 13.0;
   bool _suppressImeCallback = false;
   int _lastCols = 0;
   int _lastRows = 0;
@@ -868,6 +877,7 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScrollPositionChanged);
     _imeController = TextEditingController.fromValue(
       const TextEditingValue(
         text: _kSentinel,
@@ -902,6 +912,25 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
     _imeFocusNode.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _onScrollPositionChanged() {
+    if (!_scrollController.hasClients) return;
+    final distFromBottom =
+        _scrollController.position.maxScrollExtent - _scrollController.offset;
+    final up = distFromBottom > 48;
+    if (up != _isScrolledUp && mounted) {
+      setState(() => _isScrolledUp = up);
+    }
+  }
+
+  void _scrollToBottom() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   void _onBufferUpdated() {
@@ -1165,7 +1194,21 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
               return GestureDetector(
                 key: const ValueKey('termius_terminal_surface'),
                 behavior: HitTestBehavior.opaque,
-                onTap: _focusTerminal,
+                onTap: () {
+                  widget.onUserInteraction?.call();
+                  _focusTerminal();
+                },
+                onScaleStart: (_) {
+                  _pinchBaseFont = widget.fontSize;
+                },
+                onScaleUpdate: (details) {
+                  if (details.pointerCount >= 2 && widget.onFontSizeChanged != null) {
+                    final nextSize = (_pinchBaseFont * details.scale).clamp(10.0, 18.0);
+                    if ((nextSize - widget.fontSize).abs() >= 0.35) {
+                      widget.onFontSizeChanged!(double.parse(nextSize.toStringAsFixed(1)));
+                    }
+                  }
+                },
                 child: Container(
                   width: double.infinity,
                   decoration: BoxDecoration(
@@ -1215,18 +1258,85 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
                         controller: _scrollController,
                         child: ListView.builder(
                           controller: _scrollController,
-                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
+                          padding: const EdgeInsets.fromLTRB(14, 10, 14, 18),
                           itemCount: widget.buffer.lineCount,
                           itemBuilder: (context, rowIdx) {
-                            return Text.rich(
+                            final richRow = Text.rich(
                               TextSpan(
                                 style: baseTextStyle,
                                 children: [_buildTerminalLineSpan(rowIdx)],
                               ),
+                              softWrap: _softWrapLines,
+                              overflow: _softWrapLines ? TextOverflow.clip : TextOverflow.visible,
+                            );
+                            if (_softWrapLines) return richRow;
+                            return SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: richRow,
                             );
                           },
                         ),
                       ),
+                      // Terminal Geometry & Mode Micro-Pill (top-right subtle telemetry)
+                      Positioned(
+                        top: 8,
+                        right: 10,
+                        child: IgnorePointer(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+                            decoration: BoxDecoration(
+                              color: theme.chromeSurface.withValues(alpha: 0.78),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: theme.border.withValues(alpha: 0.85)),
+                            ),
+                            child: Text(
+                              '${cols}x$rows • ${widget.fontSize.toStringAsFixed(0)}pt',
+                              style: TextStyle(
+                                fontFamily: 'monospace',
+                                fontSize: 9.5,
+                                fontFeatures: const [FontFeature.tabularFigures()],
+                                color: theme.foreground.withValues(alpha: 0.62),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      // Scroll-to-Bottom Pill when viewing history
+                      if (_isScrolledUp)
+                        Positioned(
+                          right: 12,
+                          bottom: 10,
+                          child: Material(
+                            color: theme.chromeSurface.withValues(alpha: 0.94),
+                            borderRadius: BorderRadius.circular(99),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(99),
+                              onTap: _scrollToBottom,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(99),
+                                  border: Border.all(color: theme.cursor.withValues(alpha: 0.6)),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.south_rounded, size: 13, color: theme.cursor),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      'Bottom',
+                                      style: TextStyle(
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w700,
+                                        color: theme.foreground,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -1235,18 +1345,20 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
           ),
         ),
 
-        // Termius-Class Tactile Accessory Bar & Quick Snippets Strip
-        _buildTactileAccessoryDeck(theme),
+        // Termius-Class Tactile Accessory Bar & Quick Snippets Strip (harmonized with theme & auto-hideable)
+        if (widget.showAccessoryDeck) _buildTactileAccessoryDeck(theme),
       ],
     );
   }
 
   Widget _buildTactileAccessoryDeck(TerminalThemePreset theme) {
+    final deckBg = theme.chromeSurface;
+    final deckBorder = theme.border;
     return Container(
-      decoration: const BoxDecoration(
-        color: Color(0xFF0E1420),
+      decoration: BoxDecoration(
+        color: deckBg,
         border: Border(
-          top: BorderSide(color: Color(0xFF1F2B3E), width: 1),
+          top: BorderSide(color: deckBorder, width: 1),
         ),
       ),
       child: Column(
@@ -1255,11 +1367,12 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
           // Optional Quick-Launch Snippets Strip (1-tap DevOps & Custom Snippets)
           if (_showQuickSnippetsStrip)
             Container(
-              height: 36,
+              height: 34,
               padding: const EdgeInsets.symmetric(horizontal: 8),
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
+                color: theme.chromeSurface,
                 border: Border(
-                  bottom: BorderSide(color: Color(0xFF182233), width: 1),
+                  bottom: BorderSide(color: theme.border, width: 1),
                 ),
               ),
               child: Row(
@@ -1473,11 +1586,21 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
                     label: 'Paste',
                     onTap: _pasteClipboard,
                   ),
+                  _buildKeycap(
+                    label: _softWrapLines ? 'Wrap' : 'NoWrap',
+                    active: !_softWrapLines,
+                    onTap: () => setState(() => _softWrapLines = !_softWrapLines),
+                  ),
+                  _buildIconKeycap(
+                    icon: Icons.palette_outlined,
+                    tooltip: 'Terminal Themes',
+                    onTap: widget.onOpenThemePicker,
+                  ),
                   _buildIconKeycap(
                     icon: _showQuickSnippetsStrip
                         ? Icons.expand_more_rounded
                         : Icons.bolt_rounded,
-                    tooltip: 'Toggle Snippets Strip',
+                    tooltip: 'Toggle Quick Snippets Bar',
                     active: _showQuickSnippetsStrip,
                     onTap: () => setState(() => _showQuickSnippetsStrip = !_showQuickSnippetsStrip),
                   ),

@@ -223,12 +223,17 @@ class RdpFfiClient {
       if (Platform.isAndroid) {
         _cachedLib = ffi.DynamicLibrary.open('libjaladesk_freerdp.so');
       } else if (Platform.isMacOS) {
-        final localPath = '${Directory.current.path}/libjaladesk_freerdp.dylib';
-        if (File(localPath).existsSync()) {
-          _cachedLib = ffi.DynamicLibrary.open(localPath);
-        } else {
-          _cachedLib = ffi.DynamicLibrary.open('libjaladesk_freerdp.dylib');
+        final candidates = [
+          '${Directory.current.path}/libjaladesk_freerdp.dylib',
+          '${Directory.current.path}/build/libjaladesk_freerdp.dylib',
+        ];
+        for (final c in candidates) {
+          if (File(c).existsSync()) {
+            _cachedLib = ffi.DynamicLibrary.open(c);
+            return _cachedLib;
+          }
         }
+        _cachedLib = ffi.DynamicLibrary.open('libjaladesk_freerdp.dylib');
       } else if (Platform.isIOS) {
         _cachedLib = ffi.DynamicLibrary.process();
       }
@@ -383,7 +388,8 @@ class RdpFfiClient {
 
   void _startFramePump() {
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 24), (_) {
+    // 60fps low-latency frame pump (16ms cadence + immediate catch-up when decode completes)
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
       if (_disposed || _handle == ffi.nullptr || _decodingFrame) return;
       _pollStateOnce();
       if (state == -1 || state == 2) {
@@ -425,14 +431,31 @@ class RdpFfiClient {
         _decodingFrame = false;
         if (!_disposed) {
           onFrame(img, fw, fh, statusText);
+          // Immediately catch up if FreeRDP pushed a newer frame while GPU texture uploaded
+          if (_handle != ffi.nullptr && _pSeq != null) {
+            _pollStateOnce();
+            final latestSeq = _pSeq!.value;
+            if (state == 1 && latestSeq > _lastFrameSeq && width > 0 && height > 0) {
+              _lastFrameSeq = latestSeq;
+              _pullAndDecodeFrame();
+            }
+          }
         }
       },
     );
   }
 
+  int _lastSentMouseX = -1;
+  int _lastSentMouseY = -1;
+
   void sendMouseMove(int x, int y) {
     if (_disposed || _handle == ffi.nullptr) return;
-    _fnSendMouse(_handle, x.clamp(0, width - 1), y.clamp(0, height - 1), RdpMouseFlags.move);
+    final cx = x.clamp(0, width - 1);
+    final cy = y.clamp(0, height - 1);
+    if (cx == _lastSentMouseX && cy == _lastSentMouseY) return;
+    _lastSentMouseX = cx;
+    _lastSentMouseY = cy;
+    _fnSendMouse(_handle, cx, cy, RdpMouseFlags.move);
   }
 
   void sendMouseClick(int x, int y, {bool rightClick = false, bool doubleClick = false}) {

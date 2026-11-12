@@ -2,14 +2,19 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jaladesk_mobile/main.dart';
+import 'package:jaladesk_mobile/protocols/desktop_gesture_surface.dart';
 import 'package:jaladesk_mobile/protocols/rdp_ffi_client.dart';
 import 'package:jaladesk_mobile/protocols/ssh_bastion_tunnel.dart';
 import 'package:jaladesk_mobile/protocols/vnc_rfb_client.dart';
+import 'package:jaladesk_mobile/security/vault_security_service.dart';
+import 'package:jaladesk_mobile/terminal/sftp_transfer_service.dart';
 import 'package:jaladesk_mobile/terminal/termius_terminal.dart';
 import 'package:pointycastle/export.dart' as pc;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -333,7 +338,7 @@ void main() {
     await tester.tap(find.text('uptime'));
     await tester.pumpAndSettle();
     expect(find.textContaining('load average:'), findsOneWidget);
-    await tester.tap(find.text('SFTP Check'));
+    await tester.tap(find.byKey(const ValueKey('seg_ssh_sftp')));
     await tester.pumpAndSettle();
     expect(find.text('/etc/nginx/conf.d'), findsOneWidget);
 
@@ -723,7 +728,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // Switch to SFTP Check mode
-    await tester.tap(find.text('SFTP Check'));
+    await tester.tap(find.byKey(const ValueKey('seg_ssh_sftp')));
     await tester.pumpAndSettle();
 
     // In SFTP single-pane mode: SSH terminal keybar (^C, Paste) MUST be completely hidden!
@@ -1108,5 +1113,620 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('SSH Port Forwarding Studio (ssh -L)'), findsOneWidget);
     expect(find.textContaining('Batam SSH Bastion'), findsWidgets);
+  });
+
+  test('VaultAtRestCipher (AES-256-GCM), VaultPinHasher (PBKDF2), and SshKnownHostsStore (TOFU/MITM) enforce Zero-Trust security', () async {
+    SharedPreferences.setMockInitialValues({
+      'legacy_plain_hosts': '[{"id":"h-legacy","name":"Legacy Server"}]',
+    });
+    final prefs = await SharedPreferences.getInstance();
+
+    // 1. Transparent legacy plaintext migration
+    final migrated = await VaultAtRestCipher.decryptFromPrefs(prefs, 'legacy_plain_hosts');
+    expect(migrated, contains('Legacy Server'));
+
+    // 2. AES-256-GCM at-rest encryption (`jseal:v1:`)
+    const secretPayload = '{"hosts":[{"id":"h1","password":"UltraSecretPassword#2026"}]}';
+    final sealed = await VaultAtRestCipher.encryptForPrefs(prefs, secretPayload);
+    expect(sealed.startsWith(VaultAtRestCipher.envelopePrefix), isTrue);
+    expect(sealed, isNot(contains('UltraSecretPassword#2026')));
+    await prefs.setString('sealed_hosts', sealed);
+    final decrypted = await VaultAtRestCipher.decryptFromPrefs(prefs, 'sealed_hosts');
+    expect(decrypted, equals(secretPayload));
+
+    // 3. PBKDF2-HMAC-SHA256 App-Lock PIN hashing & constant-time verification
+    final pinRecord = VaultPinHasher.hashPin('284691');
+    expect(pinRecord.startsWith('pbkdf2:'), isTrue);
+    expect(VaultPinHasher.verifyPin('284691', pinRecord), isTrue);
+    expect(VaultPinHasher.verifyPin('000000', pinRecord), isFalse);
+
+    // 4. SSH Known Hosts TOFU pinning & MITM mismatch detection
+    final store = SshKnownHostsStore();
+    final keyA = Uint8List.fromList(List<int>.generate(16, (i) => i + 10));
+    final keyAttacker = Uint8List.fromList(List<int>.generate(16, (i) => 0xAA ^ i));
+
+    // First connection -> Trust On First Use (pins keyA)
+    final firstOk = await store.verifyOrPin(
+      host: '10.28.99.203',
+      port: 2345,
+      keyType: 'ssh-ed25519',
+      fingerprint: keyA,
+    );
+    expect(firstOk, isTrue);
+    expect(store.entries.length, 1);
+
+    // Reconnect with identical key -> silently trusted
+    bool mismatchTriggered = false;
+    final secondOk = await store.verifyOrPin(
+      host: '10.28.99.203',
+      port: 2345,
+      keyType: 'ssh-ed25519',
+      fingerprint: keyA,
+      onMismatch: (_) async {
+        mismatchTriggered = true;
+        return false;
+      },
+    );
+    expect(secondOk, isTrue);
+    expect(mismatchTriggered, isFalse);
+
+    // Reconnect with altered host key -> triggers MITM warning and aborts when rejected!
+    SshHostKeyMismatchAlert? capturedAlert;
+    final mitmBlocked = await store.verifyOrPin(
+      host: '10.28.99.203',
+      port: 2345,
+      keyType: 'ssh-ed25519',
+      fingerprint: keyAttacker,
+      onMismatch: (alert) async {
+        capturedAlert = alert;
+        return false;
+      },
+    );
+    expect(mitmBlocked, isFalse);
+    expect(capturedAlert, isNotNull);
+    expect(capturedAlert!.endpoint, '10.28.99.203:2345');
+  });
+
+  test('VncRfbClient decodes compressed Zlib (6), Hextile (5), ZRLE (16) & LastRect (-224) with native BGRA32 fidelity', () async {
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close());
+
+    Uint8List deflateSyncFlush(RawZLibFilter deflater, Uint8List input) {
+      deflater.process(input, 0, input.length);
+      final out = BytesBuilder(copy: false);
+      List<int>? chunk;
+      while ((chunk = deflater.processed(flush: true, end: false)) != null) {
+        if (chunk!.isEmpty) break;
+        out.add(chunk);
+      }
+      return out.takeBytes();
+    }
+
+    server.listen((Socket sock) async {
+      sock.add(ascii.encode('RFB 003.008\n'));
+      await sock.flush();
+
+      final buffer = <int>[];
+      int stage = 0; // 0: ver, 1: secType, 2: clientInit, 3: post-init
+      bool sentCompressedFrame = false;
+
+      await for (final chunk in sock) {
+        buffer.addAll(chunk);
+        if (stage == 0 && buffer.length >= 12) {
+          buffer.removeRange(0, 12);
+          stage = 1;
+          sock.add([1, 1]); // SecurityType 1 (None)
+          await sock.flush();
+        }
+        if (stage == 1 && buffer.isNotEmpty) {
+          buffer.removeAt(0);
+          stage = 2;
+          sock.add([0, 0, 0, 0]); // SecurityResult OK
+          await sock.flush();
+        }
+        if (stage == 2 && buffer.isNotEmpty) {
+          buffer.removeAt(0); // shared=1
+          stage = 3;
+          // ServerInit 16x16 desktop
+          final nameBytes = utf8.encode('VNC-ZRLE-ZLIB');
+          final init = ByteData(24 + nameBytes.length)
+            ..setUint16(0, 16)
+            ..setUint16(2, 16)
+            ..setUint8(4, 32)
+            ..setUint8(5, 24)
+            ..setUint8(6, 0)
+            ..setUint8(7, 1)
+            ..setUint16(8, 255)
+            ..setUint16(10, 255)
+            ..setUint16(12, 255)
+            ..setUint8(14, 16)
+            ..setUint8(15, 8)
+            ..setUint8(16, 0)
+            ..setUint32(20, nameBytes.length);
+          final out = Uint8List(24 + nameBytes.length);
+          out.setAll(0, init.buffer.asUint8List());
+          out.setAll(24, nameBytes);
+          sock.add(out);
+          await sock.flush();
+        }
+        if (stage == 3 && !sentCompressedFrame && buffer.any((b) => b == 3)) {
+          sentCompressedFrame = true;
+          final zlibStream = RawZLibFilter.deflateFilter(level: 6);
+          final zrleStream = RawZLibFilter.deflateFilter(level: 6);
+
+          final msg = BytesBuilder(copy: false);
+          // FramebufferUpdate with numRects=10 (terminated early by LastRect at rect #4!)
+          msg.add([0, 0, 0, 10]);
+
+          // Rect 1: Zlib (6) @ (0,0, 8x8) -> BGRA [B=0x11, G=0x22, R=0xEE, 0xFF]
+          final zlibRaw = Uint8List(8 * 8 * 4);
+          for (int i = 0; i < zlibRaw.length; i += 4) {
+            zlibRaw[i] = 0x11;
+            zlibRaw[i + 1] = 0x22;
+            zlibRaw[i + 2] = 0xEE;
+            zlibRaw[i + 3] = 0xFF;
+          }
+          final zlibComp = deflateSyncFlush(zlibStream, zlibRaw);
+          final r1 = ByteData(16)
+            ..setUint16(0, 0)
+            ..setUint16(2, 0)
+            ..setUint16(4, 8)
+            ..setUint16(6, 8)
+            ..setInt32(8, 6)
+            ..setUint32(12, zlibComp.length);
+          msg.add(r1.buffer.asUint8List());
+          msg.add(zlibComp);
+
+          // Rect 2: Hextile (5) @ (8,0, 8x8) -> subMask 0x02 (BackgroundSpecified) BGRA [0x44, 0xCC, 0x33, 0xFF]
+          final r2 = ByteData(12)
+            ..setUint16(0, 8)
+            ..setUint16(2, 0)
+            ..setUint16(4, 8)
+            ..setUint16(6, 8)
+            ..setInt32(8, 5);
+          msg.add(r2.buffer.asUint8List());
+          msg.add([0x02, 0x44, 0xCC, 0x33, 0xFF]);
+
+          // Rect 3: ZRLE (16) @ (0,8, 8x8) -> subencoding=1 (Solid CPIXEL [B=0x99, G=0x55, R=0xAA])
+          final zrleComp = deflateSyncFlush(zrleStream, Uint8List.fromList([1, 0x99, 0x55, 0xAA]));
+          final r3 = ByteData(16)
+            ..setUint16(0, 0)
+            ..setUint16(2, 8)
+            ..setUint16(4, 8)
+            ..setUint16(6, 8)
+            ..setInt32(8, 16)
+            ..setUint32(12, zrleComp.length);
+          msg.add(r3.buffer.asUint8List());
+          msg.add(zrleComp);
+
+          // Rect 4: LastRect (-224) -> terminates the 10-rect update cleanly!
+          final r4 = ByteData(12)
+            ..setUint16(0, 0)
+            ..setUint16(2, 0)
+            ..setUint16(4, 0)
+            ..setUint16(6, 0)
+            ..setInt32(8, -224);
+          msg.add(r4.buffer.asUint8List());
+
+          sock.add(msg.takeBytes());
+          await sock.flush();
+        }
+      }
+    });
+
+    final frameCompleter = Completer<ui.Image>();
+    final vnc = VncRfbClient(
+      host: '127.0.0.1',
+      port: server.port,
+      password: '',
+      onFrame: (img, w, h, status) {
+        if (!frameCompleter.isCompleted) {
+          frameCompleter.complete(img);
+        }
+      },
+      onStatus: (s, {isError = false}) {},
+    );
+    addTearDown(() => vnc.dispose());
+
+    await vnc.connect();
+    final decodedImg = await frameCompleter.future.timeout(const Duration(seconds: 4));
+    expect(decodedImg.width, 16);
+    expect(decodedImg.height, 16);
+
+    final rgbaByteData = await decodedImg.toByteData(format: ui.ImageByteFormat.rawRgba);
+    expect(rgbaByteData, isNotNull);
+    final px = rgbaByteData!.buffer.asUint8List();
+
+    // Verify Zlib pixel @ (2, 2) -> R=0xEE, G=0x22, B=0x11, A=0xFF
+    const pZlib = (2 * 16 + 2) * 4;
+    expect([px[pZlib], px[pZlib + 1], px[pZlib + 2], px[pZlib + 3]], [0xEE, 0x22, 0x11, 0xFF]);
+
+    // Verify Hextile pixel @ (10, 2) -> R=0x33, G=0xCC, B=0x44, A=0xFF
+    const pHex = (2 * 16 + 10) * 4;
+    expect([px[pHex], px[pHex + 1], px[pHex + 2], px[pHex + 3]], [0x33, 0xCC, 0x44, 0xFF]);
+
+    // Verify ZRLE pixel @ (2, 10) -> R=0xAA, G=0x55, B=0x99, A=0xFF
+    const pZrle = (10 * 16 + 2) * 4;
+    expect([px[pZrle], px[pZrle + 1], px[pZrle + 2], px[pZrle + 3]], [0xAA, 0x55, 0x99, 0xFF]);
+  });
+
+  testWidgets('DesktopGestureSurface delivers 0ms Trackpad movement, Direct Touch click, and 2-finger Right-Click without Arena starvation',
+      (WidgetTester tester) async {
+    final xform = TransformationController();
+    addTearDown(xform.dispose);
+
+    Offset cursor = const Offset(0.5, 0.5);
+    int moveCount = 0;
+    int leftClicks = 0;
+    int rightClicks = 0;
+    bool trackpadMode = true;
+
+    late StateSetter rebuildHost;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (ctx, setHostState) {
+              rebuildHost = setHostState;
+              return SizedBox(
+                width: 400,
+                height: 300,
+                child: DesktopGestureSurface(
+                  transformationController: xform,
+                  desktopRect: const Rect.fromLTWH(0, 0, 400, 300),
+                  viewportSize: const Size(400, 300),
+                  canvasMargin: 0,
+                  isTrackpadMode: trackpadMode,
+                  viewOnly: false,
+                  cursorNorm: cursor,
+                  onCursorMoved: (norm, {isDragging = false}) {
+                    setHostState(() {
+                      cursor = norm;
+                      moveCount++;
+                    });
+                  },
+                  onLeftClick: (norm, {required isConsecutiveDoubleTap}) {
+                    cursor = norm;
+                    leftClicks++;
+                  },
+                  onRightClick: (norm) {
+                    cursor = norm;
+                    rightClicks++;
+                  },
+                  onLeftDragStart: (_) {},
+                  onLeftDragEnd: (_) {},
+                  onMouseWheel: (_, __) {},
+                  child: Container(color: Colors.black),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    // 1. Trackpad 1-finger drag moves virtual cursor immediately (no InteractiveViewer pan theft!)
+    final g1 = await tester.startGesture(const Offset(100, 100), pointer: 1);
+    await tester.pump(const Duration(milliseconds: 16));
+    await g1.moveBy(const Offset(60, 45));
+    await tester.pump(const Duration(milliseconds: 16));
+    await g1.up();
+    await tester.pump();
+    expect(moveCount, greaterThan(0));
+    expect(cursor.dx, greaterThan(0.55));
+    expect(cursor.dy, greaterThan(0.55));
+
+    // 2. Direct Touch 1-finger tap dispatches Left Click at 0ms without waiting 300ms for double-tap timeout
+    rebuildHost(() => trackpadMode = false);
+    await tester.pump();
+    final gTap = await tester.startGesture(const Offset(80, 60), pointer: 2);
+    await tester.pump(const Duration(milliseconds: 20));
+    await gTap.up();
+    // Do NOT pump 300ms — verify click already fired synchronously on pointer up!
+    expect(leftClicks, 1);
+    expect(cursor.dx, closeTo(80 / 400, 0.02));
+    expect(cursor.dy, closeTo(60 / 300, 0.02));
+
+    // 3. Two-finger tap dispatches Right Click
+    final fA = await tester.startGesture(const Offset(150, 150), pointer: 3);
+    final fB = await tester.startGesture(const Offset(210, 150), pointer: 4);
+    await tester.pump(const Duration(milliseconds: 30));
+    await fA.up();
+    await fB.up();
+    await tester.pump();
+    expect(rightClicks, 1);
+  });
+
+  test('SftpTransferService uploads & downloads files and nested directories recursively over live OpenSSH internal-sftp', () async {
+    final sshdBin = File('/usr/sbin/sshd');
+    final sshKeygenBin = File('/usr/bin/ssh-keygen');
+    expect(sshdBin.existsSync(), isTrue);
+    expect(sshKeygenBin.existsSync(), isTrue);
+
+    final tmpDir = await Directory.systemTemp.createTemp('jaladesk_sftp_xfer_');
+    addTearDown(() => tmpDir.delete(recursive: true));
+
+    final hostKeyPath = '${tmpDir.path}/ssh_host_ed25519_key';
+    final clientKeyPath = '${tmpDir.path}/id_ed25519';
+    expect((await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', hostKeyPath])).exitCode, 0);
+    expect((await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', clientKeyPath])).exitCode, 0);
+    final clientPrivateKeyPem = await File(clientKeyPath).readAsString();
+    final currentUser = Platform.environment['USER'] ?? (await Process.run('whoami', [])).stdout.toString().trim();
+
+    final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final sshPort = probe.port;
+    await probe.close();
+
+    final cfgPath = '${tmpDir.path}/sshd_sftp.conf';
+    await File(cfgPath).writeAsString([
+      'Port $sshPort',
+      'ListenAddress 127.0.0.1',
+      'HostKey $hostKeyPath',
+      'AuthorizedKeysFile $clientKeyPath.pub',
+      'PasswordAuthentication no',
+      'PubkeyAuthentication yes',
+      'UsePAM no',
+      'StrictModes no',
+      'Subsystem sftp internal-sftp',
+      'PidFile ${tmpDir.path}/sshd_sftp.pid',
+    ].join('\n'));
+
+    final sshdProc = await Process.start(sshdBin.path, ['-D', '-e', '-f', cfgPath]);
+    addTearDown(() => sshdProc.kill(ProcessSignal.sigterm));
+
+    for (int i = 0; i < 30; i++) {
+      try {
+        final s = await Socket.connect('127.0.0.1', sshPort, timeout: const Duration(milliseconds: 150));
+        s.destroy();
+        break;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+      }
+    }
+
+    final sock = await SSHSocket.connect('127.0.0.1', sshPort);
+    final client = SSHClient(
+      sock,
+      username: currentUser,
+      identities: SSHKeyPair.fromPem(clientPrivateKeyPem),
+    );
+    addTearDown(client.close);
+    await client.authenticated;
+    final sftp = await client.sftp();
+
+    // Prepare local source files & nested folder hierarchy
+    final localSrcRoot = Directory('${tmpDir.path}/local_src');
+    await Directory('${localSrcRoot.path}/release-bundle/configs/tls').create(recursive: true);
+    final singleUploadFile = File('${localSrcRoot.path}/deploy-manifest.json');
+    await singleUploadFile.writeAsString('{"version":"1.6.0+7","status":"ready"}');
+    await File('${localSrcRoot.path}/release-bundle/README.txt').writeAsString('JalaDesk SFTP recursive transfer');
+    await File('${localSrcRoot.path}/release-bundle/configs/nginx.conf').writeAsString('worker_processes auto;');
+    await File('${localSrcRoot.path}/release-bundle/configs/tls/ca.pem').writeAsString('-----BEGIN CERTIFICATE-----');
+
+    final remoteDropDir = Directory('${tmpDir.path}/remote_drop');
+    await remoteDropDir.create(recursive: true);
+
+    // 1. Upload file batch
+    final upFileRes = await SftpTransferService.uploadFilesBatch(
+      sftp: sftp,
+      localFiles: [singleUploadFile],
+      remoteDirectoryPath: remoteDropDir.path,
+    );
+    expect(upFileRes.isDone, isTrue);
+    expect(upFileRes.filesCompleted, 1);
+
+    // 2. Upload folder recursively
+    final upDirRes = await SftpTransferService.uploadDirectoryRecursive(
+      sftp: sftp,
+      localDir: Directory('${localSrcRoot.path}/release-bundle'),
+      remoteParentPath: remoteDropDir.path,
+    );
+    expect(upDirRes.isDone, isTrue);
+    expect(upDirRes.filesCompleted, 3);
+    expect(File('${remoteDropDir.path}/release-bundle/configs/tls/ca.pem').existsSync(), isTrue);
+
+    // 3. Download single file & recursive directory into local target folder
+    final localDownloadDir = Directory('${tmpDir.path}/downloaded_out');
+    await localDownloadDir.create(recursive: true);
+
+    final dlFileRes = await SftpTransferService.downloadRemoteFile(
+      sftp: sftp,
+      remoteFilePath: '${remoteDropDir.path}/deploy-manifest.json',
+      fileName: 'deploy-manifest.json',
+      customTargetDirectory: localDownloadDir,
+    );
+    expect(dlFileRes.isDone, isTrue);
+    expect(
+      await File('${localDownloadDir.path}/deploy-manifest.json').readAsString(),
+      '{"version":"1.6.0+7","status":"ready"}',
+    );
+
+    final dlDirRes = await SftpTransferService.downloadDirectoryRecursive(
+      sftp: sftp,
+      remoteDirPath: '${remoteDropDir.path}/release-bundle',
+      dirName: 'release-bundle',
+      customTargetDirectory: localDownloadDir,
+    );
+    expect(dlDirRes.isDone, isTrue);
+    expect(dlDirRes.filesCompleted, 3);
+    expect(
+      await File('${localDownloadDir.path}/release-bundle/configs/nginx.conf').readAsString(),
+      'worker_processes auto;',
+    );
+
+    // 4. Recursive remote folder delete
+    await SftpTransferService.deleteDirectoryRecursive(sftp, '${remoteDropDir.path}/release-bundle');
+    expect(Directory('${remoteDropDir.path}/release-bundle').existsSync(), isFalse);
+  });
+
+  testWidgets('Full-Screen Auto-Hide, Live Resume Duplicate-Connect Guard, Explicit Disconnect, and Vault App-Lock PIN work end-to-end',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    // Spin up a lightweight local RFB 3.8 server inside runAsync to verify LIVE Resume guard & Disconnect!
+    int rfbHandshakesCompleted = 0;
+    final List<Socket> serverSockets = <Socket>[];
+    late ServerSocket vncServer;
+    await tester.runAsync(() async {
+      vncServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      vncServer.listen(
+        (Socket sock) async {
+          sock.done.catchError((_) {});
+          serverSockets.add(sock);
+          try {
+            sock.add(ascii.encode('RFB 003.008\n'));
+            final buf = <int>[];
+            int stage = 0;
+            await for (final chunk in sock) {
+              buf.addAll(chunk);
+              if (stage == 0 && buf.length >= 12) {
+                buf.removeRange(0, 12);
+                stage = 1;
+                sock.add([1, 1]); // SecurityType 1 (None)
+              }
+              if (stage == 1 && buf.isNotEmpty) {
+                buf.removeAt(0);
+                stage = 2;
+                sock.add([0, 0, 0, 0]); // SecurityResult OK
+              }
+              if (stage == 2 && buf.isNotEmpty) {
+                buf.removeAt(0);
+                stage = 3;
+                rfbHandshakesCompleted++;
+                final name = utf8.encode('LIVE-VNC');
+                final init = ByteData(24 + name.length)
+                  ..setUint16(0, 32)
+                  ..setUint16(2, 24)
+                  ..setUint8(4, 32)
+                  ..setUint8(5, 24)
+                  ..setUint8(7, 1)
+                  ..setUint16(8, 255)
+                  ..setUint16(10, 255)
+                  ..setUint16(12, 255)
+                  ..setUint8(14, 16)
+                  ..setUint8(15, 8)
+                  ..setUint32(20, name.length);
+                final out = Uint8List(24 + name.length);
+                out.setAll(0, init.buffer.asUint8List());
+                out.setAll(24, name);
+                sock.add(out);
+              }
+            }
+          } catch (_) {}
+        },
+        onError: (_) {},
+      );
+    });
+
+    await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: false));
+    await tester.pumpAndSettle();
+
+    // 1. Add the local VNC server in Connections (with password so no credential prompt blocks)
+    await tester.tap(find.text('New Connection'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('VNC')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextField, 'Display Name (optional)'), 'Batam VNC Console');
+    await tester.enterText(find.widgetWithText(TextField, 'Host / IP Address *'), '127.0.0.1');
+    await tester.enterText(find.widgetWithText(TextField, 'Port *'), '${vncServer.port}');
+    await tester.ensureVisible(find.widgetWithText(TextField, 'Password'));
+    await tester.enterText(find.widgetWithText(TextField, 'Password'), 'secret');
+    await tester.tap(find.text('Save Host'));
+    await tester.pump();
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 80)));
+    await tester.pumpAndSettle();
+
+    // 2. Connect to Batam VNC Console (live RFB handshake #1)
+    expect(find.widgetWithText(FilledButton, 'Connect'), findsOneWidget);
+    await tester.runAsync(() async {
+      tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Connect')).onPressed!();
+      for (int i = 0; i < 30 && rfbHandshakesCompleted < 1; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(rfbHandshakesCompleted, 1);
+    expect(find.byKey(const ValueKey('btn_disconnect_desktop')), findsOneWidget);
+
+    // 3. Enter Full Screen -> verify HUD & shortcuts auto-hide after 3.5s, and reveal on tap!
+    await tester.tap(find.byKey(const ValueKey('btn_toggle_fullscreen')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('fullscreen_floating_hud')), findsOneWidget);
+    expect(find.byKey(const ValueKey('desktop_bottom_shortcut_bar')), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 3700));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('fullscreen_floating_hud')), findsNothing);
+    expect(find.byKey(const ValueKey('desktop_bottom_shortcut_bar')), findsNothing);
+    expect(find.byKey(const ValueKey('btn_reveal_fullscreen_hud')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('btn_reveal_fullscreen_hud')));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const ValueKey('fullscreen_floating_hud')), findsOneWidget);
+    expect(find.byKey(const ValueKey('desktop_bottom_shortcut_bar')), findsOneWidget);
+
+    // Exit Full Screen
+    await tester.tap(find.byKey(const ValueKey('btn_exit_fullscreen_pill')));
+    await tester.pump();
+
+    // 4. Return to Connections while LIVE -> verify `Resume` button & NO duplicate connection!
+    await tester.tap(find.text('Connections'));
+    await tester.pump();
+    expect(find.textContaining('LIVE'), findsWidgets);
+    expect(find.widgetWithText(FilledButton, 'Resume'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Resume'));
+    await tester.pump();
+    // Must still be handshake #1 (switched straight back to live tab without reconnecting!)
+    expect(rfbHandshakesCompleted, 1);
+
+    // 5. Explicit Disconnect button closes session cleanly
+    await tester.tap(find.byKey(const ValueKey('btn_disconnect_desktop')));
+    await tester.pump();
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 150)));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('btn_disconnect_desktop')), findsNothing);
+
+    // 6. Configure Vault App-Lock PIN -> Lock Vault -> Reject wrong PIN -> Unlock with right PIN
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.tap(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const Key('field_new_vault_pin')), '7391');
+    await tester.enterText(find.byKey(const Key('field_confirm_vault_pin')), '7391');
+    await tester.tap(find.byKey(const Key('btn_save_vault_pin')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('btn_lock_vault_now')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('vault_pin_lock_screen')), findsOneWidget);
+
+    await tester.enterText(find.byKey(const Key('field_unlock_vault_pin')), '0000');
+    await tester.tap(find.byKey(const Key('btn_unlock_vault_pin')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Incorrect Vault PIN'), findsOneWidget);
+
+    await tester.enterText(find.byKey(const Key('field_unlock_vault_pin')), '7391');
+    await tester.tap(find.byKey(const Key('btn_unlock_vault_pin')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('vault_pin_lock_screen')), findsNothing);
+    expect(find.text('Zero-Trust Hardware Enclave'), findsOneWidget);
+
+    await tester.runAsync(() async {
+      for (final s in serverSockets) {
+        try {
+          s.destroy();
+        } catch (_) {}
+      }
+      await vncServer.close();
+    });
   });
 }

@@ -245,7 +245,10 @@ class ActiveLocalPortForward {
         _ownedChain = ownedChain,
         startedAt = DateTime.now() {
     _acceptSub = _server.listen(
-      _handleIncomingSocket,
+      (Socket sock) {
+        sock.done.catchError((_) {});
+        unawaited(_handleIncomingSocket(sock).catchError((_) {}));
+      },
       onError: (_) {},
       cancelOnError: false,
     );
@@ -257,8 +260,11 @@ class ActiveLocalPortForward {
   bool get isClosed => _closed;
 
   Future<void> _handleIncomingSocket(Socket clientSocket) async {
+    clientSocket.done.catchError((_) {});
     if (_closed) {
-      clientSocket.destroy();
+      try {
+        clientSocket.destroy();
+      } catch (_) {}
       return;
     }
     try {
@@ -266,30 +272,9 @@ class ActiveLocalPortForward {
     } catch (_) {}
 
     SSHForwardChannel? forward;
-    try {
-      forward = await _exitSshClient
-          .forwardLocal(remoteHost, remotePort)
-          .timeout(const Duration(seconds: 10));
-    } catch (_) {
-      clientSocket.destroy();
-      return;
-    }
-
-    if (_closed) {
-      try {
-        await forward.close();
-      } catch (_) {}
-      clientSocket.destroy();
-      return;
-    }
-
-    _openSockets.add(clientSocket);
-    _openChannels.add(forward);
-    activeStreams++;
-    totalConnections++;
-    onStatsUpdated?.call();
-
     bool cleanedUp = false;
+    bool forwardReady = false;
+    final List<Uint8List> preForwardBuffer = <Uint8List>[];
     StreamSubscription<Uint8List>? tcpToSshSub;
     StreamSubscription<Uint8List>? sshToTcpSub;
 
@@ -302,19 +287,26 @@ class ActiveLocalPortForward {
       if (forward != null) {
         _openChannels.remove(forward);
       }
-      if (activeStreams > 0) activeStreams--;
+      if (activeStreams > 0 && forwardReady) activeStreams--;
       try {
         await forward?.close();
       } catch (_) {}
       try {
         clientSocket.destroy();
       } catch (_) {}
-      onStatsUpdated?.call();
+      if (forwardReady) {
+        onStatsUpdated?.call();
+      }
     }
 
+    // Attach error-safe listener synchronously so early ECONNRESET never escapes
     tcpToSshSub = clientSocket.listen(
       (Uint8List chunk) {
         if (cleanedUp || _closed) return;
+        if (!forwardReady) {
+          preForwardBuffer.add(Uint8List.fromList(chunk));
+          return;
+        }
         bytesSent += chunk.length;
         try {
           forward!.sink.add(chunk);
@@ -326,6 +318,42 @@ class ActiveLocalPortForward {
       onDone: () => unawaited(tearDownPair()),
       cancelOnError: true,
     );
+
+    try {
+      forward = await _exitSshClient
+          .forwardLocal(remoteHost, remotePort)
+          .timeout(const Duration(seconds: 10));
+    } catch (_) {
+      await tearDownPair();
+      return;
+    }
+
+    if (_closed || cleanedUp) {
+      try {
+        await forward.close();
+      } catch (_) {}
+      await tearDownPair();
+      return;
+    }
+
+    _openSockets.add(clientSocket);
+    _openChannels.add(forward);
+    forwardReady = true;
+    activeStreams++;
+    totalConnections++;
+    onStatsUpdated?.call();
+
+    for (final buffered in preForwardBuffer) {
+      if (cleanedUp || _closed) break;
+      bytesSent += buffered.length;
+      try {
+        forward.sink.add(buffered);
+      } catch (_) {
+        await tearDownPair();
+        return;
+      }
+    }
+    preForwardBuffer.clear();
 
     sshToTcpSub = forward.stream.listen(
       (Uint8List chunk) {
@@ -392,6 +420,7 @@ class SshBastionChain {
   static Future<SshBastionChain> connect(
     List<BastionHopSpec> hops, {
     void Function(String stage)? onStage,
+    FutureOr<bool> Function(BastionHopSpec hop, String keyType, Uint8List fingerprint)? onVerifyHopHostKey,
     Duration hopTimeout = const Duration(seconds: 9),
   }) async {
     if (hops.isEmpty) {
@@ -443,6 +472,9 @@ class SshBastionChain {
           username: hop.username.trim().isEmpty ? 'root' : hop.username.trim(),
           identities: identities,
           onPasswordRequest: () => hop.password,
+          onVerifyHostKey: onVerifyHopHostKey == null
+              ? null
+              : (String type, Uint8List fp) => onVerifyHopHostKey(hop, type, fp),
         );
 
         await client.authenticated.timeout(hopTimeout);
