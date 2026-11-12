@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -523,6 +525,8 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
     });
 
     final crumbs = _buildBreadcrumbs();
+    final mediaPadding = MediaQuery.paddingOf(context);
+    final symInsetX = math.max(mediaPadding.left, mediaPadding.right);
 
     return Container(
       color: const Color(0xFF0A0F19),
@@ -530,7 +534,7 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
         children: [
           // Top Path Breadcrumb & SFTP Control Bar
           Container(
-            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            padding: EdgeInsets.fromLTRB(symInsetX + 10, 8, symInsetX + 10, 8),
             decoration: const BoxDecoration(
               color: Color(0xFF0F1724),
               border: Border(
@@ -807,7 +811,7 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                         },
                         onLongPress: () => _showEntryActions(item),
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                          padding: EdgeInsets.symmetric(horizontal: symInsetX + 12, vertical: 9),
                           child: Row(
                             children: [
                               Container(

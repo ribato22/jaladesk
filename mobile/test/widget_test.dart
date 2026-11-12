@@ -14,6 +14,7 @@ import 'package:jaladesk_mobile/protocols/proxmox_ve_client.dart';
 import 'package:jaladesk_mobile/protocols/rdp_ffi_client.dart';
 import 'package:jaladesk_mobile/protocols/ssh_bastion_tunnel.dart';
 import 'package:jaladesk_mobile/protocols/vnc_rfb_client.dart';
+import 'package:jaladesk_mobile/security/vault_passcode_enclave.dart';
 import 'package:jaladesk_mobile/security/vault_security_service.dart';
 import 'package:jaladesk_mobile/terminal/sftp_transfer_service.dart';
 import 'package:jaladesk_mobile/terminal/termius_terminal.dart';
@@ -1718,29 +1719,42 @@ void main() {
     await tester.pump();
     expect(find.byKey(const ValueKey('btn_disconnect_desktop')), findsNothing);
 
-    // 6. Configure Vault App-Lock PIN -> Lock Vault -> Reject wrong PIN -> Unlock with right PIN
+    // 6. Configure Vault App-Lock PIN via pure UI numpad -> Lock Vault -> Reject wrong PIN -> Unlock with right PIN
     await tester.tap(find.text('Vault & 2FA'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.byKey(const Key('btn_configure_vault_pin')));
     await tester.tap(find.byKey(const Key('btn_configure_vault_pin')));
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byKey(const Key('field_new_vault_pin')), '7391');
-    await tester.enterText(find.byKey(const Key('field_confirm_vault_pin')), '7391');
-    await tester.tap(find.byKey(const Key('btn_save_vault_pin')));
+    expect(find.descendant(of: find.byType(VaultPinSetupSheet), matching: find.byType(TextField)), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('chip_pin_len_4')));
+    await tester.pumpAndSettle();
+    for (final d in ['7', '3', '9', '1']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    for (final d in ['7', '3', '9', '1']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('btn_lock_vault_now')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('vault_pin_lock_screen')), findsOneWidget);
+    expect(find.descendant(of: find.byType(VaultPinLockView), matching: find.byType(TextField)), findsNothing);
 
-    await tester.enterText(find.byKey(const Key('field_unlock_vault_pin')), '0000');
-    await tester.tap(find.byKey(const Key('btn_unlock_vault_pin')));
+    for (final d in ['0', '0', '0', '0']) {
+      await tester.tap(find.byKey(ValueKey('btn_pin_digit_$d')));
+      await tester.pump();
+    }
     await tester.pumpAndSettle();
     expect(find.textContaining('Incorrect Vault PIN'), findsOneWidget);
 
-    await tester.enterText(find.byKey(const Key('field_unlock_vault_pin')), '7391');
-    await tester.tap(find.byKey(const Key('btn_unlock_vault_pin')));
+    for (final d in ['7', '3', '9', '1']) {
+      await tester.tap(find.byKey(ValueKey('btn_pin_digit_$d')));
+      await tester.pump();
+    }
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('vault_pin_lock_screen')), findsNothing);
     expect(find.text('Zero-Trust Hardware Enclave'), findsOneWidget);
@@ -2040,7 +2054,19 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    // 1. Verify Jump Smart Pan (`Pan` / cropCover — 1:1 aspect Smart Pan, zero stretch) auto-enabled for widescreen VNC on portrait phone!
+    // 1. Verify VNC starts cleanly in `Fit` (`aspectFit` — 100% symmetric desktop visible) and cycles `Fit` -> `Fill` -> `Pan`!
+    expect(
+      find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Fit')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('btn_quick_cycle_fit')));
+    await tester.pump();
+    expect(
+      find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Fill')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('btn_quick_cycle_fit')));
+    await tester.pump();
     expect(
       find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Pan')),
       findsOneWidget,
@@ -2280,19 +2306,21 @@ void main() {
     await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
     await tester.pumpAndSettle();
 
-    // 1. Phone Landscape (915x412): NavigationRail on Connections, 100% full-width (NO NavigationRail) on RDP/VNC & SSH tabs
+    // 1. Phone Landscape (915x412): ZERO NavigationRail on ALL tabs (compact top navigation pills on Tab 0 & Tab 3)
     await tester.ensureVisible(find.text('Load Sample Lab'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Load Sample Lab'));
     await tester.pumpAndSettle();
-    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byType(NavigationRail), findsNothing);
+    expect(find.byKey(const ValueKey('landscape_nav_tab_0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('landscape_nav_tab_1')), findsOneWidget);
 
-    await tester.tap(find.byIcon(Icons.desktop_windows_outlined));
+    await tester.tap(find.byKey(const ValueKey('landscape_nav_tab_1')));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(find.byType(NavigationRail), findsNothing);
     expect(find.byKey(const ValueKey('btn_landscape_back_hosts')), findsOneWidget);
-    // Main 56px AppBar is omitted in Phone Landscape session view to maximize vertical remote canvas!
+    // Main AppBar is omitted in Phone Landscape session view to maximize vertical remote canvas!
     expect(find.text('Sapphire-Gold Zero-Trust Workspace'), findsNothing);
     // Standard Top-Left Vector Arrow Cursor renders (no legacy top-right near_me icon!)
     expect(find.byKey(const ValueKey('remote_vector_arrow_cursor')), findsOneWidget);
@@ -2301,10 +2329,11 @@ void main() {
     // Return to Connections via `btn_landscape_back_hosts`, then enter SSH & SFTP tab
     await tester.tap(find.byKey(const ValueKey('btn_landscape_back_hosts')));
     await tester.pumpAndSettle();
-    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byType(NavigationRail), findsNothing);
+    expect(find.byKey(const ValueKey('landscape_nav_tab_2')), findsOneWidget);
 
     // Verify SSH & SFTP tab in Phone Landscape (915x412) fills 100% width with zero NavigationRail and zero overflow
-    await tester.tap(find.byIcon(Icons.terminal_outlined));
+    await tester.tap(find.byKey(const ValueKey('landscape_nav_tab_2')));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(find.byType(NavigationRail), findsNothing);
@@ -2314,7 +2343,7 @@ void main() {
     // Return to Connections then RDP / VNC tab
     await tester.tap(find.byKey(const ValueKey('btn_ssh_landscape_back_hosts')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(Icons.desktop_windows_outlined));
+    await tester.tap(find.byKey(const ValueKey('landscape_nav_tab_1')));
     await tester.pumpAndSettle();
 
     // 2. Switch to Portrait Phone (412x915) and open Soft Keyboard (`viewInsets.bottom = 280`)
@@ -2764,8 +2793,10 @@ void main() {
     await tester.tap(find.text('Vault & 2FA'));
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('LOCAL DEVICE ONLY • NOT GLOBAL'));
-    expect(find.text('LOCAL DEVICE ONLY • NOT GLOBAL'), findsOneWidget);
+    await tester.ensureVisible(find.text('Trusted SSH Host Keys (TOFU Pinning)'));
+    expect(find.text('Trusted SSH Host Keys (TOFU Pinning)'), findsOneWidget);
+    expect(find.text('LOCAL DEVICE ONLY • NOT GLOBAL'), findsNothing);
+    expect(find.textContaining('never synced globally'), findsNothing);
     expect(find.textContaining('10.28.99.203'), findsNothing);
 
     // Select `Immediately` (`chip_autolock_0`) auto-lock timeout
@@ -2820,5 +2851,143 @@ void main() {
     }
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('vault_pin_lock_screen')), findsNothing);
+  });
+
+  testWidgets(
+      'v1.10.0+11 Oppo Find X9 Pro Live Polish: Cutout-Safe Landscape (915x412, left=44), Symmetric VNC Fit, Adaptive Cursor Size, Pure Numpad PIN & Zero-Lag Auto-Lock',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.viewPadding = const FakeViewPadding(left: 44, right: 0, top: 0, bottom: 14);
+    tester.view.padding = const FakeViewPadding(left: 44, right: 0, top: 0, bottom: 14);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewPadding);
+    addTearDown(tester.view.resetPadding);
+
+    await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+    await tester.pumpAndSettle();
+
+    // 1. Phone Landscape (915x412 with 44dp left punch-hole cutout): ZERO NavigationRail on ALL 4 tabs!
+    expect(find.byType(NavigationRail), findsNothing);
+    await tester.ensureVisible(find.text('Load Sample Lab'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Load Sample Lab'));
+    await tester.pumpAndSettle();
+    expect(find.byType(NavigationRail), findsNothing);
+
+    // Tab 3 (Vault & 2FA) via compact top pill (`landscape_nav_tab_3`)
+    await tester.tap(find.byKey(const ValueKey('landscape_nav_tab_3')));
+    await tester.pumpAndSettle();
+    expect(find.byType(NavigationRail), findsNothing);
+    expect(find.text('LOCAL DEVICE ONLY • NOT GLOBAL'), findsNothing);
+
+    // 2. Instant Auto-Lock ChoiceChip switching via ValueNotifier + scalar SharedPreferences persistence
+    await tester.ensureVisible(find.byKey(const ValueKey('chip_autolock_60')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('chip_autolock_60')));
+    await tester.pump();
+    ChoiceChip chip60 = tester.widget<ChoiceChip>(find.byKey(const ValueKey('chip_autolock_60')));
+    expect(chip60.selected, isTrue);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getInt('jaladesk_vault_autolock_sec_v1'), 60);
+
+    // 3. Pure UI Numpad PIN Setup & PIN Removal + Landscape Lock View (ZERO TextFields anywhere!)
+    await tester.ensureVisible(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.pumpAndSettle();
+    expect(find.descendant(of: find.byType(VaultPinSetupSheet), matching: find.byType(TextField)), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('chip_pin_len_4')));
+    await tester.pumpAndSettle();
+    for (final d in ['1', '3', '5', '7']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    for (final d in ['1', '3', '5', '7']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // Lock in 915x412 Landscape -> side-by-side layout with ZERO TextField & ZERO overflow
+    await tester.tap(find.byKey(const Key('btn_lock_vault_now')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.byType(VaultPinLockView), findsOneWidget);
+    expect(find.descendant(of: find.byType(VaultPinLockView), matching: find.byType(TextField)), findsNothing);
+    for (final d in ['1', '3', '5', '7']) {
+      await tester.tap(find.byKey(ValueKey('btn_pin_digit_$d')));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(find.byType(VaultPinLockView), findsNothing);
+
+    // Verify PIN Removal flow on pure Numpad (`Enter Current PIN` -> `btn_remove_vault_pin`)
+    await tester.tap(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('btn_remove_vault_pin')), findsNothing);
+    for (final d in ['1', '3', '5', '7']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('btn_remove_vault_pin')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('btn_remove_vault_pin')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('btn_lock_vault_now')), findsNothing);
+
+    // 4. Switch to Tab 1 (RDP / VNC) -> verify full-bleed `desktop_bottom_shortcut_bar` & Symmetric Cutout-Safe `Fit`
+    await tester.tap(find.byKey(const ValueKey('landscape_nav_tab_1')));
+    await tester.pumpAndSettle();
+    expect(find.byType(NavigationRail), findsNothing);
+    final barRect = tester.getRect(find.byKey(const ValueKey('desktop_bottom_shortcut_bar')));
+    expect(barRect.left, closeTo(0.0, 0.01));
+    expect(barRect.width, closeTo(915.0, 0.01));
+
+    final shellState = tester.state<JalaDeskMobileShellState>(find.byType(JalaDeskMobileShell));
+    // Ultrawide 21:9 VNC server (2560x1080) inside 915x320 viewport with left=44 cutout
+    shellState.setServerDimensionsForVerification(2560, 1080);
+    shellState.setDisplayModeForVerification(fit: JumpCanvasFitMode.aspectFit);
+    await tester.pump();
+
+    final fitRect = shellState.computeRenderedDesktopRectForVerification(
+      const Size(915, 348),
+      safePadding: const EdgeInsets.only(left: 44, right: 0),
+      applySymmetricCutoutInset: true,
+    );
+    final leftMargin = fitRect.left;
+    final rightMargin = 915.0 - fitRect.right;
+    expect(leftMargin, closeTo(rightMargin, 0.001));
+    expect(leftMargin, greaterThanOrEqualTo(44.0));
+    expect(fitRect.top, closeTo(348.0 - fitRect.bottom, 0.001));
+
+    // 5. Adaptive Proportional & Zoom-Aware Cursor Size
+    // (a) Zoomed-out 4K desktop (`3840x2160`) -> compact cursor (`~13.5dp` height)
+    shellState.setServerDimensionsForVerification(3840, 2160);
+    await tester.pump();
+    final smallCursorPaint = tester.widget<CustomPaint>(find.byKey(const ValueKey('remote_vector_arrow_cursor')));
+    expect(smallCursorPaint.size.height, closeTo(13.5, 0.2));
+
+    // (b) 1:1 / Matched desktop (`800x340`) -> larger natural cursor (`~24-25dp` height)
+    shellState.setServerDimensionsForVerification(800, 340);
+    await tester.pump();
+    final matchedCursorPaint = tester.widget<CustomPaint>(find.byKey(const ValueKey('remote_vector_arrow_cursor')));
+    expect(matchedCursorPaint.size.height, greaterThan(smallCursorPaint.size.height + 6.0));
+    expect(matchedCursorPaint.size.height, lessThanOrEqualTo(25.01));
+
+    // (c) 3.5x Pinch-Zoom -> pre-transform cursor shrinks by `1 / 3.5` so on-screen size caps cleanly at `25.0dp`!
+    shellState.setZoomScaleForVerification(3.5, tx: -120.0, ty: -40.0);
+    await tester.pump();
+    final zoomedCursorPaint = tester.widget<CustomPaint>(find.byKey(const ValueKey('remote_vector_arrow_cursor')));
+    expect(zoomedCursorPaint.size.height * 3.5, closeTo(25.0, 0.2));
+
+    // Switching back to `Fit` via `setDisplayModeForVerification` resets leftover pan/zoom Matrix4 to identity!
+    shellState.setDisplayModeForVerification(fit: JumpCanvasFitMode.aspectFit);
+    await tester.pump();
+    final resetCursorPaint = tester.widget<CustomPaint>(find.byKey(const ValueKey('remote_vector_arrow_cursor')));
+    expect(resetCursorPaint.size.height, closeTo(matchedCursorPaint.size.height, 0.2));
   });
 }

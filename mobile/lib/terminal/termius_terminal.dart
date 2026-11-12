@@ -1166,6 +1166,8 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
   @override
   Widget build(BuildContext context) {
     final theme = widget.theme;
+    final mediaPadding = MediaQuery.paddingOf(context);
+    final symInsetX = max(mediaPadding.left, mediaPadding.right);
     final baseTextStyle = TextStyle(
       fontFamily: 'monospace',
       fontSize: widget.fontSize,
@@ -1181,7 +1183,7 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
             builder: (context, constraints) {
               final charW = widget.fontSize * 0.61;
               final lineH = widget.fontSize * 1.38;
-              final cols = ((constraints.maxWidth - 24) / charW).floor().clamp(32, 240);
+              final cols = ((constraints.maxWidth - 24 - symInsetX * 2) / charW).floor().clamp(32, 240);
               final rows = ((constraints.maxHeight - 20) / lineH).floor().clamp(10, 120);
               if ((cols != _lastCols || rows != _lastRows) && widget.onTerminalResize != null) {
                 _lastCols = cols;
@@ -1258,7 +1260,7 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
                         controller: _scrollController,
                         child: ListView.builder(
                           controller: _scrollController,
-                          padding: const EdgeInsets.fromLTRB(14, 10, 14, 18),
+                          padding: EdgeInsets.fromLTRB(symInsetX + 14, 10, symInsetX + 14, 18),
                           itemCount: widget.buffer.lineCount,
                           itemBuilder: (context, rowIdx) {
                             final richRow = Text.rich(
@@ -1280,7 +1282,7 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
                       // Terminal Geometry & Mode Micro-Pill (top-right subtle telemetry)
                       Positioned(
                         top: 8,
-                        right: 10,
+                        right: symInsetX + 10,
                         child: IgnorePointer(
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
@@ -1354,6 +1356,9 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
   Widget _buildTactileAccessoryDeck(TerminalThemePreset theme) {
     final deckBg = theme.chromeSurface;
     final deckBorder = theme.border;
+    final mediaPadding = MediaQuery.paddingOf(context);
+    final symPadX = max(mediaPadding.left, mediaPadding.right) + 8.0;
+    final bottomSafe = MediaQuery.viewInsetsOf(context).bottom == 0 ? mediaPadding.bottom : 0.0;
     return Container(
       decoration: BoxDecoration(
         color: deckBg,
@@ -1361,6 +1366,7 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
           top: BorderSide(color: deckBorder, width: 1),
         ),
       ),
+      padding: EdgeInsets.only(bottom: bottomSafe),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1368,7 +1374,7 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
           if (_showQuickSnippetsStrip)
             Container(
               height: 34,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
+              padding: EdgeInsets.symmetric(horizontal: symPadX),
               decoration: BoxDecoration(
                 color: theme.chromeSurface,
                 border: Border(
@@ -1495,7 +1501,7 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
             height: 40,
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: EdgeInsets.symmetric(horizontal: symPadX, vertical: 4),
               child: Row(
                 children: [
                   _buildIconKeycap(

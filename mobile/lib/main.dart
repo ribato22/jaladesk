@@ -698,8 +698,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   ];
 
   // TOTP Timer & Enterprise Security Enclave state
+  SharedPreferences? _prefsCache;
   late Timer _totpTimer;
-  int _secondsRemaining = 30;
+  final ValueNotifier<int> _totpSecondsNotifier = ValueNotifier<int>(30);
   bool _biometricLock = true;
   bool _secureScreenShield = true;
   bool _lanAutoSync = true;
@@ -707,6 +708,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   String _vaultPinHash = '';
   int _vaultPinLength = 6;
   int _vaultAutoLockSeconds = 15;
+  final ValueNotifier<int> _vaultAutoLockNotifier = ValueNotifier<int>(15);
   bool _isVaultLocked = false;
   DateTime? _backgroundedAt;
   Timer? _vaultInactivityTimer;
@@ -945,12 +947,22 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     }
   }
 
+  void _setCanvasFitMode(JumpCanvasFitMode nextMode) {
+    _canvasFitMode = nextMode;
+    _canvasTransformCtrl.value = Matrix4.identity();
+  }
+
   /// Computes the exact destination `Rect` of the remote desktop frame inside the viewport.
-  /// - `aspectFit` (`Fit`): Fits entire desktop inside viewport at 1:1 aspect ratio.
-  /// - `cropCover` (`Fill` / Jump Pan): Fills 100% of screen at true 1:1 aspect ratio (zero distortion!)
+  /// - `aspectFit` (`Fit`): Fits entire desktop inside viewport at 1:1 aspect ratio, with
+  ///   symmetric horizontal cutout clearance (`symInsetX = max(left, right)`) in Landscape / Full Screen.
+  /// - `cropCover` (`Pan`): Fills 100% of screen at true 1:1 aspect ratio (zero distortion!)
   ///   and smoothly pans across the full width/height as you move the cursor or drag with 2 fingers.
-  /// - `stretchFill` (`Stretch`): Stretches edge-to-edge.
-  Rect _computeRenderedDesktopRect(Size viewportSize) {
+  /// - `stretchFill` (`Fill`): Stretches edge-to-edge.
+  Rect _computeRenderedDesktopRect(
+    Size viewportSize, {
+    EdgeInsets safePadding = EdgeInsets.zero,
+    bool applySymmetricCutoutInset = false,
+  }) {
     final srvW = _desktopServerWidth.clamp(64, 8192).toDouble();
     final srvH = _desktopServerHeight.clamp(64, 8192).toDouble();
     if (_canvasFitMode == JumpCanvasFitMode.stretchFill) {
@@ -969,9 +981,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       final dy = (viewportSize.height - srvH) / 2.0;
       return Rect.fromLTWH(dx, dy, srvW, srvH);
     }
-    final fitScale = min(viewportSize.width / srvW, viewportSize.height / srvH);
-    final dstW = (srvW * fitScale).clamp(1.0, viewportSize.width);
-    final dstH = (srvH * fitScale).clamp(1.0, viewportSize.height);
+    final double rawSymInset =
+        applySymmetricCutoutInset ? max(safePadding.left, safePadding.right) : 0.0;
+    final double symInsetX = (viewportSize.width - rawSymInset * 2.0 >= 200.0) ? rawSymInset : 0.0;
+    final double availW = (viewportSize.width - symInsetX * 2.0).clamp(1.0, viewportSize.width);
+    final double availH = viewportSize.height.clamp(1.0, 16384.0);
+    final fitScale = min(availW / srvW, availH / srvH);
+    final dstW = (srvW * fitScale).clamp(1.0, availW);
+    final dstH = (srvH * fitScale).clamp(1.0, availH);
     final dx = (viewportSize.width - dstW) / 2.0;
     final dy = (viewportSize.height - dstH) / 2.0;
     return Rect.fromLTWH(dx, dy, dstW, dstH);
@@ -1005,7 +1022,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
   void setTerminalThemeForVerification(String themeId) {
     setState(() => _terminalThemeId = themeId);
-    _saveVaultToDisk();
+    unawaited(_saveScalarSettingsOnly());
   }
 
   void sendTerminalRawForVerification(String raw) {
@@ -1027,7 +1044,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   }) {
     setState(() {
       if (preset != null) _resolutionPreset = preset;
-      if (fit != null) _canvasFitMode = fit;
+      if (fit != null) _setCanvasFitMode(fit);
     });
     if (fullScreen != null) {
       toggleFullScreen(fullScreen);
@@ -1035,6 +1052,31 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     if (preset != null) {
       _applyTargetResolutionToActiveSession();
     }
+  }
+
+  void setServerDimensionsForVerification(int width, int height) {
+    setState(() {
+      _desktopServerWidth = width.clamp(64, 8192);
+      _desktopServerHeight = height.clamp(64, 8192);
+    });
+  }
+
+  void setZoomScaleForVerification(double scale, {double tx = 0.0, double ty = 0.0}) {
+    _canvasTransformCtrl.value = Matrix4.identity()
+      ..translateByDouble(tx, ty, 0.0, 1.0)
+      ..scaleByDouble(scale.clamp(1.0, 5.0), scale.clamp(1.0, 5.0), 1.0, 1.0);
+  }
+
+  Rect computeRenderedDesktopRectForVerification(
+    Size viewportSize, {
+    EdgeInsets safePadding = EdgeInsets.zero,
+    bool applySymmetricCutoutInset = false,
+  }) {
+    return _computeRenderedDesktopRect(
+      viewportSize,
+      safePadding: safePadding,
+      applySymmetricCutoutInset: applySymmetricCutoutInset,
+    );
   }
 
   void sendDesktopInteractionForVerification(int rx, int ry, String keyLabel) {
@@ -1067,7 +1109,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     }
 
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = _prefsCache ??= await SharedPreferences.getInstance();
       final rawLegacyHosts = prefs.getString(_prefsHostsKey);
       final rawHosts = await VaultAtRestCipher.decryptFromPrefs(prefs, _prefsHostsKey);
       final rawCreds = await VaultAtRestCipher.decryptFromPrefs(prefs, _prefsCredentialsKey);
@@ -1154,6 +1196,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         _vaultPinHash = savedPinHash;
         _vaultPinLength = savedPinLen.clamp(4, 12);
         _vaultAutoLockSeconds = const <int>{0, 15, 60, 300}.contains(savedAutoLockSec) ? savedAutoLockSec : 15;
+        _vaultAutoLockNotifier.value = _vaultAutoLockSeconds;
         _isVaultLocked = savedPinHash.isNotEmpty;
         _secureScreenShield = savedSecureScreen;
         _biometricLock = savedBiometric;
@@ -1181,9 +1224,24 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     }
   }
 
+  /// Lightweight scalar preferences writer with ZERO AES-256-GCM / AndroidKeyStore encryption overhead.
+  Future<void> _saveScalarSettingsOnly() async {
+    try {
+      final prefs = _prefsCache ??= await SharedPreferences.getInstance();
+      await prefs.setString(_prefsPairKey, _pairedDesktopInfo);
+      await prefs.setString(_prefsTermThemeKey, _terminalThemeId);
+      await prefs.setDouble(_prefsTermFontKey, _terminalFontSize);
+      await prefs.setString(_prefsPinHashKey, _vaultPinHash);
+      await prefs.setInt(_prefsPinLenKey, _vaultPinLength);
+      await prefs.setInt(_prefsAutoLockSecKey, _vaultAutoLockSeconds);
+      await prefs.setBool(_prefsSecureScreenKey, _secureScreenShield);
+      await prefs.setBool(_prefsBiometricKey, _biometricLock);
+    } catch (_) {}
+  }
+
   Future<void> _saveVaultToDisk() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = _prefsCache ??= await SharedPreferences.getInstance();
       final sealedHosts = await VaultAtRestCipher.encryptForPrefs(
         prefs,
         jsonEncode(_hosts.map((h) => h.toJson()).toList()),
@@ -1240,15 +1298,18 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
   void _updateTotpCountdown() {
     final sec = DateTime.now().second;
-    setState(() {
-      _secondsRemaining = 30 - (sec % 30);
-    });
+    final nextRem = 30 - (sec % 30);
+    if (_totpSecondsNotifier.value != nextRem) {
+      _totpSecondsNotifier.value = nextRem;
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _totpTimer.cancel();
+    _totpSecondsNotifier.dispose();
+    _vaultAutoLockNotifier.dispose();
     _autoResizeDebounce?.cancel();
     _fullScreenAutoHideTimer?.cancel();
     _vaultInactivityTimer?.cancel();
@@ -3127,27 +3188,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             _desktopLiveConnected = true;
             _desktopServerWidth = vncClient.width;
             _desktopServerHeight = vncClient.height;
-            // Smart VNC Screen Adaptation:
-            // - ExtendedDesktopSize (-308): remote desktop dynamically matches phone viewport -> Fit!
-            // - Fixed VNC in Landscape (e.g. 16:9 on 20:9 phone): Fill Screen (`stretchFill`) edge-to-edge with zero cropped taskbar!
-            // - Fixed widescreen VNC in Portrait: Smart Pan (`cropCover`) 1:1 centered at (0.5, 0.5).
-            if (vncClient.supportsExtendedDesktopSize) {
-              _canvasFitMode = JumpCanvasFitMode.aspectFit;
-            } else {
-              final winSize = MediaQuery.sizeOf(context);
-              final srvAspect = vncClient.width / max(1, vncClient.height).toDouble();
-              final viewAspect = winSize.width / max(1.0, winSize.height);
-              if (winSize.width > winSize.height &&
-                  vncClient.width >= 640 &&
-                  (viewAspect / srvAspect) > 1.05 &&
-                  (viewAspect / srvAspect) <= 1.65) {
-                _canvasFitMode = JumpCanvasFitMode.stretchFill;
-              } else if (vncClient.width >= 640 &&
-                  ((srvAspect / viewAspect) > 1.22 || (viewAspect / srvAspect) > 1.22)) {
-                _canvasFitMode = JumpCanvasFitMode.cropCover;
-                _cursorNorm = const Offset(0.5, 0.5);
-              }
-            }
+            // Always start VNC cleanly centered and symmetric in Fit (`aspectFit`) with zero leftover pan offset!
+            _setCanvasFitMode(JumpCanvasFitMode.aspectFit);
+            _cursorNorm = const Offset(0.5, 0.5);
             _desktopProtocolBanner =
                 '${vncClient.negotiatedAuthLabel} • ${vncClient.desktopName} (${vncClient.width}x${vncClient.height})${activeRouteLabel.isNotEmpty ? " • $activeRouteLabel" : ""}';
             _lastRdpAction =
@@ -5004,36 +5047,36 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                             children: [
                               InkWell(
                                 borderRadius: BorderRadius.circular(7),
-                                onTap: () {
-                                  setState(() {
-                                    _terminalFontSize = (_terminalFontSize - 1.0).clamp(10.0, 18.0);
-                                  });
-                                  setSheetState(() {});
-                                  _saveVaultToDisk();
-                                },
-                                child: const Padding(
-                                  padding: EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-                                  child: Text('A−', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                                  onTap: () {
+                                    setState(() {
+                                      _terminalFontSize = (_terminalFontSize - 1.0).clamp(10.0, 18.0);
+                                    });
+                                    setSheetState(() {});
+                                    unawaited(_saveScalarSettingsOnly());
+                                  },
+                                  child: const Padding(
+                                    padding: EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                                    child: Text('A−', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                                  ),
                                 ),
-                              ),
-                              Text(
-                                '${_terminalFontSize.toInt()}pt',
-                                style: const TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 11.5,
-                                  fontWeight: FontWeight.w700,
-                                  color: JalaPalette.brandGold,
+                                Text(
+                                  '${_terminalFontSize.toInt()}pt',
+                                  style: const TextStyle(
+                                    fontFamily: 'monospace',
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: JalaPalette.brandGold,
+                                  ),
                                 ),
-                              ),
-                              InkWell(
-                                borderRadius: BorderRadius.circular(7),
-                                onTap: () {
-                                  setState(() {
-                                    _terminalFontSize = (_terminalFontSize + 1.0).clamp(10.0, 18.0);
-                                  });
-                                  setSheetState(() {});
-                                  _saveVaultToDisk();
-                                },
+                                InkWell(
+                                  borderRadius: BorderRadius.circular(7),
+                                  onTap: () {
+                                    setState(() {
+                                      _terminalFontSize = (_terminalFontSize + 1.0).clamp(10.0, 18.0);
+                                    });
+                                    setSheetState(() {});
+                                    unawaited(_saveScalarSettingsOnly());
+                                  },
                                 child: const Padding(
                                   padding: EdgeInsets.symmetric(horizontal: 9, vertical: 5),
                                   child: Text('A+', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
@@ -5075,7 +5118,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                             onTap: () {
                               setState(() => _terminalThemeId = preset.id);
                               setSheetState(() {});
-                              _saveVaultToDisk();
+                              unawaited(_saveScalarSettingsOnly());
                             },
                             child: Container(
                               padding: const EdgeInsets.all(9),
@@ -5841,7 +5884,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       ? 'Paired via Zero-Trust Token (${raw.contains("lan-direct") ? "LAN mDNS" : "Cloud Relay"})'
                       : 'Paired with Desktop Vault';
                 });
-                _saveVaultToDisk();
+                unawaited(_saveScalarSettingsOnly());
               }
               Navigator.of(ctx).pop();
               ScaffoldMessenger.of(context).showSnackBar(
@@ -6039,32 +6082,37 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           final bool isTrueTablet = MediaQuery.sizeOf(context).shortestSide >= 600;
           final bool isPhoneLandscape = winW >= 600 && !isTrueTablet;
           final bool isWideScreen = winW >= 600;
-          final bool showLeftNavRail =
-              isTrueTablet || (isPhoneLandscape && _tabIndex != 1 && _tabIndex != 2);
+          final bool showLeftNavRail = isTrueTablet;
           final bool isLargeTablet = isTrueTablet && winW >= 840;
           final bool isFullTablet = isTrueTablet && winW >= 960;
           final bool activeFullScreen = _isFullScreen && (_tabIndex == 1 || _tabIndex == 2);
           final bool showCompactSessionLandscape = isPhoneLandscape && (_tabIndex == 1 || _tabIndex == 2);
+          final EdgeInsets rootMediaPadding = MediaQuery.paddingOf(context);
+          final double appBarSymPadX = max(rootMediaPadding.left, rootMediaPadding.right) + 8.0;
           final double rootKeyboardInset = MediaQuery.viewInsetsOf(context).bottom;
           final bool keyboardOpenInSession = rootKeyboardInset > 0 && (_tabIndex == 1 || _tabIndex == 2);
 
-        final Widget activeTabBody = IndexedStack(
-          index: _tabIndex,
-          children: [
-            _buildConnectionsTab(),
-            _buildJumpRdpCanvasTab(
-              isFullScreen: activeFullScreen,
-              isWideScreen: isWideScreen,
-              isPhoneLandscape: isPhoneLandscape,
-            ),
-            _buildTermiusSshTab(
-              isFullScreen: activeFullScreen,
-              isWideScreen: isWideScreen,
-              isPhoneLandscape: isPhoneLandscape,
-            ),
-            _buildSecurityVaultTab(),
-          ],
-        );
+          final Widget activeTabBody = IndexedStack(
+            index: _tabIndex,
+            children: [
+              RepaintBoundary(child: _buildConnectionsTab()),
+              RepaintBoundary(
+                child: _buildJumpRdpCanvasTab(
+                  isFullScreen: activeFullScreen,
+                  isWideScreen: isWideScreen,
+                  isPhoneLandscape: isPhoneLandscape,
+                ),
+              ),
+              RepaintBoundary(
+                child: _buildTermiusSshTab(
+                  isFullScreen: activeFullScreen,
+                  isWideScreen: isWideScreen,
+                  isPhoneLandscape: isPhoneLandscape,
+                ),
+              ),
+              RepaintBoundary(child: _buildSecurityVaultTab()),
+            ],
+          );
 
         // True 100% edge-to-edge Immersive Full Screen Mode for RDP/VNC and SSH/SFTP
         if (activeFullScreen) {
@@ -6080,7 +6128,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           appBar: showCompactSessionLandscape
               ? null
               : PreferredSize(
-            preferredSize: const Size.fromHeight(56),
+            preferredSize: Size.fromHeight(isPhoneLandscape ? 48 : 56),
             child: Container(
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
@@ -6093,14 +6141,20 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 ),
               ),
               child: SafeArea(
+                left: false,
+                right: false,
                 bottom: false,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: appBarSymPadX + 4.0,
+                    vertical: isPhoneLandscape ? 5 : 8,
+                  ),
                   child: Row(
                     children: [
-                      _buildJalaBrandLogo(size: 32, radius: 8),
-                      const SizedBox(width: 10),
-                      Expanded(
+                      _buildJalaBrandLogo(size: isPhoneLandscape ? 28 : 32, radius: 8),
+                      const SizedBox(width: 9),
+                      Flexible(
+                        fit: isPhoneLandscape ? FlexFit.loose : FlexFit.tight,
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -6111,50 +6165,126 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  const Text(
+                                  Text(
                                     'JalaDesk',
                                     style: TextStyle(
                                       fontWeight: FontWeight.w800,
-                                      fontSize: 16,
+                                      fontSize: isPhoneLandscape ? 14.5 : 16,
                                       letterSpacing: -0.3,
                                       color: JalaPalette.text,
                                     ),
                                   ),
-                                  const SizedBox(width: 7),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                                    decoration: BoxDecoration(
-                                      color: JalaPalette.brandGold.withValues(alpha: 0.14),
-                                      borderRadius: BorderRadius.circular(5),
-                                      border: Border.all(
-                                        color: JalaPalette.brandGold.withValues(alpha: 0.45),
-                                        width: 0.8,
+                                  if (!isPhoneLandscape) ...[
+                                    const SizedBox(width: 7),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                      decoration: BoxDecoration(
+                                        color: JalaPalette.brandGold.withValues(alpha: 0.14),
+                                        borderRadius: BorderRadius.circular(5),
+                                        border: Border.all(
+                                          color: JalaPalette.brandGold.withValues(alpha: 0.45),
+                                          width: 0.8,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        isFullTablet
+                                            ? 'TABLET PRO'
+                                            : (isTrueTablet ? 'FOLDABLE PRO' : 'MOBILE PRO'),
+                                        style: const TextStyle(
+                                          fontSize: 9.5,
+                                          fontWeight: FontWeight.w700,
+                                          letterSpacing: 0.4,
+                                          color: JalaPalette.brandGold,
+                                        ),
                                       ),
                                     ),
-                                    child: Text(
-                                      isFullTablet
-                                          ? 'TABLET PRO'
-                                          : (isTrueTablet ? 'FOLDABLE PRO' : 'MOBILE PRO'),
-                                      style: const TextStyle(
-                                        fontSize: 9.5,
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 0.4,
-                                        color: JalaPalette.brandGold,
-                                      ),
-                                    ),
-                                  ),
+                                  ],
                                 ],
                               ),
                             ),
-                            const Text(
-                              'Sapphire-Gold Zero-Trust Workspace',
-                              style: TextStyle(fontSize: 10.5, color: JalaPalette.muted),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
+                            if (!isPhoneLandscape)
+                              const Text(
+                                'Sapphire-Gold Zero-Trust Workspace',
+                                style: TextStyle(fontSize: 10.5, color: JalaPalette.muted),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                           ],
                         ),
                       ),
+                      if (isPhoneLandscape && (_tabIndex == 0 || _tabIndex == 3)) ...[
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Center(
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  for (final (int idx, String label, IconData iconOff, IconData iconOn)
+                                      in const <(int, String, IconData, IconData)>[
+                                    (0, 'Connections', Icons.dns_outlined, Icons.dns_rounded),
+                                    (1, 'RDP / VNC', Icons.desktop_windows_outlined, Icons.desktop_windows_rounded),
+                                    (2, 'SSH & SFTP', Icons.terminal_outlined, Icons.terminal_rounded),
+                                    (3, 'Vault & 2FA', Icons.shield_outlined, Icons.shield_rounded),
+                                  ])
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 2.5),
+                                      child: InkWell(
+                                        key: ValueKey('landscape_nav_tab_$idx'),
+                                        borderRadius: BorderRadius.circular(8),
+                                        onTap: () => setState(() => _tabIndex = idx),
+                                        child: Container(
+                                          height: 29,
+                                          padding: const EdgeInsets.symmetric(horizontal: 8.5),
+                                          alignment: Alignment.center,
+                                          decoration: BoxDecoration(
+                                            color: _tabIndex == idx
+                                                ? JalaPalette.selected
+                                                : JalaPalette.header.withValues(alpha: 0.72),
+                                            borderRadius: BorderRadius.circular(8),
+                                            border: Border.all(
+                                              color: _tabIndex == idx
+                                                  ? JalaPalette.brandGold.withValues(alpha: 0.65)
+                                                  : JalaPalette.lineInput,
+                                              width: 0.9,
+                                            ),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                _tabIndex == idx ? iconOn : iconOff,
+                                                size: 13.5,
+                                                color: _tabIndex == idx
+                                                    ? JalaPalette.brandGold
+                                                    : JalaPalette.muted,
+                                              ),
+                                              const SizedBox(width: 5),
+                                              Text(
+                                                label,
+                                                style: TextStyle(
+                                                  fontSize: 10.5,
+                                                  fontWeight: _tabIndex == idx
+                                                      ? FontWeight.w700
+                                                      : FontWeight.w600,
+                                                  color: _tabIndex == idx
+                                                      ? JalaPalette.brandGold
+                                                      : JalaPalette.text2,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
                       if (isLargeTablet && (_tabIndex == 1 || _tabIndex == 2)) ...[
                         IconButton(
                           tooltip: _showTabletSidebar ? 'Hide Host Sidebar' : 'Show Host Sidebar',
@@ -6508,16 +6638,18 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
     return LayoutBuilder(
       builder: (ctx, constraints) {
+        final EdgeInsets mediaPadding = MediaQuery.paddingOf(ctx);
+        final double symCutoutInset = max(mediaPadding.left, mediaPadding.right);
         final double availW = constraints.maxWidth;
         final int columns = availW >= 980 ? 3 : (availW >= 620 ? 2 : 1);
         const double spacing = 10.0;
-        const double horizontalPad = 14.0;
+        final double horizontalPad = symCutoutInset + 14.0;
         final double cardW = columns == 1
             ? (availW - horizontalPad * 2)
             : ((availW - horizontalPad * 2 - spacing * (columns - 1)) / columns);
 
         return ListView(
-          padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
+          padding: EdgeInsets.fromLTRB(horizontalPad, 12, horizontalPad, 24 + mediaPadding.bottom),
           children: [
             // Executive Compact Vault Telemetry Header
             Container(
@@ -7762,7 +7894,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                 _resolutionPreset = preset;
                                 if (preset == JumpResolutionPreset.matchDisplay ||
                                     preset == JumpResolutionPreset.matchHiDpi) {
-                                  _canvasFitMode = JumpCanvasFitMode.aspectFit;
+                                  _setCanvasFitMode(JumpCanvasFitMode.aspectFit);
                                 }
                               });
                               setModalState(() {});
@@ -7799,13 +7931,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                             side: BorderSide(
                               color: _canvasFitMode == fitMode ? JalaPalette.brandGold : JalaPalette.lineInput,
                             ),
-                              onSelected: (_) {
-                                setState(() => _canvasFitMode = fitMode);
-                                setModalState(() {});
-                              },
-                            ),
-                        ],
-                      ),
+                            onSelected: (_) {
+                              setState(() => _setCanvasFitMode(fitMode));
+                              setModalState(() {});
+                            },
+                          ),
+                      ],
+                    ),
                     const SizedBox(height: 6),
                     Text(
                       _canvasFitMode == JumpCanvasFitMode.stretchFill
@@ -7881,6 +8013,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         ? '${_activeRdpHost!.name} (${_activeRdpHost!.address}:${_activeRdpHost!.port})'
         : 'No Remote Desktop Selected';
     final isVncHost = _activeRdpHost?.protocol == RemoteProtocol.vnc;
+    final EdgeInsets mediaPadding = MediaQuery.paddingOf(context);
+    final double symCutoutInset = max(mediaPadding.left, mediaPadding.right);
+    final double symPadX = symCutoutInset + 8.0;
     final double keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
     final bool overlayBottomShortcuts = isFullScreen && keyboardInset == 0;
     final showBottomShortcuts = !isFullScreen || (_showFullScreenModifierBar && _fullScreenChromeVisible);
@@ -7891,7 +8026,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         // Top HUD bar (hidden in Full Screen mode for 100% edge-to-edge canvas)
         if (!isFullScreen)
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             decoration: const BoxDecoration(
               color: JalaPalette.bar,
               border: Border(bottom: BorderSide(color: JalaPalette.line)),
@@ -7899,9 +8033,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             child: SafeArea(
               top: isPhoneLandscape,
               bottom: false,
-              left: isPhoneLandscape,
-              right: true,
-              child: Column(
+              left: false,
+              right: false,
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: symPadX, vertical: 6),
+                child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -8083,11 +8219,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 ],
               ],
             ),
+              ),
             ),
           ),
         if (showTopKeyboardBar)
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            padding: EdgeInsets.symmetric(horizontal: symPadX + 2.0, vertical: 6),
             color: JalaPalette.aside,
             child: Row(
               children: [
@@ -8156,7 +8293,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 _onViewportDimensionsMeasured(viewportSize);
               });
 
-              final desktopRect = _computeRenderedDesktopRect(viewportSize);
+              final desktopRect = _computeRenderedDesktopRect(
+                viewportSize,
+                safePadding: mediaPadding,
+                applySymmetricCutoutInset: isFullScreen || isPhoneLandscape,
+              );
               final pointerPx = Offset(
                 desktopRect.left + _cursorNorm.dx.clamp(0.0, 1.0) * desktopRect.width,
                 desktopRect.top + _cursorNorm.dy.clamp(0.0, 1.0) * desktopRect.height,
@@ -8319,8 +8460,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                           if (_remoteDesktopFrame == null)
                             Positioned(
                               top: 14,
-                              left: 14,
-                              right: 14,
+                              left: symCutoutInset + 14.0,
+                              right: symCutoutInset + 14.0,
                               child: Container(
                                 padding: const EdgeInsets.all(12),
                                 decoration: BoxDecoration(
@@ -8415,13 +8556,21 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                           // Live Server Cursor (FreeRDP Pointer / VNC RichCursor) + Standard Top-Left Arrow (`↖`) Fallback
                           if (!_remoteCursorHidden &&
                               (_trackpadMode || _remoteCursorImage != null || _remoteDesktopFrame == null))
-                            Builder(
-                              builder: (_) {
+                            ValueListenableBuilder<Matrix4>(
+                              valueListenable: _canvasTransformCtrl,
+                              builder: (context, matrix, _) {
+                                final double zoomScale = matrix.storage[0].clamp(1.0, 5.0);
+                                final double baseScale =
+                                    (desktopRect.width / _desktopServerWidth.clamp(1, 8192)).clamp(0.05, 4.0);
+                                final double screenPxPerRemotePx = baseScale * zoomScale;
+
                                 if (_remoteCursorImage != null &&
                                     _remoteCursorSize.width > 0 &&
                                     _remoteCursorSize.height > 0) {
                                   final maxDim = max(_remoteCursorSize.width, _remoteCursorSize.height);
-                                  final cursorScale = (22.0 / maxDim).clamp(0.45, 1.0);
+                                  final naturalMaxDim = maxDim * screenPxPerRemotePx;
+                                  final targetScreenMaxDim = naturalMaxDim.clamp(13.5, 28.0);
+                                  final cursorScale = (targetScreenMaxDim / maxDim) / zoomScale;
                                   final renderW = _remoteCursorSize.width * cursorScale;
                                   final renderH = _remoteCursorSize.height * cursorScale;
                                   final scaledHotX = _remoteCursorHotspot.dx * cursorScale;
@@ -8440,6 +8589,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                     ),
                                   );
                                 }
+                                final double targetScreenArrowH = (28.0 * screenPxPerRemotePx).clamp(13.5, 25.0);
+                                final double arrowH = targetScreenArrowH / zoomScale;
+                                final double arrowW = arrowH * (16.0 / 21.0);
                                 final double clampedTipX = pointerPx.dx
                                     .clamp(
                                       desktopRect.left,
@@ -8459,23 +8611,27 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
-                                        const CustomPaint(
-                                          key: ValueKey('remote_vector_arrow_cursor'),
-                                          size: Size(16, 21),
-                                          painter: _StandardTopLeftArrowCursorPainter(),
+                                        CustomPaint(
+                                          key: const ValueKey('remote_vector_arrow_cursor'),
+                                          size: Size(arrowW, arrowH),
+                                          painter: const _StandardTopLeftArrowCursorPainter(),
                                         ),
                                         if (_remoteDesktopFrame == null)
-                                          Container(
-                                            margin: const EdgeInsets.only(top: 2),
-                                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                            decoration: BoxDecoration(
-                                              color: JalaPalette.header.withValues(alpha: 0.85),
-                                              borderRadius: BorderRadius.circular(4),
-                                              border: Border.all(color: JalaPalette.brandGold, width: 0.6),
-                                            ),
-                                            child: Text(
-                                              '${(_cursorNorm.dx * _desktopServerWidth).round()},${(_cursorNorm.dy * _desktopServerHeight).round()}',
-                                              style: const TextStyle(fontSize: 9, color: JalaPalette.brandGold),
+                                          Transform.scale(
+                                            scale: 1.0 / zoomScale,
+                                            alignment: Alignment.topLeft,
+                                            child: Container(
+                                              margin: const EdgeInsets.only(top: 2),
+                                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                              decoration: BoxDecoration(
+                                                color: JalaPalette.header.withValues(alpha: 0.85),
+                                                borderRadius: BorderRadius.circular(4),
+                                                border: Border.all(color: JalaPalette.brandGold, width: 0.6),
+                                              ),
+                                              child: Text(
+                                                '${(_cursorNorm.dx * _desktopServerWidth).round()},${(_cursorNorm.dy * _desktopServerHeight).round()}',
+                                                style: const TextStyle(fontSize: 9, color: JalaPalette.brandGold),
+                                              ),
                                             ),
                                           ),
                                       ],
@@ -8493,7 +8649,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                               child: IgnorePointer(
                                 child: Container(
                                   height: 28,
-                                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                                  padding: EdgeInsets.symmetric(horizontal: symCutoutInset + 10.0),
                                   decoration: BoxDecoration(
                                     color: JalaPalette.header.withValues(alpha: 0.84),
                                     border: const Border(top: BorderSide(color: JalaPalette.line)),
@@ -8792,10 +8948,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       left: 0,
                       right: 0,
                       bottom: 0,
-                      child: SafeArea(
-                        top: false,
-                        bottom: true,
-                        child: _buildDesktopBottomShortcutBar(isFullScreen: isFullScreen),
+                      child: _buildDesktopBottomShortcutBar(
+                        isFullScreen: isFullScreen,
+                        applyBottomSafe: true,
                       ),
                     ),
                 ],
@@ -8805,25 +8960,29 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         ),
         // Docked Bottom Shortcut Bar (in normal mode OR pixel-flush directly on top of soft keyboard when open!)
         if (!overlayBottomShortcuts && showBottomShortcuts)
-          SafeArea(
-            top: false,
-            bottom: keyboardInset == 0,
-            left: isPhoneLandscape,
-            right: true,
-            child: _buildDesktopBottomShortcutBar(isFullScreen: isFullScreen),
+          _buildDesktopBottomShortcutBar(
+            isFullScreen: isFullScreen,
+            applyBottomSafe: keyboardInset == 0,
           ),
       ],
     );
   }
 
-  Widget _buildDesktopBottomShortcutBar({required bool isFullScreen}) {
+  Widget _buildDesktopBottomShortcutBar({
+    required bool isFullScreen,
+    bool applyBottomSafe = true,
+  }) {
+    final mediaPadding = MediaQuery.paddingOf(context);
+    final symPadX = max(mediaPadding.left, mediaPadding.right) + 8.0;
+    final bottomSafe = applyBottomSafe ? mediaPadding.bottom : 0.0;
     return Container(
       key: const ValueKey('desktop_bottom_shortcut_bar'),
+      width: double.infinity,
       decoration: BoxDecoration(
         color: JalaPalette.header.withValues(alpha: isFullScreen ? 0.94 : 1.0),
         border: const Border(top: BorderSide(color: JalaPalette.line)),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      padding: EdgeInsets.fromLTRB(symPadX, 6, symPadX, 6 + bottomSafe),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(
@@ -9021,8 +9180,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
               const modes = JumpCanvasFitMode.values;
               final next = modes[(_canvasFitMode.index + 1) % modes.length];
               setState(() {
-                _canvasFitMode = next;
-                _canvasTransformCtrl.value = Matrix4.identity();
+                _setCanvasFitMode(next);
                 _lastRdpAction = 'Canvas Fit: ${next.shortLabel} (${_desktopServerWidth}x$_desktopServerHeight)';
               });
             },
@@ -9240,7 +9398,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             onOpenSnippetsStudio: _showSnippetsStudioSheet,
             onFontSizeChanged: (nextSize) {
               setState(() => _terminalFontSize = nextSize.clamp(10.0, 20.0));
-              unawaited(_saveVaultToDisk());
+              unawaited(_saveScalarSettingsOnly());
             },
             onUserInteraction: isFullScreen && _fullScreenChromeVisible && !_pinFullScreenChrome
                 ? _scheduleFullScreenAutoHide
@@ -9263,11 +9421,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
               )
             : (_sshSubMode == 'sftp' ? _buildSftpMobileBrowser() : buildTerminalPane());
 
+        final mediaPadding = MediaQuery.paddingOf(ctx);
+        final symPadX = max(mediaPadding.left, mediaPadding.right) + 8.0;
+
         return Column(
           children: [
             if (!isFullScreen)
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
                   color: activeTheme.chromeSurface,
                   border: Border(bottom: BorderSide(color: activeTheme.border)),
@@ -9275,9 +9435,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 child: SafeArea(
                   top: isPhoneLandscape,
                   bottom: false,
-                  left: isPhoneLandscape,
-                  right: true,
-                  child: Row(
+                  left: false,
+                  right: false,
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: symPadX + 2.0, vertical: 6),
+                    child: Row(
                   children: [
                     if (isPhoneLandscape) ...[
                       Tooltip(
@@ -9517,6 +9679,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     ),
                   ],
                 ),
+                  ),
                 ),
               ),
             if (_sshBusy)
@@ -9738,183 +9901,202 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   Widget _buildSecurityVaultTab() {
     final pinnedHosts = _knownHostsStore.entries;
 
-    final totpCard = Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+    final totpCard = ValueListenableBuilder<int>(
+      valueListenable: _totpSecondsNotifier,
+      builder: (context, secondsLeft, _) {
+        return Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.key_rounded, size: 17, color: JalaPalette.brandGold),
-                const SizedBox(width: 8),
-                const Expanded(
-                  child: Text(
-                    'RFC 6238 TOTP 2FA Authenticator',
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                InkWell(
-                  key: const Key('btn_add_totp_2fa'),
-                  borderRadius: BorderRadius.circular(6),
-                  onTap: _showAddTotpDialog,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: JalaPalette.header,
+                Row(
+                  children: [
+                    const Icon(Icons.key_rounded, size: 17, color: JalaPalette.brandGold),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'RFC 6238 TOTP 2FA Authenticator',
+                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    InkWell(
+                      key: const Key('btn_add_totp_2fa'),
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: JalaPalette.lineInput),
+                      onTap: _showAddTotpDialog,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: JalaPalette.header,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: JalaPalette.lineInput),
+                        ),
+                        child: const Text(
+                          '+ Add 2FA',
+                          style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
+                        ),
+                      ),
                     ),
-                    child: const Text(
-                      '+ Add 2FA',
-                      style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
-                    ),
-                  ),
+                    if (_totpItems.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: JalaPalette.selected,
+                          borderRadius: BorderRadius.circular(99),
+                          border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
+                        ),
+                        child: Text(
+                          '${secondsLeft}s',
+                          style: const TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-                if (_totpItems.isNotEmpty) ...[
-                  const SizedBox(width: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: JalaPalette.selected,
-                      borderRadius: BorderRadius.circular(99),
-                      border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
+                const SizedBox(height: 10),
+                if (_totpItems.isEmpty)
+                  const Text(
+                    'Add your Base32 TOTP secret keys (SHA-1 / SHA-256 / SHA-512) for Bastion SSH MFA, Active Directory, or Proxmox VE. Tap any code to copy with 30s auto-scrub.',
+                    style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
+                  )
+                else
+                  for (int i = 0; i < _totpItems.length; i++) ...[
+                    if (i > 0) const Divider(height: 18),
+                    _buildTotpRow(
+                      _totpItems[i],
+                      Rfc6238Totp.generateCode(
+                        _totpItems[i].secretBase32,
+                        periodSeconds: _totpItems[i].periodSeconds,
+                        algorithm: _totpItems[i].algorithm,
+                        digits: _totpItems[i].digits,
+                      ),
                     ),
-                    child: Text(
-                      '${_secondsRemaining}s',
-                      style: const TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                ],
+                  ],
               ],
             ),
-            const SizedBox(height: 10),
-            if (_totpItems.isEmpty)
-              const Text(
-                'Add your Base32 TOTP secret keys (SHA-1 / SHA-256 / SHA-512) for Bastion SSH MFA, Active Directory, or Proxmox VE. Tap any code to copy with 30s auto-scrub.',
-                style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
-              )
-            else
-              for (int i = 0; i < _totpItems.length; i++) ...[
-                if (i > 0) const Divider(height: 18),
-                _buildTotpRow(
-                  _totpItems[i],
-                  Rfc6238Totp.generateCode(
-                    _totpItems[i].secretBase32,
-                    periodSeconds: _totpItems[i].periodSeconds,
-                    algorithm: _totpItems[i].algorithm,
-                    digits: _totpItems[i].digits,
-                  ),
-                ),
-              ],
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
 
     final securitySwitchesCard = Card(
       child: Column(
         children: [
-          ListTile(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            leading: Icon(
-              _vaultPinHash.isNotEmpty ? Icons.lock_rounded : Icons.lock_open_rounded,
-              color: _vaultPinHash.isNotEmpty ? JalaPalette.ok : JalaPalette.brandGold,
-              size: 20,
-            ),
-            title: const Text(
-              'Vault App-Lock PIN (PBKDF2-SHA256)',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
-            ),
-            subtitle: Text(
-              _vaultPinHash.isNotEmpty
-                  ? 'Active ($_vaultPinLength-digit PIN) • Auto-lock: ${_vaultAutoLockSeconds == 0 ? "Immediate" : _vaultAutoLockSeconds == 15 ? "15s" : _vaultAutoLockSeconds == 60 ? "1m" : "5m"}'
-                  : 'Protect saved servers, keys & 2FA with an App-Lock PIN',
-              style: const TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-            ),
-            trailing: Wrap(
-              spacing: 6,
-              children: [
-                if (_vaultPinHash.isNotEmpty)
-                  OutlinedButton(
-                    key: const Key('btn_lock_vault_now'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: JalaPalette.brandGold,
-                      side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.5)),
-                      visualDensity: VisualDensity.compact,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
+          ValueListenableBuilder<int>(
+            valueListenable: _vaultAutoLockNotifier,
+            builder: (context, autoLockSec, _) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    leading: Icon(
+                      _vaultPinHash.isNotEmpty ? Icons.lock_rounded : Icons.lock_open_rounded,
+                      color: _vaultPinHash.isNotEmpty ? JalaPalette.ok : JalaPalette.brandGold,
+                      size: 20,
                     ),
-                    onPressed: () => setState(() => _isVaultLocked = true),
-                    child: const Text('Lock', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
-                  ),
-                FilledButton.tonal(
-                  key: const Key('btn_configure_vault_pin'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: JalaPalette.selected,
-                    foregroundColor: JalaPalette.brandGold,
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                  ),
-                  onPressed: _showConfigureVaultPinDialog,
-                  child: Text(
-                    _vaultPinHash.isNotEmpty ? 'Manage' : 'Set PIN',
-                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-            child: Row(
-              children: [
-                const Icon(Icons.timer_outlined, size: 14, color: JalaPalette.brandGold),
-                const SizedBox(width: 6),
-                const Text(
-                  'Auto-Lock:',
-                  style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: JalaPalette.text2),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Wrap(
-                    spacing: 6,
-                    runSpacing: 4,
-                    children: [
-                      for (final (sec, label) in const <(int, String)>[
-                        (0, 'Immediate'),
-                        (15, '15s'),
-                        (60, '1m'),
-                        (300, '5m'),
-                      ])
-                        ChoiceChip(
-                          key: ValueKey('chip_autolock_$sec'),
-                          label: Text(label, style: const TextStyle(fontSize: 10.5)),
-                          selected: _vaultAutoLockSeconds == sec,
-                          visualDensity: VisualDensity.compact,
-                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          selectedColor: JalaPalette.selected,
-                          backgroundColor: JalaPalette.header,
-                          labelStyle: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: _vaultAutoLockSeconds == sec ? JalaPalette.brandGold : JalaPalette.muted,
+                    title: const Text(
+                      'Vault App-Lock PIN (PBKDF2-SHA256)',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+                    ),
+                    subtitle: Text(
+                      _vaultPinHash.isNotEmpty
+                          ? 'Active ($_vaultPinLength-digit PIN) • Auto-lock: ${autoLockSec == 0 ? "Immediate" : autoLockSec == 15 ? "15s" : autoLockSec == 60 ? "1m" : "5m"}'
+                          : 'Protect saved servers, keys & 2FA with an App-Lock PIN',
+                      style: const TextStyle(fontSize: 11.5, color: JalaPalette.muted),
+                    ),
+                    trailing: Wrap(
+                      spacing: 6,
+                      children: [
+                        if (_vaultPinHash.isNotEmpty)
+                          OutlinedButton(
+                            key: const Key('btn_lock_vault_now'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: JalaPalette.brandGold,
+                              side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.5)),
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                            ),
+                            onPressed: () => setState(() => _isVaultLocked = true),
+                            child: const Text('Lock', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
                           ),
-                          side: BorderSide(
-                            color: _vaultAutoLockSeconds == sec ? JalaPalette.brandGold : JalaPalette.lineInput,
+                        FilledButton.tonal(
+                          key: const Key('btn_configure_vault_pin'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: JalaPalette.selected,
+                            foregroundColor: JalaPalette.brandGold,
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
                           ),
-                          onSelected: (_) {
-                            setState(() => _vaultAutoLockSeconds = sec);
-                            _resetVaultInactivityTimer();
-                            unawaited(_saveVaultToDisk());
-                          },
+                          onPressed: _showConfigureVaultPinDialog,
+                          child: Text(
+                            _vaultPinHash.isNotEmpty ? 'Manage' : 'Set PIN',
+                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+                          ),
                         ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-              ],
-            ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.timer_outlined, size: 14, color: JalaPalette.brandGold),
+                        const SizedBox(width: 6),
+                        const Text(
+                          'Auto-Lock:',
+                          style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: JalaPalette.text2),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            children: [
+                              for (final (sec, label) in const <(int, String)>[
+                                (0, 'Immediate'),
+                                (15, '15s'),
+                                (60, '1m'),
+                                (300, '5m'),
+                              ])
+                                ChoiceChip(
+                                  key: ValueKey('chip_autolock_$sec'),
+                                  label: Text(label, style: const TextStyle(fontSize: 10.5)),
+                                  selected: autoLockSec == sec,
+                                  visualDensity: VisualDensity.compact,
+                                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  selectedColor: JalaPalette.selected,
+                                  backgroundColor: JalaPalette.header,
+                                  labelStyle: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    color: autoLockSec == sec ? JalaPalette.brandGold : JalaPalette.muted,
+                                  ),
+                                  side: BorderSide(
+                                    color: autoLockSec == sec ? JalaPalette.brandGold : JalaPalette.lineInput,
+                                  ),
+                                  onSelected: (_) {
+                                    if (_vaultAutoLockSeconds == sec && _vaultAutoLockNotifier.value == sec) {
+                                      return;
+                                    }
+                                    _vaultAutoLockSeconds = sec;
+                                    _vaultAutoLockNotifier.value = sec;
+                                    _resetVaultInactivityTimer();
+                                    unawaited(_saveScalarSettingsOnly());
+                                  },
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
           const Divider(height: 1),
           SwitchListTile(
@@ -9925,7 +10107,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             onChanged: (v) {
               setState(() => _secureScreenShield = v);
               unawaited(NativePlatformBridge.setSecureScreen(v));
-              unawaited(_saveVaultToDisk());
+              unawaited(_saveScalarSettingsOnly());
             },
             title: const Text(
               'Screen Capture & Recents Shield (FLAG_SECURE)',
@@ -9959,7 +10141,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             value: _biometricLock,
             onChanged: (v) {
               setState(() => _biometricLock = v);
-              unawaited(_saveVaultToDisk());
+              unawaited(_saveScalarSettingsOnly());
             },
             title: const Text(
               'Biometric Enclave Unlock (BiometricPrompt / FaceID)',
@@ -10043,29 +10225,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   ),
                 ],
               ],
-            ),
-            const SizedBox(height: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
-              decoration: BoxDecoration(
-                color: JalaPalette.selected.withValues(alpha: 0.65),
-                borderRadius: BorderRadius.circular(5),
-                border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
-              ),
-              child: const Text(
-                'LOCAL DEVICE ONLY • NOT GLOBAL',
-                style: TextStyle(
-                  fontSize: 9.5,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.4,
-                  color: JalaPalette.brandGold,
-                ),
-              ),
-            ),
-            const SizedBox(height: 5),
-            const Text(
-              'Stored encrypted on this phone via Trust-On-First-Use (TOFU) when you connect to an SSH server — never synced globally.',
-              style: TextStyle(fontSize: 11, color: JalaPalette.muted, height: 1.35),
             ),
             const SizedBox(height: 8),
             if (pinnedHosts.isEmpty)
@@ -10302,9 +10461,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
     return LayoutBuilder(
       builder: (ctx, constraints) {
+        final mediaPadding = MediaQuery.paddingOf(ctx);
+        final symPadX = max(mediaPadding.left, mediaPadding.right) + 14.0;
         final isTwoColumn = constraints.maxWidth >= 720;
         return SingleChildScrollView(
-          padding: const EdgeInsets.all(14),
+          padding: EdgeInsets.fromLTRB(symPadX, 14, symPadX, 14 + mediaPadding.bottom),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -10518,7 +10679,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             _isVaultLocked = false;
           });
           _resetVaultInactivityTimer();
-          _saveVaultToDisk();
+          unawaited(_saveScalarSettingsOnly());
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Vault App-Lock $pinLen-Digit PIN enabled.')),
           );
@@ -10529,7 +10690,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             _vaultPinHash = '';
             _isVaultLocked = false;
           });
-          _saveVaultToDisk();
+          unawaited(_saveScalarSettingsOnly());
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Vault App-Lock PIN removed.')),
           );
@@ -10884,6 +11045,8 @@ class _StandardTopLeftArrowCursorPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.scale(size.width / 16.0, size.height / 21.0);
     // Classic Windows / macOS Standard Pointer Arrow pointing strictly TOP-LEFT (`↖`), exact tip at (0, 0)
     final path = Path()
       ..moveTo(0.0, 0.0)
@@ -10915,6 +11078,7 @@ class _StandardTopLeftArrowCursorPainter extends CustomPainter {
 
     canvas.drawPath(path, fillPaint);
     canvas.drawPath(path, outlinePaint);
+    canvas.restore();
   }
 
   @override

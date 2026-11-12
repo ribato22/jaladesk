@@ -117,6 +117,25 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
   int _rippleSeq = 0;
 
   @override
+  void didUpdateWidget(covariant DesktopGestureSurface oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if ((widget.desktopRect != oldWidget.desktopRect ||
+            widget.viewportSize != oldWidget.viewportSize) &&
+        !_hasPannableOverflow &&
+        _currentZoomScale <= 1.01) {
+      final storage = widget.transformationController.value.storage;
+      final tx = storage[12];
+      final ty = storage[13];
+      if (tx.abs() > 0.5 || ty.abs() > 0.5) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _hasPannableOverflow || _currentZoomScale > 1.01) return;
+          widget.transformationController.value = Matrix4.identity();
+        });
+      }
+    }
+  }
+
+  @override
   void dispose() {
     _longPressTimer?.cancel();
     for (final t in _rippleTimers) {

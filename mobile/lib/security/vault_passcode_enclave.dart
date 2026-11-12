@@ -1,16 +1,39 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'vault_security_service.dart';
 
-/// Fintech-grade Sapphire-Gold Vault Passcode Unlock Enclave with:
+bool _verifyPinIsolateEntry((String, String) args) =>
+    VaultPinHasher.verifyPin(args.$1, args.$2);
+
+String _hashPinIsolateEntry(String pin) => VaultPinHasher.hashPin(pin);
+
+Future<bool> _verifyPinNonBlocking(String pin, String storedHash) async {
+  if (Platform.environment.containsKey('FLUTTER_TEST')) {
+    return VaultPinHasher.verifyPin(pin, storedHash);
+  }
+  await WidgetsBinding.instance.endOfFrame;
+  return compute(_verifyPinIsolateEntry, (pin, storedHash));
+}
+
+Future<String> _hashPinNonBlocking(String pin) async {
+  if (Platform.environment.containsKey('FLUTTER_TEST')) {
+    return VaultPinHasher.hashPin(pin);
+  }
+  await WidgetsBinding.instance.endOfFrame;
+  return compute(_hashPinIsolateEntry, pin);
+}
+
+/// Pure UI Numpad Sapphire-Gold Vault Passcode Unlock Enclave:
 /// - Animated PIN progress dots adapting cleanly to stored PIN length (`4`–`8` digits)
-/// - Tactile `3×4` numeric keypad with `HapticFeedback.lightImpact()` & instant auto-unlock
+/// - Tactile `3×4` UI numeric keypad with `HapticFeedback.lightImpact()` & non-blocking `compute()` PBKDF2 auto-unlock
+/// - Adaptive side-by-side Landscape layout (`915×412`) and centered Portrait layout with zero `TextField`s
 /// - Subtle horizontal shake animation on wrong PIN + 5-attempt 15-second cooldown guard
-/// - Synced accessible `TextField` (`field_unlock_vault_pin`) & button (`btn_unlock_vault_pin`)
 class VaultPinLockView extends StatefulWidget {
   final String pinHash;
   final int pinLength;
@@ -38,16 +61,15 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
   static const Color _selected = Color(0xFF2A4560);
   static const Color _lineInput = Color(0xFF39495C);
   static const Color _brandGold = Color(0xFFF3C66F);
-  static const Color _accent = Color(0xFF1A56DB);
   static const Color _danger = Color(0xFFF26D6D);
   static const Color _text = Color(0xFFEDF2F7);
   static const Color _muted = Color(0xFF8C9AA8);
 
-  final TextEditingController _pinCtrl = TextEditingController();
+  String _enteredPin = '';
   late final AnimationController _shakeCtrl;
   String? _unlockError;
   bool _biometricBusy = false;
-  bool _showCustomInputField = false;
+  bool _verifyingPin = false;
   int _failedAttempts = 0;
   int _cooldownSecondsLeft = 0;
   Timer? _cooldownTimer;
@@ -72,7 +94,6 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
   void dispose() {
     _cooldownTimer?.cancel();
     _shakeCtrl.dispose();
-    _pinCtrl.dispose();
     super.dispose();
   }
 
@@ -84,7 +105,7 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
   }
 
   Future<void> _triggerBiometricUnlock() async {
-    if (_biometricBusy || _cooldownSecondsLeft > 0) return;
+    if (_biometricBusy || _verifyingPin || _cooldownSecondsLeft > 0) return;
     setState(() {
       _biometricBusy = true;
       _unlockError = null;
@@ -125,20 +146,26 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
     });
   }
 
-  void _tryUnlock() {
-    if (_cooldownSecondsLeft > 0) return;
-    final pin = _pinCtrl.text.trim();
-    if (pin.isEmpty) return;
+  Future<void> _tryUnlock(String pin) async {
+    if (_cooldownSecondsLeft > 0 || _verifyingPin || pin.isEmpty) return;
+    setState(() => _verifyingPin = true);
 
-    if (VaultPinHasher.verifyPin(pin, widget.pinHash)) {
+    final matched = await _verifyPinNonBlocking(pin, widget.pinHash);
+    if (!mounted) return;
+
+    if (matched) {
       HapticFeedback.mediumImpact();
+      _verifyingPin = false;
       _failedAttempts = 0;
       widget.onUnlocked();
     } else {
       HapticFeedback.heavyImpact();
       _shakeCtrl.forward(from: 0.0);
       _failedAttempts++;
-      _pinCtrl.clear();
+      setState(() {
+        _verifyingPin = false;
+        _enteredPin = '';
+      });
       if (_failedAttempts >= 5) {
         _startCooldown();
       } else {
@@ -150,271 +177,149 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
   }
 
   void _onKeypadDigit(String digit) {
-    if (_cooldownSecondsLeft > 0) return;
+    if (_cooldownSecondsLeft > 0 || _verifyingPin) return;
+    if (_enteredPin.length >= _effectivePinLen) return;
     HapticFeedback.lightImpact();
-    final next = '${_pinCtrl.text}$digit';
-    if (next.length > 12) return;
+    final next = '$_enteredPin$digit';
     setState(() {
       _unlockError = null;
-      _pinCtrl.value = TextEditingValue(
-        text: next,
-        selection: TextSelection.collapsed(offset: next.length),
-      );
+      _enteredPin = next;
     });
     if (next.length == _effectivePinLen) {
-      _tryUnlock();
+      unawaited(_tryUnlock(next));
     }
   }
 
   void _onKeypadBackspace() {
-    if (_cooldownSecondsLeft > 0 || _pinCtrl.text.isEmpty) return;
+    if (_cooldownSecondsLeft > 0 || _verifyingPin || _enteredPin.isEmpty) return;
     HapticFeedback.selectionClick();
-    final next = _pinCtrl.text.substring(0, _pinCtrl.text.length - 1);
     setState(() {
-      _pinCtrl.value = TextEditingValue(
-        text: next,
-        selection: TextSelection.collapsed(offset: next.length),
-      );
+      _enteredPin = _enteredPin.substring(0, _enteredPin.length - 1);
     });
   }
 
   void _onKeypadClear() {
-    if (_cooldownSecondsLeft > 0 || _pinCtrl.text.isEmpty) return;
+    if (_cooldownSecondsLeft > 0 || _verifyingPin || _enteredPin.isEmpty) return;
     HapticFeedback.selectionClick();
-    setState(() => _pinCtrl.clear());
+    setState(() => _enteredPin = '');
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final currentLen = _pinCtrl.text.length;
-    final dotCount = math.max(_effectivePinLen, currentLen).clamp(4, 8);
-
-    return Scaffold(
-      key: const ValueKey('vault_pin_lock_screen'),
-      backgroundColor: _splashBg,
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 360),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
-                decoration: BoxDecoration(
-                  color: _surface,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: _brandGold.withValues(alpha: 0.45)),
-                  boxShadow: const [
-                    BoxShadow(color: Colors.black54, blurRadius: 24, offset: Offset(0, 10)),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Sapphire-Gold Shield Emblem + Brand Logo
-                    Stack(
-                      alignment: Alignment.bottomRight,
-                      children: [
-                        widget.brandLogo,
-                        Container(
-                          padding: const EdgeInsets.all(3),
-                          decoration: BoxDecoration(
-                            color: _header,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: _brandGold, width: 1.1),
-                          ),
-                          child: const Icon(Icons.shield_rounded, size: 12, color: _brandGold),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      'JalaDesk Vault Locked',
-                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: _text),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      'Enter your $_effectivePinLen-digit Security PIN to unseal servers, SSH keys & 2FA.',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontSize: 11.5, color: _muted, height: 1.3),
-                    ),
-                    const SizedBox(height: 14),
-                    // Animated PIN Progress Dots with subtle horizontal shake on wrong PIN
-                    AnimatedBuilder(
-                      animation: _shakeCtrl,
-                      builder: (ctx, child) {
-                        final dx = math.sin(_shakeCtrl.value * math.pi * 4) *
-                            10.0 *
-                            (1.0 - _shakeCtrl.value);
-                        return Transform.translate(offset: Offset(dx, 0), child: child);
-                      },
-                      child: Row(
-                        key: const ValueKey('vault_pin_progress_dots'),
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          for (int i = 0; i < dotCount; i++)
-                            AnimatedContainer(
-                              duration: const Duration(milliseconds: 140),
-                              margin: const EdgeInsets.symmetric(horizontal: 5),
-                              width: i < currentLen ? 13 : 11,
-                              height: i < currentLen ? 13 : 11,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: i < currentLen ? _brandGold : _header,
-                                border: Border.all(
-                                  color: i < currentLen ? _brandGold : _lineInput,
-                                  width: 1.4,
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    if (_unlockError != null) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        _unlockError!,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: _danger,
-                        ),
-                      ),
-                    ],
-                    const SizedBox(height: 14),
-                    // Tactile 3x4 Numeric Keypad
-                    _buildNumericKeypad(),
-                    const SizedBox(height: 10),
-                    // Synced Accessible TextField (compact/collapsible for custom-length PINs & automated tests)
-                    SizedBox(
-                      height: _showCustomInputField ? 40 : 1,
-                      child: Opacity(
-                        opacity: _showCustomInputField ? 1.0 : 0.02,
-                        child: TextField(
-                          key: const ValueKey('field_unlock_vault_pin'),
-                          controller: _pinCtrl,
-                          obscureText: true,
-                          keyboardType: TextInputType.number,
-                          textAlign: TextAlign.center,
-                          onChanged: (_) => setState(() => _unlockError = null),
-                          onSubmitted: (_) => _tryUnlock(),
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontFamily: 'monospace',
-                            letterSpacing: 3,
-                            fontWeight: FontWeight.w700,
-                            color: _brandGold,
-                          ),
-                          decoration: InputDecoration(
-                            hintText: 'Custom PIN',
-                            isDense: true,
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                            filled: true,
-                            fillColor: _header,
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(8),
-                              borderSide: const BorderSide(color: _lineInput),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    if (_showCustomInputField) const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.icon(
-                            key: const ValueKey('btn_unlock_vault_pin'),
-                            style: FilledButton.styleFrom(
-                              backgroundColor: _accent,
-                              foregroundColor: Colors.white,
-                              visualDensity: VisualDensity.compact,
-                              padding: const EdgeInsets.symmetric(vertical: 10),
-                            ),
-                            onPressed: _cooldownSecondsLeft > 0 ? null : _tryUnlock,
-                            icon: const Icon(Icons.lock_open_rounded, size: 16),
-                            label: const Text(
-                              'Unlock Vault',
-                              style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        IconButton(
-                          tooltip: _showCustomInputField ? 'Hide Keyboard Field' : 'Type Custom PIN',
-                          onPressed: () => setState(() => _showCustomInputField = !_showCustomInputField),
-                          style: IconButton.styleFrom(
-                            backgroundColor: _header,
-                            side: const BorderSide(color: _lineInput),
-                            visualDensity: VisualDensity.compact,
-                          ),
-                          icon: const Icon(Icons.keyboard_alt_outlined, size: 16, color: _brandGold),
-                        ),
-                      ],
-                    ),
-                    if (widget.biometricEnabled) ...[
-                      const SizedBox(height: 6),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          key: const ValueKey('btn_unlock_vault_biometric'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: _brandGold,
-                            side: BorderSide(color: _brandGold.withValues(alpha: 0.55)),
-                            visualDensity: VisualDensity.compact,
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                          ),
-                          onPressed: (_biometricBusy || _cooldownSecondsLeft > 0)
-                              ? null
-                              : _triggerBiometricUnlock,
-                          icon: const Icon(Icons.fingerprint_rounded, size: 17),
-                          label: Text(
-                            _biometricBusy ? 'Verifying Biometrics...' : 'Biometric Unlock',
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
+  Widget _buildHeaderAndDots({required bool compact}) {
+    final currentLen = _enteredPin.length;
+    final dotCount = math.max(_effectivePinLen, currentLen).clamp(4, 12);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Stack(
+          alignment: Alignment.bottomRight,
+          children: [
+            widget.brandLogo,
+            Container(
+              padding: const EdgeInsets.all(3),
+              decoration: BoxDecoration(
+                color: _header,
+                shape: BoxShape.circle,
+                border: Border.all(color: _brandGold, width: 1.1),
               ),
+              child: const Icon(Icons.shield_rounded, size: 12, color: _brandGold),
             ),
+          ],
+        ),
+        SizedBox(height: compact ? 8 : 10),
+        const Text(
+          'JalaDesk Vault Locked',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: _text),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          'Enter your $_effectivePinLen-digit Security PIN on the keypad to unseal your vault.',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 11.5, color: _muted, height: 1.3),
+        ),
+        SizedBox(height: compact ? 12 : 16),
+        AnimatedBuilder(
+          animation: _shakeCtrl,
+          builder: (ctx, child) {
+            final dx = math.sin(_shakeCtrl.value * math.pi * 4) * 10.0 * (1.0 - _shakeCtrl.value);
+            return Transform.translate(offset: Offset(dx, 0), child: child);
+          },
+          child: Wrap(
+            key: const ValueKey('vault_pin_progress_dots'),
+            alignment: WrapAlignment.center,
+            spacing: 10,
+            runSpacing: 6,
+            children: [
+              for (int i = 0; i < dotCount; i++)
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 130),
+                  width: i < currentLen ? 13 : 11,
+                  height: i < currentLen ? 13 : 11,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: i < currentLen ? _brandGold : _header,
+                    border: Border.all(
+                      color: i < currentLen ? _brandGold : _lineInput,
+                      width: 1.4,
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
-      ),
+        if (_unlockError != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _unlockError!,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              color: _danger,
+            ),
+          ),
+        ] else if (_biometricBusy) ...[
+          const SizedBox(height: 8),
+          const Text(
+            'Verifying biometrics...',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: _brandGold),
+          ),
+        ],
+      ],
     );
   }
 
-  Widget _buildNumericKeypad() {
+  Widget _buildNumericKeypad({required double buttonHeight}) {
     const rows = <List<String>>[
       <String>['1', '2', '3'],
       <String>['4', '5', '6'],
       <String>['7', '8', '9'],
     ];
+    final disabled = _cooldownSecondsLeft > 0 || _verifyingPin;
 
     Widget buildDigitButton(String d) {
       return Expanded(
         child: Padding(
           padding: const EdgeInsets.all(4),
           child: Material(
-            color: _header.withValues(alpha: 0.90),
+            color: _header.withValues(alpha: 0.92),
             borderRadius: BorderRadius.circular(12),
             child: InkWell(
               key: ValueKey('btn_pin_digit_$d'),
               borderRadius: BorderRadius.circular(12),
-              onTap: _cooldownSecondsLeft > 0 ? null : () => _onKeypadDigit(d),
+              onTap: disabled ? null : () => _onKeypadDigit(d),
               child: Container(
-                height: 44,
+                height: buttonHeight,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: _lineInput.withValues(alpha: 0.75)),
+                  border: Border.all(color: _lineInput.withValues(alpha: 0.78)),
                 ),
                 child: Text(
                   d,
-                  style: const TextStyle(
-                    fontSize: 18,
+                  style: TextStyle(
+                    fontSize: buttonHeight <= 40 ? 17 : 19,
                     fontWeight: FontWeight.w700,
                     color: _text,
                   ),
@@ -444,20 +349,20 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
                   color: _selected.withValues(alpha: 0.55),
                   borderRadius: BorderRadius.circular(12),
                   child: InkWell(
-                    key: ValueKey(widget.biometricEnabled ? 'btn_keypad_biometric' : 'btn_pin_clear'),
+                    key: ValueKey(widget.biometricEnabled ? 'btn_pin_biometric' : 'btn_pin_clear'),
                     borderRadius: BorderRadius.circular(12),
-                    onTap: _cooldownSecondsLeft > 0
+                    onTap: disabled
                         ? null
                         : (widget.biometricEnabled ? _triggerBiometricUnlock : _onKeypadClear),
                     child: Container(
-                      height: 44,
+                      height: buttonHeight,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: _brandGold.withValues(alpha: 0.4)),
+                        border: Border.all(color: _brandGold.withValues(alpha: 0.42)),
                       ),
                       child: widget.biometricEnabled
-                          ? const Icon(Icons.fingerprint_rounded, size: 20, color: _brandGold)
+                          ? const Icon(Icons.fingerprint_rounded, size: 21, color: _brandGold)
                           : const Text(
                               'Clear',
                               style: TextStyle(
@@ -476,18 +381,18 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
               child: Padding(
                 padding: const EdgeInsets.all(4),
                 child: Material(
-                  color: _header.withValues(alpha: 0.90),
+                  color: _header.withValues(alpha: 0.92),
                   borderRadius: BorderRadius.circular(12),
                   child: InkWell(
                     key: const ValueKey('btn_pin_backspace'),
                     borderRadius: BorderRadius.circular(12),
-                    onTap: _cooldownSecondsLeft > 0 ? null : _onKeypadBackspace,
+                    onTap: disabled ? null : _onKeypadBackspace,
                     child: Container(
-                      height: 44,
+                      height: buttonHeight,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: _lineInput.withValues(alpha: 0.75)),
+                        border: Border.all(color: _lineInput.withValues(alpha: 0.78)),
                       ),
                       child: const Icon(Icons.backspace_outlined, size: 18, color: _brandGold),
                     ),
@@ -500,12 +405,97 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
       ],
     );
   }
+
+  @override
+  Widget build(BuildContext context) {
+    final mediaPadding = MediaQuery.paddingOf(context);
+    final symPadX = math.max(mediaPadding.left, mediaPadding.right) + 16.0;
+
+    return Scaffold(
+      key: const ValueKey('vault_pin_lock_screen'),
+      backgroundColor: _splashBg,
+      body: SafeArea(
+        left: false,
+        right: false,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final isCompactLandscape =
+                constraints.maxWidth > constraints.maxHeight && constraints.maxHeight < 480;
+
+            if (isCompactLandscape) {
+              return Center(
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.symmetric(horizontal: symPadX, vertical: 8),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 640),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                      decoration: BoxDecoration(
+                        color: _surface,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: _brandGold.withValues(alpha: 0.45)),
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black54, blurRadius: 24, offset: Offset(0, 10)),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            flex: 5,
+                            child: _buildHeaderAndDots(compact: true),
+                          ),
+                          const SizedBox(width: 18),
+                          Expanded(
+                            flex: 6,
+                            child: _buildNumericKeypad(buttonHeight: 38),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }
+
+            return Center(
+              child: SingleChildScrollView(
+                padding: EdgeInsets.symmetric(horizontal: symPadX, vertical: 14),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 356),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                    decoration: BoxDecoration(
+                      color: _surface,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: _brandGold.withValues(alpha: 0.45)),
+                      boxShadow: const [
+                        BoxShadow(color: Colors.black54, blurRadius: 24, offset: Offset(0, 10)),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildHeaderAndDots(compact: false),
+                        const SizedBox(height: 16),
+                        _buildNumericKeypad(buttonHeight: 46),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
 }
 
-/// World-Class Passcode Setup Modal Sheet / Dialog supporting:
-/// - Quick selector between 6-Digit PIN (Recommended) and 4-Digit PIN
-/// - Step-by-step guided stages (`Verify Current PIN` -> `Create Security PIN` -> `Confirm Security PIN`)
-/// - Tactile `3×4` keypad + animated Sapphire-Gold progress dots + synced accessible `TextField`s
+/// Pure UI Numpad Guided Passcode Setup Sheet / Dialog:
+/// - Zero `TextField`s — 100% tactile `3×4` UI keypad interaction
+/// - Quick selector between `6 Digits` (`chip_pin_len_6`) and `4 Digits` (`chip_pin_len_4`)
+/// - Guided stages (`Enter Current PIN` -> `Create Security PIN` / `Remove PIN` -> `Confirm Security PIN`)
+/// - Non-blocking `compute()` PBKDF2-HMAC-SHA256 verification and hashing + responsive Landscape layout
 class VaultPinSetupSheet extends StatefulWidget {
   final String existingPinHash;
   final int initialPinLength;
@@ -530,18 +520,19 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
   static const Color _selected = Color(0xFF2A4560);
   static const Color _lineInput = Color(0xFF39495C);
   static const Color _brandGold = Color(0xFFF3C66F);
-  static const Color _accent = Color(0xFF1A56DB);
   static const Color _danger = Color(0xFFF26D6D);
   static const Color _text = Color(0xFFEDF2F7);
   static const Color _text2 = Color(0xFFC4CFD9);
   static const Color _muted = Color(0xFF8C9AA8);
 
-  final TextEditingController _currentCtrl = TextEditingController();
-  final TextEditingController _newPinCtrl = TextEditingController();
-  final TextEditingController _confirmCtrl = TextEditingController();
+  String _currentPin = '';
+  String _newPin = '';
+  String _confirmPin = '';
 
   late int _targetPinLen;
-  late int _stage; // 0 = verify current, 1 = create new, 2 = confirm new
+  late int _stage; // 0 = Enter Current PIN, 1 = Create PIN, 2 = Confirm PIN
+  bool _currentVerified = false;
+  bool _busy = false;
   String? _errorMsg;
 
   bool get _hasExisting => widget.existingPinHash.isNotEmpty;
@@ -551,453 +542,462 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
     super.initState();
     _targetPinLen = widget.initialPinLength == 4 ? 4 : 6;
     _stage = _hasExisting ? 0 : 1;
+    _currentVerified = !_hasExisting;
   }
 
-  @override
-  void dispose() {
-    _currentCtrl.dispose();
-    _newPinCtrl.dispose();
-    _confirmCtrl.dispose();
-    super.dispose();
+  String get _activePin {
+    if (_stage == 0) return _currentPin;
+    if (_stage == 1) return _newPin;
+    return _confirmPin;
   }
 
-  TextEditingController get _activeController {
-    if (_stage == 0) return _currentCtrl;
-    if (_stage == 1) return _newPinCtrl;
-    return _confirmCtrl;
+  void _setActivePin(String value) {
+    if (_stage == 0) {
+      _currentPin = value;
+    } else if (_stage == 1) {
+      _newPin = value;
+    } else {
+      _confirmPin = value;
+    }
   }
+
+  int get _activeTargetLen =>
+      _stage == 0 ? widget.initialPinLength.clamp(4, 12) : _targetPinLen;
 
   String get _stageTitle {
-    if (_stage == 0) return 'Step 1 • Verify Current PIN';
-    if (_stage == 1) return _hasExisting ? 'Step 2 • Create New PIN' : 'Step 1 • Create Security PIN';
-    return _hasExisting ? 'Step 3 • Confirm New PIN' : 'Step 2 • Confirm Security PIN';
+    if (_stage == 0) return 'Step 1 • Enter Current PIN';
+    if (_stage == 1) {
+      return _hasExisting ? 'Create New PIN' : 'Step 1 • Create Security PIN';
+    }
+    return _hasExisting ? 'Confirm New PIN' : 'Step 2 • Confirm Security PIN';
   }
 
-  void _handleSave() {
-    if (_hasExisting &&
-        !VaultPinHasher.verifyPin(_currentCtrl.text.trim(), widget.existingPinHash)) {
+  String get _stageSubtitle {
+    if (_stage == 0) {
+      return 'Verify your current ${widget.initialPinLength.clamp(4, 12)}-digit PIN to remove or replace it.';
+    }
+    if (_stage == 1) {
+      return _hasExisting
+          ? 'Current PIN verified. Remove PIN below or enter a new $_targetPinLen-digit PIN.'
+          : 'Tap $_targetPinLen digits on the keypad below.';
+    }
+    return 'Re-enter the same $_targetPinLen digits to activate Vault App-Lock.';
+  }
+
+  Future<void> _onSetupKeypadDigit(String d) async {
+    if (_busy) return;
+    final current = _activePin;
+    final maxTarget = _activeTargetLen;
+    if (current.length >= maxTarget) return;
+
+    HapticFeedback.lightImpact();
+    final next = '$current$d';
+    setState(() {
+      _errorMsg = null;
+      _setActivePin(next);
+    });
+
+    if (next.length < maxTarget) return;
+
+    if (_stage == 0) {
+      setState(() => _busy = true);
+      final ok = await _verifyPinNonBlocking(next, widget.existingPinHash);
+      if (!mounted) return;
+      if (ok) {
+        HapticFeedback.mediumImpact();
+        setState(() {
+          _busy = false;
+          _currentVerified = true;
+          _stage = 1;
+          _errorMsg = null;
+        });
+      } else {
+        HapticFeedback.heavyImpact();
+        setState(() {
+          _busy = false;
+          _currentPin = '';
+          _errorMsg = 'Current PIN is incorrect.';
+        });
+      }
+      return;
+    }
+
+    if (_stage == 1) {
+      setState(() => _stage = 2);
+      return;
+    }
+
+    if (next != _newPin) {
+      HapticFeedback.heavyImpact();
       setState(() {
-        _stage = 0;
-        _errorMsg = 'Current PIN is incorrect.';
+        _confirmPin = '';
+        _errorMsg = 'PIN confirmation does not match. Try again.';
       });
       return;
     }
-    final pin = _newPinCtrl.text.trim();
-    if (pin.length < 4 || pin.length > 12) {
-      setState(() {
-        _stage = 1;
-        _errorMsg = 'PIN must be between 4 and 12 digits.';
-      });
-      return;
-    }
-    if (pin != _confirmCtrl.text.trim()) {
-      setState(() {
-        _stage = 2;
-        _confirmCtrl.clear();
-        _errorMsg = 'PIN confirmation does not match.';
-      });
-      return;
-    }
+
+    setState(() => _busy = true);
+    final hashed = await _hashPinNonBlocking(_newPin);
+    if (!mounted) return;
     HapticFeedback.mediumImpact();
-    final hashed = VaultPinHasher.hashPin(pin);
     Navigator.of(context).pop();
-    widget.onSavePin(hashed, pin.length);
+    widget.onSavePin(hashed, _targetPinLen);
   }
 
-  void _handleRemove() {
-    if (!VaultPinHasher.verifyPin(_currentCtrl.text.trim(), widget.existingPinHash)) {
-      setState(() {
-        _stage = 0;
-        _errorMsg = 'Current PIN is incorrect.';
-      });
+  void _onSetupBackspace() {
+    if (_busy) return;
+    final current = _activePin;
+    if (current.isEmpty) {
+      if (_stage == 2) {
+        HapticFeedback.selectionClick();
+        setState(() {
+          _stage = 1;
+          _newPin = '';
+          _errorMsg = null;
+        });
+      }
       return;
     }
+    HapticFeedback.selectionClick();
+    setState(() {
+      _setActivePin(current.substring(0, current.length - 1));
+    });
+  }
+
+  void _onSetupClear() {
+    if (_busy || _activePin.isEmpty) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _setActivePin('');
+      _errorMsg = null;
+    });
+  }
+
+  void _handleVerifiedRemovePin() {
+    if (!_currentVerified || _busy) return;
     HapticFeedback.mediumImpact();
     Navigator.of(context).pop();
     widget.onRemovePin();
   }
 
-  void _onSetupKeypadDigit(String d) {
-    HapticFeedback.lightImpact();
-    final ctrl = _activeController;
-    final maxTarget = _stage == 0 ? widget.initialPinLength.clamp(4, 12) : _targetPinLen;
-    if (ctrl.text.length >= 12) return;
-    final next = '${ctrl.text}$d';
-    setState(() {
-      _errorMsg = null;
-      ctrl.value = TextEditingValue(
-        text: next,
-        selection: TextSelection.collapsed(offset: next.length),
-      );
-    });
-
-    if (_stage == 0 && next.length == maxTarget) {
-      if (VaultPinHasher.verifyPin(next, widget.existingPinHash)) {
-        setState(() => _stage = 1);
-      } else {
-        HapticFeedback.heavyImpact();
-        setState(() {
-          _currentCtrl.clear();
-          _errorMsg = 'Current PIN is incorrect.';
-        });
-      }
-    } else if (_stage == 1 && next.length == _targetPinLen) {
-      setState(() => _stage = 2);
-    } else if (_stage == 2 && next.length == _targetPinLen) {
-      _handleSave();
-    }
+  Widget _buildLengthSelector() {
+    if (_stage == 0) return const SizedBox.shrink();
+    return Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      alignment: WrapAlignment.center,
+      children: [
+        ChoiceChip(
+          key: const ValueKey('chip_pin_len_4'),
+          label: const Text('4 Digits', style: TextStyle(fontSize: 11)),
+          selected: _targetPinLen == 4,
+          visualDensity: VisualDensity.compact,
+          selectedColor: _selected,
+          backgroundColor: _header,
+          labelStyle: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: _targetPinLen == 4 ? _brandGold : _text2,
+          ),
+          side: BorderSide(color: _targetPinLen == 4 ? _brandGold : _lineInput),
+          onSelected: _busy
+              ? null
+              : (_) => setState(() {
+                    _targetPinLen = 4;
+                    _newPin = '';
+                    _confirmPin = '';
+                    _stage = 1;
+                    _errorMsg = null;
+                  }),
+        ),
+        ChoiceChip(
+          key: const ValueKey('chip_pin_len_6'),
+          label: const Text('6 Digits', style: TextStyle(fontSize: 11)),
+          selected: _targetPinLen == 6,
+          visualDensity: VisualDensity.compact,
+          selectedColor: _selected,
+          backgroundColor: _header,
+          labelStyle: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: _targetPinLen == 6 ? _brandGold : _text2,
+          ),
+          side: BorderSide(color: _targetPinLen == 6 ? _brandGold : _lineInput),
+          onSelected: _busy
+              ? null
+              : (_) => setState(() {
+                    _targetPinLen = 6;
+                    _newPin = '';
+                    _confirmPin = '';
+                    _stage = 1;
+                    _errorMsg = null;
+                  }),
+        ),
+      ],
+    );
   }
 
-  void _onSetupBackspace() {
-    final ctrl = _activeController;
-    if (ctrl.text.isEmpty) return;
-    HapticFeedback.selectionClick();
-    final next = ctrl.text.substring(0, ctrl.text.length - 1);
-    setState(() {
-      ctrl.value = TextEditingValue(
-        text: next,
-        selection: TextSelection.collapsed(offset: next.length),
-      );
-    });
+  Widget _buildInfoColumn({required bool compact}) {
+    final activeLen = _activePin.length;
+    final dotTarget = _activeTargetLen.clamp(4, 12);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildLengthSelector(),
+        if (_stage != 0) SizedBox(height: compact ? 6 : 10),
+        Text(
+          _stageTitle,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+            color: _brandGold,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          _stageSubtitle,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 11, color: _muted, height: 1.3),
+        ),
+        SizedBox(height: compact ? 8 : 12),
+        Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 10,
+          runSpacing: 6,
+          children: [
+            for (int i = 0; i < dotTarget; i++)
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 130),
+                width: i < activeLen ? 12.5 : 10.5,
+                height: i < activeLen ? 12.5 : 10.5,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: i < activeLen ? _brandGold : _header,
+                  border: Border.all(
+                    color: i < activeLen ? _brandGold : _lineInput,
+                    width: 1.3,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        if (_errorMsg != null) ...[
+          const SizedBox(height: 7),
+          Text(
+            _errorMsg!,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 11.5, color: _danger, fontWeight: FontWeight.w600),
+          ),
+        ],
+        if (_hasExisting && _currentVerified) ...[
+          SizedBox(height: compact ? 8 : 10),
+          OutlinedButton.icon(
+            key: const ValueKey('btn_remove_vault_pin'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _danger,
+              side: BorderSide(color: _danger.withValues(alpha: 0.65)),
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            ),
+            onPressed: _busy ? null : _handleVerifiedRemovePin,
+            icon: const Icon(Icons.lock_open_rounded, size: 15),
+            label: const Text(
+              'Remove PIN',
+              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildSetupKeypad({required double buttonHeight}) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final row in const <List<String>>[
+          <String>['1', '2', '3'],
+          <String>['4', '5', '6'],
+          <String>['7', '8', '9'],
+        ])
+          Row(
+            children: [
+              for (final d in row)
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: InkWell(
+                      key: ValueKey('btn_setup_pin_digit_$d'),
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: _busy ? null : () => _onSetupKeypadDigit(d),
+                      child: Container(
+                        height: buttonHeight,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: _header,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: _lineInput),
+                        ),
+                        child: Text(
+                          d,
+                          style: const TextStyle(
+                            fontSize: 16.5,
+                            fontWeight: FontWeight.w700,
+                            color: _text,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        Row(
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(3),
+                child: InkWell(
+                  key: const ValueKey('btn_setup_pin_clear'),
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: _busy ? null : _onSetupClear,
+                  child: Container(
+                    height: buttonHeight,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: _header,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: _lineInput),
+                    ),
+                    child: const Text(
+                      'Clear',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: _muted),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(3),
+                child: InkWell(
+                  key: const ValueKey('btn_setup_pin_digit_0'),
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: _busy ? null : () => _onSetupKeypadDigit('0'),
+                  child: Container(
+                    height: buttonHeight,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: _header,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: _lineInput),
+                    ),
+                    child: const Text(
+                      '0',
+                      style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700, color: _text),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(3),
+                child: InkWell(
+                  key: const ValueKey('btn_setup_pin_backspace'),
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: _busy ? null : _onSetupBackspace,
+                  child: Container(
+                    height: buttonHeight,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: _header,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: _lineInput),
+                    ),
+                    child: const Icon(Icons.backspace_outlined, size: 16, color: _brandGold),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final activeText = _activeController.text;
-    final dotTarget = _stage == 0 ? widget.initialPinLength.clamp(4, 8) : _targetPinLen;
+    final screenSize = MediaQuery.sizeOf(context);
+    final isLandscape = screenSize.width > screenSize.height && screenSize.height < 480;
 
     return Dialog(
       backgroundColor: _surface,
-      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(18),
         side: BorderSide(color: _brandGold.withValues(alpha: 0.45)),
       ),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 400),
+        constraints: BoxConstraints(maxWidth: isLandscape ? 600 : 380),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
+          padding: EdgeInsets.fromLTRB(18, isLandscape ? 10 : 14, 18, isLandscape ? 10 : 14),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Flexible(
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
+              Row(
                 children: [
-                  const Icon(Icons.shield_outlined, size: 20, color: _brandGold),
+                  const Icon(Icons.shield_outlined, size: 19, color: _brandGold),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       _hasExisting ? 'Manage Vault Security PIN' : 'Setup Vault Security PIN',
                       style: const TextStyle(
-                        fontSize: 15,
+                        fontSize: 14.5,
                         fontWeight: FontWeight.w800,
                         color: _text,
                       ),
                     ),
                   ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close_rounded, size: 18, color: _muted),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              // Quick 6-Digit vs 4-Digit selector (Wrap prevents horizontal overflow on narrow phones/fonts)
-              Wrap(
-                spacing: 8,
-                runSpacing: 6,
-                alignment: WrapAlignment.center,
-                children: [
-                  ChoiceChip(
-                    key: const ValueKey('chip_pin_len_6'),
-                    label: const Text('6-Digit (Rec.)', style: TextStyle(fontSize: 11)),
-                    selected: _targetPinLen == 6,
-                    visualDensity: VisualDensity.compact,
-                    selectedColor: _selected,
-                    backgroundColor: _header,
-                    labelStyle: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      color: _targetPinLen == 6 ? _brandGold : _text2,
-                    ),
-                    side: BorderSide(color: _targetPinLen == 6 ? _brandGold : _lineInput),
-                    onSelected: (_) => setState(() {
-                      _targetPinLen = 6;
-                      _newPinCtrl.clear();
-                      _confirmCtrl.clear();
-                      if (_stage > 1) _stage = 1;
-                    }),
-                  ),
-                  ChoiceChip(
-                    key: const ValueKey('chip_pin_len_4'),
-                    label: const Text('4-Digit', style: TextStyle(fontSize: 11)),
-                    selected: _targetPinLen == 4,
-                    visualDensity: VisualDensity.compact,
-                    selectedColor: _selected,
-                    backgroundColor: _header,
-                    labelStyle: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      color: _targetPinLen == 4 ? _brandGold : _text2,
-                    ),
-                    side: BorderSide(color: _targetPinLen == 4 ? _brandGold : _lineInput),
-                    onSelected: (_) => setState(() {
-                      _targetPinLen = 4;
-                      _newPinCtrl.clear();
-                      _confirmCtrl.clear();
-                      if (_stage > 1) _stage = 1;
-                    }),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(
-                _stageTitle,
-                style: const TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                  color: _brandGold,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  for (int i = 0; i < dotTarget; i++)
-                    AnimatedContainer(
-                      duration: const Duration(milliseconds: 140),
-                      margin: const EdgeInsets.symmetric(horizontal: 5),
-                      width: i < activeText.length ? 12 : 10,
-                      height: i < activeText.length ? 12 : 10,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: i < activeText.length ? _brandGold : _header,
-                        border: Border.all(
-                          color: i < activeText.length ? _brandGold : _lineInput,
-                          width: 1.3,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-              if (_errorMsg != null) ...[
-                const SizedBox(height: 6),
-                Text(
-                  _errorMsg!,
-                  style: const TextStyle(fontSize: 11.5, color: _danger, fontWeight: FontWeight.w600),
-                ),
-              ],
-              const SizedBox(height: 10),
-              // Tactile 3x4 Setup Keypad
-              for (final row in const <List<String>>[
-                <String>['1', '2', '3'],
-                <String>['4', '5', '6'],
-                <String>['7', '8', '9'],
-              ])
-                Row(
-                  children: [
-                    for (final d in row)
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.all(3),
-                          child: InkWell(
-                            key: ValueKey('btn_setup_pin_digit_$d'),
-                            borderRadius: BorderRadius.circular(10),
-                            onTap: () => _onSetupKeypadDigit(d),
-                            child: Container(
-                              height: 38,
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                color: _header,
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: _lineInput),
-                              ),
-                              child: Text(
-                                d,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w700,
-                                  color: _text,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              Row(
-                children: [
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.all(3),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(10),
-                        onTap: () => setState(() => _activeController.clear()),
-                        child: Container(
-                          height: 38,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: _header,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: _lineInput),
-                          ),
-                          child: const Text(
-                            'Clear',
-                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: _muted),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.all(3),
-                      child: InkWell(
-                        key: const ValueKey('btn_setup_pin_digit_0'),
-                        borderRadius: BorderRadius.circular(10),
-                        onTap: () => _onSetupKeypadDigit('0'),
-                        child: Container(
-                          height: 38,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: _header,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: _lineInput),
-                          ),
-                          child: const Text(
-                            '0',
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _text),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.all(3),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(10),
-                        onTap: _onSetupBackspace,
-                        child: Container(
-                          height: 38,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: _header,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: _lineInput),
-                          ),
-                          child: const Icon(Icons.backspace_outlined, size: 16, color: _brandGold),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              // Accessible synced fields for direct custom entry & automated widget test compatibility
-              if (_hasExisting) ...[
-                TextField(
-                  key: const ValueKey('field_current_vault_pin'),
-                  controller: _currentCtrl,
-                  obscureText: true,
-                  keyboardType: TextInputType.number,
-                  onTap: () => setState(() => _stage = 0),
-                  onChanged: (_) => setState(() => _errorMsg = null),
-                  style: const TextStyle(fontSize: 12, color: _text),
-                  decoration: InputDecoration(
-                    labelText: 'Current PIN *',
-                    labelStyle: const TextStyle(fontSize: 11, color: _brandGold),
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                    filled: true,
-                    fillColor: _header,
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                ),
-                const SizedBox(height: 6),
-              ],
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      key: const ValueKey('field_new_vault_pin'),
-                      controller: _newPinCtrl,
-                      obscureText: true,
-                      keyboardType: TextInputType.number,
-                      onTap: () => setState(() => _stage = 1),
-                      onChanged: (_) => setState(() => _errorMsg = null),
-                      style: const TextStyle(fontSize: 12, color: _text),
-                      decoration: InputDecoration(
-                        labelText: _hasExisting ? 'New PIN' : 'Security PIN *',
-                        labelStyle: const TextStyle(fontSize: 11, color: _text2),
-                        isDense: true,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                        filled: true,
-                        fillColor: _header,
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: TextField(
-                      key: const ValueKey('field_confirm_vault_pin'),
-                      controller: _confirmCtrl,
-                      obscureText: true,
-                      keyboardType: TextInputType.number,
-                      onTap: () => setState(() => _stage = 2),
-                      onChanged: (_) => setState(() => _errorMsg = null),
-                      style: const TextStyle(fontSize: 12, color: _text),
-                      decoration: InputDecoration(
-                        labelText: 'Confirm PIN *',
-                        labelStyle: const TextStyle(fontSize: 11, color: _text2),
-                        isDense: true,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                        filled: true,
-                        fillColor: _header,
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
                   TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel', style: TextStyle(fontSize: 12, color: _muted)),
-                  ),
-                  if (_hasExisting)
-                    TextButton(
-                      key: const ValueKey('btn_remove_vault_pin'),
-                      onPressed: _handleRemove,
-                      child: const Text(
-                        'Remove PIN',
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _danger),
-                      ),
-                    ),
-                  const SizedBox(width: 4),
-                  FilledButton(
-                    key: const ValueKey('btn_save_vault_pin'),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: _accent,
-                      foregroundColor: Colors.white,
+                    key: const ValueKey('btn_cancel_vault_pin'),
+                    style: TextButton.styleFrom(
                       visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
-                    onPressed: _handleSave,
-                    child: const Text('Save PIN', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                    onPressed: _busy ? null : () => Navigator.of(context).pop(),
+                    child: const Text('Cancel', style: TextStyle(fontSize: 11.5, color: _muted)),
                   ),
                 ],
+              ),
+              SizedBox(height: isLandscape ? 6 : 8),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: isLandscape
+                      ? Row(
+                          children: [
+                            Expanded(
+                              flex: 5,
+                              child: _buildInfoColumn(compact: true),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              flex: 6,
+                              child: _buildSetupKeypad(buttonHeight: 35),
+                            ),
+                          ],
+                        )
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _buildInfoColumn(compact: false),
+                            const SizedBox(height: 12),
+                            _buildSetupKeypad(buttonHeight: 42),
+                          ],
+                        ),
+                ),
               ),
             ],
           ),
