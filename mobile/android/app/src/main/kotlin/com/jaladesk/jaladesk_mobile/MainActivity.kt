@@ -19,6 +19,7 @@ import android.provider.OpenableColumns
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.view.HapticFeedbackConstants
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -27,12 +28,16 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.KeyStore
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
 
 class MainActivity : FlutterActivity() {
     companion object {
@@ -201,6 +206,93 @@ class MainActivity : FlutterActivity() {
                         val subtitle = call.argument<String>("subtitle")
                             ?: "Verify your identity to unseal encrypted credentials & 2FA"
                         promptHardwareBiometric(title, subtitle, result)
+                    }
+                    "performPinHaptic" -> {
+                        val type = call.argument<String>("type") ?: "tap"
+                        val constant = when (type) {
+                            "tap" -> HapticFeedbackConstants.KEYBOARD_TAP
+                            "backspace" -> HapticFeedbackConstants.CLOCK_TICK
+                            "confirm" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                HapticFeedbackConstants.CONFIRM
+                            } else {
+                                HapticFeedbackConstants.KEYBOARD_TAP
+                            }
+                            "reject" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                HapticFeedbackConstants.REJECT
+                            } else {
+                                HapticFeedbackConstants.LONG_PRESS
+                            }
+                            else -> HapticFeedbackConstants.KEYBOARD_TAP
+                        }
+                        @Suppress("DEPRECATION")
+                        window.decorView.performHapticFeedback(
+                            constant,
+                            HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING
+                        )
+                        result.success(true)
+                    }
+                    "verifyPinNative" -> {
+                        val pin = call.argument<String>("pin") ?: ""
+                        val storedRecord = call.argument<String>("storedRecord") ?: ""
+                        ioExecutor.execute {
+                            try {
+                                val parts = storedRecord.split(':')
+                                if (parts.size != 4 || parts[0] != "pbkdf2") {
+                                    runOnUiThread { result.success(false) }
+                                    return@execute
+                                }
+                                val iters = parts[1].toIntOrNull() ?: 100000
+                                if (iters <= 0) {
+                                    runOnUiThread { result.success(false) }
+                                    return@execute
+                                }
+                                val salt = Base64.decode(parts[2], Base64.DEFAULT)
+                                val expected = Base64.decode(parts[3], Base64.DEFAULT)
+                                if (expected.isEmpty()) {
+                                    runOnUiThread { result.success(false) }
+                                    return@execute
+                                }
+                                val spec = PBEKeySpec(pin.toCharArray(), salt, iters, expected.size * 8)
+                                val actual = try {
+                                    SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                                        .generateSecret(spec)
+                                        .encoded
+                                } finally {
+                                    spec.clearPassword()
+                                }
+                                val matched = MessageDigest.isEqual(actual, expected)
+                                runOnUiThread { result.success(matched) }
+                            } catch (e: Exception) {
+                                runOnUiThread {
+                                    result.error("PIN_VERIFY_FAILED", e.message ?: "Native PBKDF2 verify failed", null)
+                                }
+                            }
+                        }
+                    }
+                    "hashPinNative" -> {
+                        val pin = call.argument<String>("pin") ?: ""
+                        val iterations = (call.argument<Int>("iterations") ?: 100000).coerceAtLeast(1)
+                        ioExecutor.execute {
+                            try {
+                                val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+                                val spec = PBEKeySpec(pin.toCharArray(), salt, iterations, 256)
+                                val derived = try {
+                                    SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                                        .generateSecret(spec)
+                                        .encoded
+                                } finally {
+                                    spec.clearPassword()
+                                }
+                                val saltB64 = Base64.encodeToString(salt, Base64.NO_WRAP)
+                                val derivedB64 = Base64.encodeToString(derived, Base64.NO_WRAP)
+                                val record = "pbkdf2:$iterations:$saltB64:$derivedB64"
+                                runOnUiThread { result.success(record) }
+                            } catch (e: Exception) {
+                                runOnUiThread {
+                                    result.error("PIN_HASH_FAILED", e.message ?: "Native PBKDF2 hash failed", null)
+                                }
+                            }
+                        }
                     }
                     else -> result.notImplemented()
                 }

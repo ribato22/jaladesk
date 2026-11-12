@@ -6070,10 +6070,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
   @override
   Widget build(BuildContext context) {
-    if (_isVaultLocked && _vaultPinHash.isNotEmpty) {
-      return _buildVaultPinLockScreen();
-    }
-    return Listener(
+    final bool isLockedWithPin = _isVaultLocked && _vaultPinHash.isNotEmpty;
+    final Widget unlockedShell = Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: (_) => _resetVaultInactivityTimer(),
       child: LayoutBuilder(
@@ -6462,6 +6460,22 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         );
         },
       ),
+    );
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Visibility(
+          visible: !isLockedWithPin,
+          maintainState: true,
+          maintainAnimation: true,
+          maintainSize: false,
+          child: unlockedShell,
+        ),
+        if (isLockedWithPin)
+          Positioned.fill(
+            child: _buildVaultPinLockScreen(),
+          ),
+      ],
     );
   }
 

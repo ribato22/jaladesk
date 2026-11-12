@@ -2990,4 +2990,96 @@ void main() {
     final resetCursorPaint = tester.widget<CustomPaint>(find.byKey(const ValueKey('remote_vector_arrow_cursor')));
     expect(resetCursorPaint.size.height, closeTo(matchedCursorPaint.size.height, 0.2));
   });
+
+  testWidgets(
+      'v1.10.1+12 Zero-Latency PIN Enclave: 0ms PointerDown digit registration before PointerUp, zero ScrollView arena, and warm pre-mounted shell instant unlock',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+    await tester.pumpAndSettle();
+
+    // Open Vault & 2FA tab and configure a 6-digit PIN (`147258`)
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    expect(find.text('Zero-Trust Hardware Enclave'), findsOneWidget);
+
+    await tester.ensureVisible(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.pumpAndSettle();
+
+    for (final d in ['1', '4', '7', '2', '5', '8']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    for (final d in ['1', '4', '7', '2', '5', '8']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    // Lock the Vault
+    await tester.tap(find.byKey(const Key('btn_lock_vault_now')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('vault_pin_lock_screen')), findsOneWidget);
+
+    // 1. ZERO SingleChildScrollView inside VaultPinLockView (zero 100ms scroll-arena delay!)
+    expect(
+      find.descendant(
+        of: find.byType(VaultPinLockView),
+        matching: find.byType(SingleChildScrollView),
+      ),
+      findsNothing,
+    );
+
+    // 2. Warm Shell Curtain: underlying shell is completely hidden from UI/hit-testing/finder,
+    //    yet stays warm & mounted offstage so unlock has 0ms cold-mount spike!
+    expect(find.text('Zero-Trust Hardware Enclave'), findsNothing);
+    expect(find.text('Zero-Trust Hardware Enclave', skipOffstage: false), findsOneWidget);
+
+    // 3. True 0ms Finger-Down (`PointerDown`) Registration:
+    //    Press finger down on `btn_pin_digit_1` WITHOUT calling `gesture1.up()` yet!
+    final dotsFinder = find.descendant(
+      of: find.byKey(const ValueKey('vault_pin_progress_dots')),
+      matching: find.byType(AnimatedContainer),
+    );
+    expect(tester.widgetList<AnimatedContainer>(dotsFinder).first.constraints?.maxWidth, 11.0);
+
+    final TestGesture gesture1 = await tester.startGesture(
+      tester.getCenter(find.byKey(const ValueKey('btn_pin_digit_1'))),
+    );
+    await tester.pump(); // Finger is STILL DOWN — `gesture1.up()` has NOT been called!
+    final firstDotWhileDown = tester.widgetList<AnimatedContainer>(dotsFinder).first;
+    expect(firstDotWhileDown.constraints?.maxWidth, 13.0);
+    expect(
+      (firstDotWhileDown.decoration as BoxDecoration).color,
+      equals(const Color(0xFFF3C66F)),
+    );
+    await gesture1.up();
+    await tester.pump();
+
+    // Enter digits 2..5 (`4`, `7`, `2`, `5`)
+    for (final d in ['4', '7', '2', '5']) {
+      await tester.tap(find.byKey(ValueKey('btn_pin_digit_$d')));
+      await tester.pump();
+    }
+    expect(find.byKey(const ValueKey('vault_pin_lock_screen')), findsOneWidget);
+
+    // 4. Instant Unlock on the 6th `PointerDown` (`8`) BEFORE `gesture6.up()` is even released!
+    final TestGesture gesture6 = await tester.startGesture(
+      tester.getCenter(find.byKey(const ValueKey('btn_pin_digit_8'))),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('vault_pin_lock_screen')), findsNothing);
+    expect(find.text('Zero-Trust Hardware Enclave'), findsOneWidget);
+    await gesture6.up();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
 }

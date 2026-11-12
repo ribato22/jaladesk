@@ -1,32 +1,101 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import 'vault_security_service.dart';
 
-bool _verifyPinIsolateEntry((String, String) args) =>
-    VaultPinHasher.verifyPin(args.$1, args.$2);
+Future<bool> _verifyPinNonBlocking(String pin, String storedHash) =>
+    NativePlatformBridge.verifyPinFast(pin, storedHash);
 
-String _hashPinIsolateEntry(String pin) => VaultPinHasher.hashPin(pin);
+Future<String> _hashPinNonBlocking(String pin) =>
+    NativePlatformBridge.hashPinFast(pin);
 
-Future<bool> _verifyPinNonBlocking(String pin, String storedHash) async {
-  if (Platform.environment.containsKey('FLUTTER_TEST')) {
-    return VaultPinHasher.verifyPin(pin, storedHash);
-  }
-  await WidgetsBinding.instance.endOfFrame;
-  return compute(_verifyPinIsolateEntry, (pin, storedHash));
+/// Zero-latency (`0.0ms` finger-down) keypad button driven directly by raw `Listener.onPointerDown`.
+/// Eliminates `InkWell` `PointerUp` wait and `SingleChildScrollView` `100ms` gesture-arena disambiguation.
+class _InstantPinKeyButton extends StatefulWidget {
+  final double height;
+  final double borderRadius;
+  final Color baseColor;
+  final Color pressedColor;
+  final Color borderColor;
+  final Color pressedBorderColor;
+  final VoidCallback? onTriggered;
+  final Widget child;
+
+  const _InstantPinKeyButton({
+    super.key,
+    required this.height,
+    this.borderRadius = 12,
+    required this.baseColor,
+    required this.pressedColor,
+    required this.borderColor,
+    required this.pressedBorderColor,
+    required this.onTriggered,
+    required this.child,
+  });
+
+  @override
+  State<_InstantPinKeyButton> createState() => _InstantPinKeyButtonState();
 }
 
-Future<String> _hashPinNonBlocking(String pin) async {
-  if (Platform.environment.containsKey('FLUTTER_TEST')) {
-    return VaultPinHasher.hashPin(pin);
+class _InstantPinKeyButtonState extends State<_InstantPinKeyButton> {
+  int? _activePointerId;
+  bool _pressed = false;
+
+  @override
+  void didUpdateWidget(covariant _InstantPinKeyButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.onTriggered == null && (_pressed || _activePointerId != null)) {
+      _pressed = false;
+      _activePointerId = null;
+    }
   }
-  await WidgetsBinding.instance.endOfFrame;
-  return compute(_hashPinIsolateEntry, pin);
+
+  void _handlePointerDown(PointerDownEvent event) {
+    final cb = widget.onTriggered;
+    if (cb == null || _activePointerId != null) return;
+    _activePointerId = event.pointer;
+    setState(() => _pressed = true);
+    cb();
+  }
+
+  void _handlePointerEnd(PointerEvent event) {
+    if (event.pointer != _activePointerId) return;
+    _activePointerId = null;
+    if (_pressed && mounted) {
+      setState(() => _pressed = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = widget.onTriggered != null;
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: enabled ? _handlePointerDown : null,
+        onPointerUp: _handlePointerEnd,
+        onPointerCancel: _handlePointerEnd,
+        child: AnimatedContainer(
+          duration: _pressed ? Duration.zero : const Duration(milliseconds: 85),
+          height: widget.height,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: _pressed ? widget.pressedColor : widget.baseColor,
+            borderRadius: BorderRadius.circular(widget.borderRadius),
+            border: Border.all(
+              color: _pressed ? widget.pressedBorderColor : widget.borderColor,
+              width: _pressed ? 1.4 : 1.0,
+            ),
+          ),
+          child: widget.child,
+        ),
+      ),
+    );
+  }
 }
 
 /// Pure UI Numpad Sapphire-Gold Vault Passcode Unlock Enclave:
@@ -73,6 +142,7 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
   int _failedAttempts = 0;
   int _cooldownSecondsLeft = 0;
   Timer? _cooldownTimer;
+  Timer? _autoBioTimer;
 
   int get _effectivePinLen => widget.pinLength.clamp(4, 12);
 
@@ -92,16 +162,21 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
 
   @override
   void dispose() {
+    _autoBioTimer?.cancel();
     _cooldownTimer?.cancel();
     _shakeCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _autoCheckAndPromptBiometric() async {
-    if (!mounted || !widget.biometricEnabled) return;
-    final available = await NativePlatformBridge.isBiometricAvailable();
-    if (!mounted || !available) return;
-    await _triggerBiometricUnlock();
+  void _autoCheckAndPromptBiometric() {
+    if (!mounted || !widget.biometricEnabled || _enteredPin.isNotEmpty) return;
+    _autoBioTimer?.cancel();
+    _autoBioTimer = Timer(const Duration(milliseconds: 120), () async {
+      if (!mounted || !widget.biometricEnabled || _enteredPin.isNotEmpty || _verifyingPin) return;
+      final available = await NativePlatformBridge.isBiometricAvailable();
+      if (!mounted || !available || _enteredPin.isNotEmpty || _verifyingPin) return;
+      await _triggerBiometricUnlock();
+    });
   }
 
   Future<void> _triggerBiometricUnlock() async {
@@ -114,7 +189,7 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
     if (!mounted) return;
     setState(() => _biometricBusy = false);
     if (verified) {
-      HapticFeedback.mediumImpact();
+      NativePlatformBridge.performPinHaptic('confirm');
       widget.onUnlocked();
     }
   }
@@ -154,12 +229,12 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
     if (!mounted) return;
 
     if (matched) {
-      HapticFeedback.mediumImpact();
+      NativePlatformBridge.performPinHaptic('confirm');
       _verifyingPin = false;
       _failedAttempts = 0;
       widget.onUnlocked();
     } else {
-      HapticFeedback.heavyImpact();
+      NativePlatformBridge.performPinHaptic('reject');
       _shakeCtrl.forward(from: 0.0);
       _failedAttempts++;
       setState(() {
@@ -179,7 +254,8 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
   void _onKeypadDigit(String digit) {
     if (_cooldownSecondsLeft > 0 || _verifyingPin) return;
     if (_enteredPin.length >= _effectivePinLen) return;
-    HapticFeedback.lightImpact();
+    _autoBioTimer?.cancel();
+    NativePlatformBridge.performPinHaptic('tap');
     final next = '$_enteredPin$digit';
     setState(() {
       _unlockError = null;
@@ -192,7 +268,7 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
 
   void _onKeypadBackspace() {
     if (_cooldownSecondsLeft > 0 || _verifyingPin || _enteredPin.isEmpty) return;
-    HapticFeedback.selectionClick();
+    NativePlatformBridge.performPinHaptic('backspace');
     setState(() {
       _enteredPin = _enteredPin.substring(0, _enteredPin.length - 1);
     });
@@ -200,7 +276,7 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
 
   void _onKeypadClear() {
     if (_cooldownSecondsLeft > 0 || _verifyingPin || _enteredPin.isEmpty) return;
-    HapticFeedback.selectionClick();
+    NativePlatformBridge.performPinHaptic('backspace');
     setState(() => _enteredPin = '');
   }
 
@@ -252,7 +328,7 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
             children: [
               for (int i = 0; i < dotCount; i++)
                 AnimatedContainer(
-                  duration: const Duration(milliseconds: 130),
+                  duration: const Duration(milliseconds: 40),
                   width: i < currentLen ? 13 : 11,
                   height: i < currentLen ? 13 : 11,
                   decoration: BoxDecoration(
@@ -302,28 +378,21 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
       return Expanded(
         child: Padding(
           padding: const EdgeInsets.all(4),
-          child: Material(
-            color: _header.withValues(alpha: 0.92),
-            borderRadius: BorderRadius.circular(12),
-            child: InkWell(
-              key: ValueKey('btn_pin_digit_$d'),
-              borderRadius: BorderRadius.circular(12),
-              onTap: disabled ? null : () => _onKeypadDigit(d),
-              child: Container(
-                height: buttonHeight,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: _lineInput.withValues(alpha: 0.78)),
-                ),
-                child: Text(
-                  d,
-                  style: TextStyle(
-                    fontSize: buttonHeight <= 40 ? 17 : 19,
-                    fontWeight: FontWeight.w700,
-                    color: _text,
-                  ),
-                ),
+          child: _InstantPinKeyButton(
+            key: ValueKey('btn_pin_digit_$d'),
+            height: buttonHeight,
+            borderRadius: 12,
+            baseColor: _header.withValues(alpha: 0.92),
+            pressedColor: _selected.withValues(alpha: 0.85),
+            borderColor: _lineInput.withValues(alpha: 0.78),
+            pressedBorderColor: _brandGold,
+            onTriggered: disabled ? null : () => _onKeypadDigit(d),
+            child: Text(
+              d,
+              style: TextStyle(
+                fontSize: buttonHeight <= 40 ? 17 : 19,
+                fontWeight: FontWeight.w700,
+                color: _text,
               ),
             ),
           ),
@@ -345,34 +414,27 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.all(4),
-                child: Material(
-                  color: _selected.withValues(alpha: 0.55),
-                  borderRadius: BorderRadius.circular(12),
-                  child: InkWell(
-                    key: ValueKey(widget.biometricEnabled ? 'btn_pin_biometric' : 'btn_pin_clear'),
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: disabled
-                        ? null
-                        : (widget.biometricEnabled ? _triggerBiometricUnlock : _onKeypadClear),
-                    child: Container(
-                      height: buttonHeight,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: _brandGold.withValues(alpha: 0.42)),
-                      ),
-                      child: widget.biometricEnabled
-                          ? const Icon(Icons.fingerprint_rounded, size: 21, color: _brandGold)
-                          : const Text(
-                              'Clear',
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                fontWeight: FontWeight.w700,
-                                color: _brandGold,
-                              ),
-                            ),
-                    ),
-                  ),
+                child: _InstantPinKeyButton(
+                  key: ValueKey(widget.biometricEnabled ? 'btn_pin_biometric' : 'btn_pin_clear'),
+                  height: buttonHeight,
+                  borderRadius: 12,
+                  baseColor: _selected.withValues(alpha: 0.55),
+                  pressedColor: _selected.withValues(alpha: 0.9),
+                  borderColor: _brandGold.withValues(alpha: 0.42),
+                  pressedBorderColor: _brandGold,
+                  onTriggered: disabled
+                      ? null
+                      : (widget.biometricEnabled ? _triggerBiometricUnlock : _onKeypadClear),
+                  child: widget.biometricEnabled
+                      ? const Icon(Icons.fingerprint_rounded, size: 21, color: _brandGold)
+                      : const Text(
+                          'Clear',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w700,
+                            color: _brandGold,
+                          ),
+                        ),
                 ),
               ),
             ),
@@ -380,23 +442,16 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.all(4),
-                child: Material(
-                  color: _header.withValues(alpha: 0.92),
-                  borderRadius: BorderRadius.circular(12),
-                  child: InkWell(
-                    key: const ValueKey('btn_pin_backspace'),
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: disabled ? null : _onKeypadBackspace,
-                    child: Container(
-                      height: buttonHeight,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: _lineInput.withValues(alpha: 0.78)),
-                      ),
-                      child: const Icon(Icons.backspace_outlined, size: 18, color: _brandGold),
-                    ),
-                  ),
+                child: _InstantPinKeyButton(
+                  key: const ValueKey('btn_pin_backspace'),
+                  height: buttonHeight,
+                  borderRadius: 12,
+                  baseColor: _header.withValues(alpha: 0.92),
+                  pressedColor: _selected.withValues(alpha: 0.85),
+                  borderColor: _lineInput.withValues(alpha: 0.78),
+                  pressedBorderColor: _brandGold,
+                  onTriggered: disabled ? null : _onKeypadBackspace,
+                  child: const Icon(Icons.backspace_outlined, size: 18, color: _brandGold),
                 ),
               ),
             ),
@@ -423,65 +478,73 @@ class _VaultPinLockViewState extends State<VaultPinLockView> with SingleTickerPr
                 constraints.maxWidth > constraints.maxHeight && constraints.maxHeight < 480;
 
             if (isCompactLandscape) {
-              return Center(
-                child: SingleChildScrollView(
-                  padding: EdgeInsets.symmetric(horizontal: symPadX, vertical: 8),
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 640),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                      decoration: BoxDecoration(
-                        color: _surface,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: _brandGold.withValues(alpha: 0.45)),
-                        boxShadow: const [
-                          BoxShadow(color: Colors.black54, blurRadius: 24, offset: Offset(0, 10)),
-                        ],
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            flex: 5,
-                            child: _buildHeaderAndDots(compact: true),
-                          ),
-                          const SizedBox(width: 18),
-                          Expanded(
-                            flex: 6,
-                            child: _buildNumericKeypad(buttonHeight: 38),
-                          ),
-                        ],
-                      ),
-                    ),
+              final landscapeBtnHeight = (constraints.maxHeight * 0.14).clamp(32.0, 42.0);
+              final Widget landscapeCard = ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 640),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: _surface,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: _brandGold.withValues(alpha: 0.45)),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black54, blurRadius: 24, offset: Offset(0, 10)),
+                    ],
                   ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        flex: 5,
+                        child: _buildHeaderAndDots(compact: true),
+                      ),
+                      const SizedBox(width: 18),
+                      Expanded(
+                        flex: 6,
+                        child: _buildNumericKeypad(buttonHeight: landscapeBtnHeight),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+              return Center(
+                child: Padding(
+                  padding: EdgeInsets.symmetric(horizontal: symPadX, vertical: 8),
+                  child: constraints.maxHeight < 280
+                      ? FittedBox(fit: BoxFit.scaleDown, child: landscapeCard)
+                      : landscapeCard,
                 ),
               );
             }
 
-            return Center(
-              child: SingleChildScrollView(
-                padding: EdgeInsets.symmetric(horizontal: symPadX, vertical: 14),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 356),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
-                    decoration: BoxDecoration(
-                      color: _surface,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: _brandGold.withValues(alpha: 0.45)),
-                      boxShadow: const [
-                        BoxShadow(color: Colors.black54, blurRadius: 24, offset: Offset(0, 10)),
-                      ],
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _buildHeaderAndDots(compact: false),
-                        const SizedBox(height: 16),
-                        _buildNumericKeypad(buttonHeight: 46),
-                      ],
-                    ),
-                  ),
+            final portraitBtnHeight = (constraints.maxHeight * 0.082).clamp(36.0, 50.0);
+            final Widget portraitCard = ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 356),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                decoration: BoxDecoration(
+                  color: _surface,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: _brandGold.withValues(alpha: 0.45)),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black54, blurRadius: 24, offset: Offset(0, 10)),
+                  ],
                 ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildHeaderAndDots(compact: false),
+                    const SizedBox(height: 16),
+                    _buildNumericKeypad(buttonHeight: portraitBtnHeight),
+                  ],
+                ),
+              ),
+            );
+            return Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: symPadX, vertical: 14),
+                child: constraints.maxHeight < 280
+                    ? FittedBox(fit: BoxFit.scaleDown, child: portraitCard)
+                    : portraitCard,
               ),
             );
           },
@@ -590,7 +653,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
     final maxTarget = _activeTargetLen;
     if (current.length >= maxTarget) return;
 
-    HapticFeedback.lightImpact();
+    NativePlatformBridge.performPinHaptic('tap');
     final next = '$current$d';
     setState(() {
       _errorMsg = null;
@@ -604,7 +667,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
       final ok = await _verifyPinNonBlocking(next, widget.existingPinHash);
       if (!mounted) return;
       if (ok) {
-        HapticFeedback.mediumImpact();
+        NativePlatformBridge.performPinHaptic('confirm');
         setState(() {
           _busy = false;
           _currentVerified = true;
@@ -612,7 +675,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
           _errorMsg = null;
         });
       } else {
-        HapticFeedback.heavyImpact();
+        NativePlatformBridge.performPinHaptic('reject');
         setState(() {
           _busy = false;
           _currentPin = '';
@@ -628,7 +691,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
     }
 
     if (next != _newPin) {
-      HapticFeedback.heavyImpact();
+      NativePlatformBridge.performPinHaptic('reject');
       setState(() {
         _confirmPin = '';
         _errorMsg = 'PIN confirmation does not match. Try again.';
@@ -639,7 +702,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
     setState(() => _busy = true);
     final hashed = await _hashPinNonBlocking(_newPin);
     if (!mounted) return;
-    HapticFeedback.mediumImpact();
+    NativePlatformBridge.performPinHaptic('confirm');
     Navigator.of(context).pop();
     widget.onSavePin(hashed, _targetPinLen);
   }
@@ -649,7 +712,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
     final current = _activePin;
     if (current.isEmpty) {
       if (_stage == 2) {
-        HapticFeedback.selectionClick();
+        NativePlatformBridge.performPinHaptic('backspace');
         setState(() {
           _stage = 1;
           _newPin = '';
@@ -658,7 +721,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
       }
       return;
     }
-    HapticFeedback.selectionClick();
+    NativePlatformBridge.performPinHaptic('backspace');
     setState(() {
       _setActivePin(current.substring(0, current.length - 1));
     });
@@ -666,7 +729,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
 
   void _onSetupClear() {
     if (_busy || _activePin.isEmpty) return;
-    HapticFeedback.selectionClick();
+    NativePlatformBridge.performPinHaptic('backspace');
     setState(() {
       _setActivePin('');
       _errorMsg = null;
@@ -675,7 +738,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
 
   void _handleVerifiedRemovePin() {
     if (!_currentVerified || _busy) return;
-    HapticFeedback.mediumImpact();
+    NativePlatformBridge.performPinHaptic('confirm');
     Navigator.of(context).pop();
     widget.onRemovePin();
   }
@@ -767,7 +830,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
           children: [
             for (int i = 0; i < dotTarget; i++)
               AnimatedContainer(
-                duration: const Duration(milliseconds: 130),
+                duration: const Duration(milliseconds: 40),
                 width: i < activeLen ? 12.5 : 10.5,
                 height: i < activeLen ? 12.5 : 10.5,
                 decoration: BoxDecoration(
@@ -812,6 +875,32 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
   }
 
   Widget _buildSetupKeypad({required double buttonHeight}) {
+    Widget buildSetupDigitButton(String d) {
+      return Expanded(
+        child: Padding(
+          padding: const EdgeInsets.all(3),
+          child: _InstantPinKeyButton(
+            key: ValueKey('btn_setup_pin_digit_$d'),
+            height: buttonHeight,
+            borderRadius: 10,
+            baseColor: _header,
+            pressedColor: _selected.withValues(alpha: 0.85),
+            borderColor: _lineInput,
+            pressedBorderColor: _brandGold,
+            onTriggered: _busy ? null : () => _onSetupKeypadDigit(d),
+            child: Text(
+              d,
+              style: const TextStyle(
+                fontSize: 16.5,
+                fontWeight: FontWeight.w700,
+                color: _text,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -822,34 +911,7 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
         ])
           Row(
             children: [
-              for (final d in row)
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.all(3),
-                    child: InkWell(
-                      key: ValueKey('btn_setup_pin_digit_$d'),
-                      borderRadius: BorderRadius.circular(10),
-                      onTap: _busy ? null : () => _onSetupKeypadDigit(d),
-                      child: Container(
-                        height: buttonHeight,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: _header,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: _lineInput),
-                        ),
-                        child: Text(
-                          d,
-                          style: const TextStyle(
-                            fontSize: 16.5,
-                            fontWeight: FontWeight.w700,
-                            color: _text,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+              for (final d in row) buildSetupDigitButton(d),
             ],
           ),
         Row(
@@ -857,66 +919,36 @@ class _VaultPinSetupSheetState extends State<VaultPinSetupSheet> {
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.all(3),
-                child: InkWell(
+                child: _InstantPinKeyButton(
                   key: const ValueKey('btn_setup_pin_clear'),
-                  borderRadius: BorderRadius.circular(10),
-                  onTap: _busy ? null : _onSetupClear,
-                  child: Container(
-                    height: buttonHeight,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: _header,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: _lineInput),
-                    ),
-                    child: const Text(
-                      'Clear',
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: _muted),
-                    ),
+                  height: buttonHeight,
+                  borderRadius: 10,
+                  baseColor: _header,
+                  pressedColor: _selected.withValues(alpha: 0.85),
+                  borderColor: _lineInput,
+                  pressedBorderColor: _brandGold,
+                  onTriggered: _busy ? null : _onSetupClear,
+                  child: const Text(
+                    'Clear',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: _muted),
                   ),
                 ),
               ),
             ),
+            buildSetupDigitButton('0'),
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.all(3),
-                child: InkWell(
-                  key: const ValueKey('btn_setup_pin_digit_0'),
-                  borderRadius: BorderRadius.circular(10),
-                  onTap: _busy ? null : () => _onSetupKeypadDigit('0'),
-                  child: Container(
-                    height: buttonHeight,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: _header,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: _lineInput),
-                    ),
-                    child: const Text(
-                      '0',
-                      style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700, color: _text),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(3),
-                child: InkWell(
+                child: _InstantPinKeyButton(
                   key: const ValueKey('btn_setup_pin_backspace'),
-                  borderRadius: BorderRadius.circular(10),
-                  onTap: _busy ? null : _onSetupBackspace,
-                  child: Container(
-                    height: buttonHeight,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: _header,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: _lineInput),
-                    ),
-                    child: const Icon(Icons.backspace_outlined, size: 16, color: _brandGold),
-                  ),
+                  height: buttonHeight,
+                  borderRadius: 10,
+                  baseColor: _header,
+                  pressedColor: _selected.withValues(alpha: 0.85),
+                  borderColor: _lineInput,
+                  pressedBorderColor: _brandGold,
+                  onTriggered: _busy ? null : _onSetupBackspace,
+                  child: const Icon(Icons.backspace_outlined, size: 16, color: _brandGold),
                 ),
               ),
             ),
