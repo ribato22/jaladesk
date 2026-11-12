@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jaladesk_mobile/main.dart';
 import 'package:jaladesk_mobile/protocols/desktop_gesture_surface.dart';
+import 'package:jaladesk_mobile/protocols/proxmox_ve_client.dart';
 import 'package:jaladesk_mobile/protocols/rdp_ffi_client.dart';
 import 'package:jaladesk_mobile/protocols/ssh_bastion_tunnel.dart';
 import 'package:jaladesk_mobile/protocols/vnc_rfb_client.dart';
@@ -2039,9 +2040,9 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    // 1. Verify Jump Smart Fill (`Fill` / cropCover — 1:1 aspect Smart Pan, zero stretch) auto-enabled for widescreen VNC on portrait phone!
+    // 1. Verify Jump Smart Pan (`Pan` / cropCover — 1:1 aspect Smart Pan, zero stretch) auto-enabled for widescreen VNC on portrait phone!
     expect(
-      find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Fill')),
+      find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Pan')),
       findsOneWidget,
     );
 
@@ -2279,28 +2280,40 @@ void main() {
     await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
     await tester.pumpAndSettle();
 
-    // 1. Phone Landscape (915x412): compact NavigationRail, zero overflow across RDP / VNC & SSH tabs
+    // 1. Phone Landscape (915x412): NavigationRail on Connections, 100% full-width (NO NavigationRail) on RDP/VNC & SSH tabs
     await tester.ensureVisible(find.text('Load Sample Lab'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Load Sample Lab'));
     await tester.pumpAndSettle();
+    expect(find.byType(NavigationRail), findsOneWidget);
+
     await tester.tap(find.byIcon(Icons.desktop_windows_outlined));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byType(NavigationRail), findsNothing);
+    expect(find.byKey(const ValueKey('btn_landscape_back_hosts')), findsOneWidget);
     // Main 56px AppBar is omitted in Phone Landscape session view to maximize vertical remote canvas!
     expect(find.text('Sapphire-Gold Zero-Trust Workspace'), findsNothing);
     // Standard Top-Left Vector Arrow Cursor renders (no legacy top-right near_me icon!)
     expect(find.byKey(const ValueKey('remote_vector_arrow_cursor')), findsOneWidget);
     expect(find.byIcon(Icons.near_me_rounded), findsNothing);
 
-    // Also verify SSH & SFTP tab in Phone Landscape (915x412) has zero overflow and omits main 56px AppBar
+    // Return to Connections via `btn_landscape_back_hosts`, then enter SSH & SFTP tab
+    await tester.tap(find.byKey(const ValueKey('btn_landscape_back_hosts')));
+    await tester.pumpAndSettle();
+    expect(find.byType(NavigationRail), findsOneWidget);
+
+    // Verify SSH & SFTP tab in Phone Landscape (915x412) fills 100% width with zero NavigationRail and zero overflow
     await tester.tap(find.byIcon(Icons.terminal_outlined));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+    expect(find.byType(NavigationRail), findsNothing);
+    expect(find.byKey(const ValueKey('btn_ssh_landscape_back_hosts')), findsOneWidget);
     expect(find.text('Sapphire-Gold Zero-Trust Workspace'), findsNothing);
 
-    // Return to RDP / VNC tab
+    // Return to Connections then RDP / VNC tab
+    await tester.tap(find.byKey(const ValueKey('btn_ssh_landscape_back_hosts')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.desktop_windows_outlined));
     await tester.pumpAndSettle();
 
@@ -2337,5 +2350,475 @@ void main() {
     expect(find.byKey(const ValueKey('desktop_bottom_shortcut_bar')), findsNothing);
     final fsSizeAfter = tester.getSize(find.byKey(const ValueKey('desktop_gesture_surface')));
     expect(fsSizeAfter, equals(fsSizeBefore));
+  });
+
+  testWidgets(
+      'Oppo Find X9 Pro 20:9 Landscape (915x412) renders 100% edge-to-edge canvas, top-centered Full-Screen HUD, and Fit/Fill/Pan/1:1 cycle',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Load Sample Lab'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Load Sample Lab'));
+    await tester.pumpAndSettle();
+
+    // Enter RDP / VNC tab in 20:9 Phone Landscape -> 0px left strip, 100% width canvas (915.0px)
+    await tester.tap(find.byIcon(Icons.desktop_windows_outlined));
+    await tester.pumpAndSettle();
+    expect(find.byType(NavigationRail), findsNothing);
+    final canvasRect = tester.getRect(find.byKey(const ValueKey('desktop_gesture_surface')));
+    expect(canvasRect.left, closeTo(0.0, 0.5));
+    expect(canvasRect.width, closeTo(915.0, 0.5));
+
+    // Verify quick fit cycle: Fit -> Fill -> Pan -> 1:1 -> Fit
+    final cycleBtn = find.byKey(const ValueKey('btn_quick_cycle_fit'));
+    await tester.ensureVisible(cycleBtn);
+    await tester.pumpAndSettle();
+    expect(find.descendant(of: cycleBtn, matching: find.text('Fit')), findsOneWidget);
+    await tester.tap(cycleBtn);
+    await tester.pump();
+    expect(find.descendant(of: cycleBtn, matching: find.text('Fill')), findsOneWidget);
+    await tester.tap(cycleBtn);
+    await tester.pump();
+    expect(find.descendant(of: cycleBtn, matching: find.text('Pan')), findsOneWidget);
+    await tester.tap(cycleBtn);
+    await tester.pump();
+    expect(find.descendant(of: cycleBtn, matching: find.text('1:1')), findsOneWidget);
+    await tester.tap(cycleBtn);
+    await tester.pump();
+    expect(find.descendant(of: cycleBtn, matching: find.text('Fit')), findsOneWidget);
+
+    // Toggle Full Screen -> verify `fullscreen_floating_hud` is TOP-CENTERED (never pushed to right edge!)
+    await tester.tap(find.byKey(const ValueKey('btn_toggle_fullscreen')));
+    await tester.pump();
+    final hudRect = tester.getRect(find.byKey(const ValueKey('fullscreen_floating_hud')));
+    expect(hudRect.center.dx, closeTo(915.0 / 2.0, 4.0));
+    expect(hudRect.right, lessThan(800.0));
+
+    // Exit Full Screen -> return to Connections -> verify SSH Full-Screen HUD is ALSO top-centered
+    await tester.tap(find.byKey(const ValueKey('btn_exit_fullscreen_pill')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('btn_landscape_back_hosts')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.terminal_outlined));
+    await tester.pumpAndSettle();
+    final sshFsBtn = find.byKey(const ValueKey('btn_ssh_toggle_fullscreen'));
+    await tester.ensureVisible(sshFsBtn);
+    await tester.pumpAndSettle();
+    await tester.tap(sshFsBtn);
+    await tester.pump();
+    final sshHudRect = tester.getRect(find.byKey(const ValueKey('ssh_fullscreen_floating_hud')));
+    expect(sshHudRect.center.dx, closeTo(915.0 / 2.0, 4.0));
+  });
+
+  test(
+      'VncRfbClient sends ExtendedDesktopSize (-308) first, fires onDesktopGeometryChanged, and retries scaled-down SetDesktopSize on rx=1 reject',
+      () async {
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close());
+
+    final receivedEncodings = <int>[];
+    final requestedResizes = <(int, int, int, int)>[];
+    final secondResizeReceived = Completer<void>();
+
+    server.listen((sock) {
+      sock.add(ascii.encode('RFB 003.008\n'));
+      final buf = <int>[];
+      int stage = 0;
+      sock.listen((chunk) {
+        buf.addAll(chunk);
+        if (stage == 0 && buf.length >= 12) {
+          buf.removeRange(0, 12);
+          stage = 1;
+          sock.add([1, 1]); // SecType None
+        }
+        if (stage == 1 && buf.isNotEmpty) {
+          buf.removeAt(0); // Client selected SecType 1
+          sock.add([0, 0, 0, 0]); // SecurityResult OK
+          stage = 2;
+        }
+        if (stage == 2 && buf.isNotEmpty) {
+          buf.removeAt(0);
+          stage = 3;
+          final name = utf8.encode('PVE-QEMU-VNC');
+          final init = ByteData(24 + name.length)
+            ..setUint16(0, 1024)
+            ..setUint16(2, 768)
+            ..setUint8(4, 32)
+            ..setUint8(5, 24)
+            ..setUint8(6, 0)
+            ..setUint8(7, 1)
+            ..setUint16(8, 255)
+            ..setUint16(10, 255)
+            ..setUint16(12, 255)
+            ..setUint8(13, 16)
+            ..setUint8(14, 8)
+            ..setUint8(15, 0)
+            ..setUint32(20, name.length);
+          final out = init.buffer.asUint8List();
+          out.setRange(24, 24 + name.length, name);
+          sock.add(out);
+
+          // Immediately advertise ExtendedDesktopSize (-308) with screenId=7, flags=3
+          final ext = ByteData(4 + 12 + 4 + 16)
+            ..setUint8(0, 0)
+            ..setUint16(2, 1)
+            ..setUint16(4, 0) // rx = 0 (server layout)
+            ..setUint16(6, 0) // ry = 0
+            ..setUint16(8, 1024)
+            ..setUint16(10, 768)
+            ..setInt32(12, -308)
+            ..setUint8(16, 1) // 1 screen
+            ..setUint32(20, 7) // id = 7
+            ..setUint16(24, 0)
+            ..setUint16(26, 0)
+            ..setUint16(28, 1024)
+            ..setUint16(30, 768)
+            ..setUint32(32, 3); // flags = 3
+          sock.add(ext.buffer.asUint8List());
+        }
+        while (stage == 3 && buf.isNotEmpty) {
+          final t = buf[0];
+          if (t == 0) {
+            if (buf.length < 20) break;
+            buf.removeRange(0, 20);
+          } else if (t == 2) {
+            if (buf.length < 4) break;
+            final n = (buf[2] << 8) | buf[3];
+            if (buf.length < 4 + n * 4) break;
+            final bd = ByteData.sublistView(Uint8List.fromList(buf.sublist(4, 4 + n * 4)));
+            for (int i = 0; i < n; i++) {
+              receivedEncodings.add(bd.getInt32(i * 4));
+            }
+            buf.removeRange(0, 4 + n * 4);
+          } else if (t == 3) {
+            if (buf.length < 10) break;
+            buf.removeRange(0, 10);
+          } else if (t == 251) {
+            if (buf.length < 8) break;
+            final numScreens = buf[6];
+            final totalLen = 8 + numScreens * 16;
+            if (buf.length < totalLen) break;
+            final bd = ByteData.sublistView(Uint8List.fromList(buf.sublist(0, totalLen)));
+            final w = bd.getUint16(2);
+            final h = bd.getUint16(4);
+            final sid = bd.getUint32(8);
+            final sflags = bd.getUint32(20);
+            requestedResizes.add((w, h, sid, sflags));
+            buf.removeRange(0, totalLen);
+
+            if (requestedResizes.length == 1) {
+              // Reject tall 1264x2780 request with rx=1, ry=3 (out-of-bounds)
+              final rej = ByteData(4 + 12 + 4 + 16)
+                ..setUint8(0, 0)
+                ..setUint16(2, 1)
+                ..setUint16(4, 1) // rx = 1 (client request)
+                ..setUint16(6, 3) // ry = 3 (rejected)
+                ..setUint16(8, 1024)
+                ..setUint16(10, 768)
+                ..setInt32(12, -308)
+                ..setUint8(16, 1)
+                ..setUint32(20, 7)
+                ..setUint16(28, 1024)
+                ..setUint16(30, 768)
+                ..setUint32(32, 3);
+              sock.add(rej.buffer.asUint8List());
+            } else if (!secondResizeReceived.isCompleted) {
+              secondResizeReceived.complete();
+            }
+          } else {
+            break;
+          }
+        }
+      });
+    });
+
+    int geometryEvents = 0;
+    bool lastExtSupported = false;
+    final client = VncRfbClient(
+      host: '127.0.0.1',
+      port: server.port,
+      password: '',
+      onFrame: (img, w, h, status) {},
+      onStatus: (status, {isError = false}) {},
+      onDesktopGeometryChanged: (w, h, extSupported) {
+        geometryEvents++;
+        lastExtSupported = extSupported;
+      },
+    );
+    addTearDown(() => client.dispose());
+
+    await client.connect();
+    for (int i = 0; i < 30 && !client.supportsExtendedDesktopSize; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(receivedEncodings.first, equals(-308));
+    expect(client.supportsExtendedDesktopSize, isTrue);
+    expect(geometryEvents, greaterThanOrEqualTo(1));
+    expect(lastExtSupported, isTrue);
+
+    // Request tall 1264x2780 resize -> server rejects with rx=1, ry=3 -> client auto-retries scaled to maxEdge=1280!
+    client.requestDesktopResize(1264, 2780);
+    await secondResizeReceived.future.timeout(const Duration(seconds: 3));
+    expect(requestedResizes.length, equals(2));
+    expect(requestedResizes[0], equals((1264, 2780, 7, 3)));
+    expect(requestedResizes[1].$2, equals(1280));
+    expect(requestedResizes[1].$1, closeTo(582, 2));
+    expect(requestedResizes[1].$3, equals(7));
+    expect(requestedResizes[1].$4, equals(3));
+  });
+
+  test(
+      'ProxmoxVeClient authenticates (@pam -> @pve fallback), inspects QEMU/LXC cluster resources, dispatches power actions, and gracefully handles ESXi /ui/',
+      () async {
+    final prevHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = prevHttpOverrides);
+
+    final tmpDir = await Directory.systemTemp.createTemp('jaladesk_pve_tls_');
+    addTearDown(() => tmpDir.delete(recursive: true));
+
+    final certPath = '${tmpDir.path}/cert.pem';
+    final keyPath = '${tmpDir.path}/key.pem';
+    final genRes = await Process.run('openssl', [
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-keyout',
+      keyPath,
+      '-out',
+      certPath,
+      '-days',
+      '1',
+      '-nodes',
+      '-subj',
+      '/CN=pve-lab.local',
+    ]);
+    expect(genRes.exitCode, equals(0));
+
+    final secCtx = SecurityContext()
+      ..useCertificateChain(certPath)
+      ..usePrivateKey(keyPath);
+
+    final authRealmsTried = <String>[];
+    String? powerActionCookie;
+    String? powerActionCsrf;
+    String? powerActionPath;
+
+    final pveServer = await HttpServer.bindSecure(InternetAddress.loopbackIPv4, 0, secCtx);
+    addTearDown(() => pveServer.close(force: true));
+
+    pveServer.listen((HttpRequest req) async {
+      final path = req.uri.path;
+      final bodyText = await utf8.decoder.bind(req).join();
+      req.response.headers.set('server', 'pve-api-daemon/3.0');
+      req.response.headers.contentType = ContentType.json;
+
+      if (path == '/api2/json/access/ticket' && req.method == 'POST') {
+        final params = Uri.splitQueryString(bodyText);
+        final user = params['username'] ?? '';
+        authRealmsTried.add(user);
+        if (user.endsWith('@pam')) {
+          req.response.statusCode = 401;
+          req.response.write(jsonEncode({'data': null}));
+        } else {
+          req.response.statusCode = 200;
+          req.response.write(jsonEncode({
+            'data': {
+              'ticket': 'PVE:ops@pve:6733ABCD::MOCK_TICKET',
+              'CSRFPreventionToken': '6733ABCD:CSRF_TOKEN_OK',
+              'username': user,
+            }
+          }));
+        }
+      } else if (path == '/api2/json/version') {
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode({
+          'data': {'version': '8.3.2', 'release': '8.3'}
+        }));
+      } else if (path == '/api2/json/nodes') {
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode({
+          'data': [
+            {
+              'node': 'pve-node-01',
+              'status': 'online',
+              'cpu': 0.18,
+              'maxcpu': 16,
+              'mem': 17179869184,
+              'maxmem': 68719476736,
+              'uptime': 86400,
+            }
+          ]
+        }));
+      } else if (path == '/api2/json/cluster/resources') {
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode({
+          'data': [
+            {
+              'type': 'qemu',
+              'vmid': 101,
+              'name': 'prod-k8s-master',
+              'node': 'pve-node-01',
+              'status': 'stopped',
+              'cpu': 0.0,
+              'maxcpu': 4,
+              'mem': 0,
+              'maxmem': 8589934592,
+              'uptime': 0,
+            },
+            {
+              'type': 'lxc',
+              'vmid': 202,
+              'name': 'redis-cache',
+              'node': 'pve-node-01',
+              'status': 'running',
+              'cpu': 0.07,
+              'maxcpu': 2,
+              'mem': 536870912,
+              'maxmem': 2147483648,
+              'uptime': 14200,
+            },
+          ]
+        }));
+      } else if (path.startsWith('/api2/json/nodes/') && req.method == 'POST') {
+        powerActionPath = path;
+        powerActionCookie = req.headers.value(HttpHeaders.cookieHeader);
+        powerActionCsrf = req.headers.value('CSRFPreventionToken');
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode({'data': 'UPID:pve-node-01:00001A2B:qmstart:101:ops@pve:'}));
+      } else {
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode({'data': []}));
+      }
+      await req.response.close();
+    });
+
+    final pveClient = ProxmoxVeClient(host: '127.0.0.1', port: pveServer.port);
+    final snapshot = await pveClient.connectAndInspect(username: 'ops', password: 'secret');
+    expect(authRealmsTried, equals(['ops@pam', 'ops@pve']));
+    expect(snapshot.isProxmoxVe, isTrue);
+    expect(snapshot.authenticated, isTrue);
+    expect(snapshot.versionText, contains('8.3'));
+    expect(snapshot.nodes.single.node, equals('pve-node-01'));
+    expect(snapshot.resources.length, equals(2));
+    expect(snapshot.tlsFingerprintSha256, startsWith('SHA256:'));
+
+    final upid = await pveClient.performPowerAction(
+      node: 'pve-node-01',
+      type: 'qemu',
+      vmid: 101,
+      action: 'start',
+    );
+    expect(upid, contains('UPID:pve-node-01'));
+    expect(powerActionPath, equals('/api2/json/nodes/pve-node-01/qemu/101/status/start'));
+    expect(powerActionCookie, contains('PVEAuthCookie='));
+    expect(powerActionCsrf, equals('6733ABCD:CSRF_TOKEN_OK'));
+
+    // Also verify non-PVE VMware ESXi HTTPS endpoint graceful fallback
+    final esxiServer = await HttpServer.bindSecure(InternetAddress.loopbackIPv4, 0, secCtx);
+    addTearDown(() => esxiServer.close(force: true));
+    esxiServer.listen((HttpRequest req) async {
+      req.response.headers.set('server', 'VMware-ESXi-HTTPD');
+      if (req.uri.path.startsWith('/api2/json')) {
+        req.response.statusCode = 404;
+        req.response.write('Not Found');
+      } else {
+        req.response.statusCode = 200;
+        req.response.write('<html><title>VMware ESXi Host Client</title></html>');
+      }
+      await req.response.close();
+    });
+
+    final esxiClient = ProxmoxVeClient(host: '127.0.0.1', port: esxiServer.port);
+    final esxiSnap = await esxiClient.connectAndInspect(username: 'root', password: 'pw');
+    expect(esxiSnap.isProxmoxVe, isFalse);
+    expect(esxiSnap.productBanner, contains('VMware ESXi'));
+  });
+
+  testWidgets(
+      'Vault Local-Only Known Hosts clarity, Auto-Lock 0s lifecycle lock, and tactile Sapphire-Gold PIN keypad + 5-attempt cooldown work end-to-end',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(430, 932);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+    await tester.pumpAndSettle();
+
+    // Load Sample Lab -> verify `10.28.99.203` is NEVER seeded into Trusted SSH Host Keys
+    await tester.ensureVisible(find.text('Load Sample Lab'));
+    await tester.tap(find.text('Load Sample Lab'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('LOCAL DEVICE ONLY • NOT GLOBAL'));
+    expect(find.text('LOCAL DEVICE ONLY • NOT GLOBAL'), findsOneWidget);
+    expect(find.textContaining('10.28.99.203'), findsNothing);
+
+    // Select `Immediately` (`chip_autolock_0`) auto-lock timeout
+    await tester.ensureVisible(find.byKey(const ValueKey('chip_autolock_0')));
+    await tester.tap(find.byKey(const ValueKey('chip_autolock_0')));
+    await tester.pumpAndSettle();
+
+    // Setup a 4-digit PIN using the tactile setup keypad (`btn_setup_pin_digit_*`)
+    await tester.ensureVisible(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.tap(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('chip_pin_len_4')));
+    await tester.pumpAndSettle();
+    for (final d in ['2', '5', '8', '0']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    for (final d in ['2', '5', '8', '0']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('chip_pin_len_4')), findsNothing); // Setup dialog auto-saved & closed!
+
+    // Simulate valid Flutter lifecycle sequence (`inactive` -> `hidden` -> `paused` -> `hidden` -> `inactive` -> `resumed`) with `0s` (`Immediately`) auto-lock -> locks immediately!
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('vault_pin_lock_screen')), findsOneWidget);
+
+    // Trigger 5 wrong PIN attempts via keypad -> activates 15s cooldown guard!
+    for (int attempt = 0; attempt < 5; attempt++) {
+      for (final d in ['9', '9', '9', '9']) {
+        await tester.tap(find.byKey(ValueKey('btn_pin_digit_$d')));
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(find.textContaining('Too many failed attempts'), findsOneWidget);
+
+    // Advance 15 seconds past cooldown -> enter `2580` on tactile keypad -> instant auto-unlock on 4th digit!
+    await tester.pump(const Duration(seconds: 16));
+    for (final d in ['2', '5', '8', '0']) {
+      await tester.tap(find.byKey(ValueKey('btn_pin_digit_$d')));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('vault_pin_lock_screen')), findsNothing);
   });
 }

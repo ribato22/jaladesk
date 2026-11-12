@@ -49,6 +49,14 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Edge-to-edge cutout rendering so ColorOS / Android 15+ never letterboxes a black strip in Landscape / Full Screen
+        window.attributes = window.attributes.apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         // Enterprise Zero-Trust default: shield live sessions, passwords, and 2FA codes from Recents/Screen-Capture
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }

@@ -7,10 +7,12 @@
         <item name="android:windowSplashScreenIconBackgroundColor">@color/jala_splash_bg</item>
         <item name="android:statusBarColor">@color/jala_splash_bg</item>
         <item name="android:navigationBarColor">@color/jala_splash_bg</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
     </style>
     <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
         <item name="android:windowBackground">@color/jala_splash_bg</item>
         <item name="android:statusBarColor">@color/jala_splash_bg</item>
         <item name="android:navigationBarColor">@color/jala_splash_bg</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
     </style>
 </resources>

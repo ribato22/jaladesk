@@ -383,6 +383,24 @@ class _VncAuthAttemptException implements Exception {
   String toString() => message;
 }
 
+class VncScreenDescriptor {
+  final int id;
+  final int x;
+  final int y;
+  final int width;
+  final int height;
+  final int flags;
+
+  const VncScreenDescriptor({
+    required this.id,
+    required this.x,
+    required this.y,
+    required this.width,
+    required this.height,
+    required this.flags,
+  });
+}
+
 /// Full RFC 6143 VNC Client Engine supporting:
 /// - Apple Remote Desktop / macOS Screen Sharing (`SecType 30` DH + AES-128-ECB)
 /// - VeNCrypt (`SecType 19` TLS / X509 / Plain / VNC Auth for TigerVNC, QEMU, Proxmox, GNOME)
@@ -415,8 +433,13 @@ class VncRfbClient {
   int width = 1024;
   int height = 768;
   bool supportsExtendedDesktopSize = false;
+  final List<VncScreenDescriptor> _screens = <VncScreenDescriptor>[];
+  List<VncScreenDescriptor> get screens => List.unmodifiable(_screens);
   int _primaryScreenId = 0;
   int _primaryScreenFlags = 0;
+  int _lastRequestedWidth = 0;
+  int _lastRequestedHeight = 0;
+  bool _retriedScaledDownResize = false;
   bool _appliedInitialTargetSize = false;
   String desktopName = 'VNC Remote Desktop';
   String negotiatedAuthLabel = 'RFB 3.8';
@@ -898,10 +921,11 @@ class VncRfbClient {
     setPf.setUint8(16, 0); // blueShift = 0 (byte 0)
     sock.add(setPf.buffer.asUint8List());
 
-    // 6. Send SetEncodings (msgType = 2):
-    // ZRLE (16), Zlib (6), Hextile (5), RRE (2), CopyRect (1), Raw (0),
-    // ExtendedDesktopSize (-308), DesktopSize (-223), Cursor (-239), LastRect (-224)
-    const encodings = <int>[16, 6, 5, 2, 1, 0, -308, -223, -239, -224];
+    // 6. Send SetEncodings (msgType = 2) with pseudo-encodings FIRST so TigerVNC / TurboVNC /
+    // RealVNC / KasmVNC / QEMU-Proxmox VNC immediately negotiate ExtendedDesktopSize (-308):
+    // ExtendedDesktopSize (-308), DesktopSize (-223), Cursor (-239), LastRect (-224),
+    // ZRLE (16), Zlib (6), Hextile (5), RRE (2), CopyRect (1), Raw (0)
+    const encodings = <int>[-308, -223, -239, -224, 16, 6, 5, 2, 1, 0];
     final setEnc = ByteData(4 + encodings.length * 4);
     setEnc.setUint8(0, 2);
     setEnc.setUint16(2, encodings.length, Endian.big);
@@ -911,6 +935,10 @@ class VncRfbClient {
     sock.add(setEnc.buffer.asUint8List());
 
     supportsExtendedDesktopSize = false;
+    _screens.clear();
+    _lastRequestedWidth = 0;
+    _lastRequestedHeight = 0;
+    _retriedScaledDownResize = false;
     _appliedInitialTargetSize = false;
     _running = true;
     onStatus('Connected to $desktopName (${width}x$height • ${describeSecurityType(chosenSec)})');
@@ -1157,25 +1185,59 @@ class VncRfbClient {
               // LastRect pseudo-encoding
               break;
             } else if (encoding == -308) {
-              // ExtendedDesktopSize pseudo-encoding (TigerVNC / RealVNC / TightVNC / x11vnc / KasmVNC / GNOME)
+              // ExtendedDesktopSize pseudo-encoding (TigerVNC / RealVNC / TightVNC / x11vnc / KasmVNC / QEMU)
               final extHdr = await reader.readExact(4);
               final numScreens = extHdr[0];
               if (numScreens > 0) {
                 final screensBuf = await reader.readExact(numScreens * 16);
                 final sbd = ByteData.sublistView(screensBuf);
-                _primaryScreenId = sbd.getUint32(0, Endian.big);
-                _primaryScreenFlags = sbd.getUint32(12, Endian.big);
+                _screens.clear();
+                for (int si = 0; si < numScreens; si++) {
+                  final off = si * 16;
+                  _screens.add(
+                    VncScreenDescriptor(
+                      id: sbd.getUint32(off, Endian.big),
+                      x: sbd.getUint16(off + 4, Endian.big),
+                      y: sbd.getUint16(off + 6, Endian.big),
+                      width: sbd.getUint16(off + 8, Endian.big),
+                      height: sbd.getUint16(off + 10, Endian.big),
+                      flags: sbd.getUint32(off + 12, Endian.big),
+                    ),
+                  );
+                }
+                _primaryScreenId = _screens.first.id;
+                _primaryScreenFlags = _screens.first.flags;
               }
               supportsExtendedDesktopSize = true;
               // rx = reason (0=server layout, 1=client requested), ry = status (0=no error)
-              if ((ry == 0 || rx == 0) && rw > 0 && rh > 0 && (rw != width || rh != height)) {
-                width = rw;
-                height = rh;
-                _rgbaBuffer = Uint8List(width * height * 4);
-                for (int i = 3; i < _rgbaBuffer.length; i += 4) {
-                  _rgbaBuffer[i] = 255;
+              if (rx == 1 && ry != 0) {
+                // Server rejected client resize (e.g. tall portrait height > server max Xrandr/Xvnc framebuffer).
+                // Retry ONCE proportionally scaled down to maxEdge = 1280 (even dimensions).
+                if (!_retriedScaledDownResize &&
+                    _lastRequestedWidth > 0 &&
+                    _lastRequestedHeight > 0) {
+                  _retriedScaledDownResize = true;
+                  final maxDim = max(_lastRequestedWidth, _lastRequestedHeight);
+                  if (maxDim > 1280) {
+                    final scale = 1280.0 / maxDim;
+                    final retryW = (((_lastRequestedWidth * scale).round().clamp(320, 1280) + 3) ~/ 4) * 4;
+                    final retryH = (((_lastRequestedHeight * scale).round().clamp(320, 1280) + 1) ~/ 2) * 2;
+                    requestResolution(retryW, retryH, isFallbackRetry: true);
+                  }
                 }
-                _sendFramebufferUpdateRequest(incremental: false);
+              } else {
+                if (rx == 1 && ry == 0) {
+                  _retriedScaledDownResize = false;
+                }
+                if ((ry == 0 || rx == 0) && rw > 0 && rh > 0 && (rw != width || rh != height)) {
+                  width = rw;
+                  height = rh;
+                  _rgbaBuffer = Uint8List(width * height * 4);
+                  for (int i = 3; i < _rgbaBuffer.length; i += 4) {
+                    _rgbaBuffer[i] = 255;
+                  }
+                  _sendFramebufferUpdateRequest(incremental: false);
+                }
               }
               onDesktopGeometryChanged?.call(width, height, true);
               if (!_appliedInitialTargetSize &&
@@ -1434,26 +1496,38 @@ class VncRfbClient {
 
   /// Dynamically resizes remote VNC desktop resolution via RFC 6143 / Tight `SetDesktopSize` (`msgType = 251`)
   /// when the server advertised `ExtendedDesktopSize (-308)`. Returns `true` if sent.
-  bool requestResolution(int newWidth, int newHeight) {
+  bool requestDesktopResize(int newWidth, int newHeight, {bool isFallbackRetry = false}) =>
+      requestResolution(newWidth, newHeight, isFallbackRetry: isFallbackRetry);
+
+  bool requestResolution(int newWidth, int newHeight, {bool isFallbackRetry = false}) {
     final sock = _socket;
     if (sock == null || !_running || !supportsExtendedDesktopSize) return false;
     final alignedW = (((newWidth.clamp(320, 4096) + 3) ~/ 4) * 4);
     final alignedH = (((newHeight.clamp(320, 4096) + 1) ~/ 2) * 2);
-    if ((alignedW - width).abs() < 4 && (alignedH - height).abs() < 4) return true;
+    if (!isFallbackRetry && (alignedW - width).abs() < 4 && (alignedH - height).abs() < 4) return true;
+
+    _lastRequestedWidth = alignedW;
+    _lastRequestedHeight = alignedH;
+    if (!isFallbackRetry) {
+      _retriedScaledDownResize = false;
+    }
+
+    final primaryId = _screens.isNotEmpty ? _screens.first.id : _primaryScreenId;
+    final primaryFlags = _screens.isNotEmpty ? _screens.first.flags : _primaryScreenFlags;
 
     final pkt = ByteData(24);
     pkt.setUint8(0, 251); // SetDesktopSize
     pkt.setUint8(1, 0); // padding
     pkt.setUint16(2, alignedW, Endian.big);
     pkt.setUint16(4, alignedH, Endian.big);
-    pkt.setUint8(6, 1); // number-of-screens = 1
+    pkt.setUint8(6, 1); // single primary screen adapted to phone viewport
     // bytes 7..9 = 0 padding
-    pkt.setUint32(8, _primaryScreenId, Endian.big);
+    pkt.setUint32(8, primaryId, Endian.big);
     pkt.setUint16(12, 0, Endian.big); // x-position
     pkt.setUint16(14, 0, Endian.big); // y-position
     pkt.setUint16(16, alignedW, Endian.big);
     pkt.setUint16(18, alignedH, Endian.big);
-    pkt.setUint32(20, _primaryScreenFlags, Endian.big);
+    pkt.setUint32(20, primaryFlags, Endian.big);
     try {
       sock.add(pkt.buffer.asUint8List());
       _sendFramebufferUpdateRequest(incremental: false);
