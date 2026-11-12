@@ -432,7 +432,7 @@ class RdpFfiClient {
         await dispose();
         throw SocketException(msg);
       }
-      await Future<void>.delayed(const Duration(milliseconds: 45));
+      await Future<void>.delayed(const Duration(milliseconds: 12));
     }
 
     await dispose();
@@ -466,8 +466,7 @@ class RdpFfiClient {
 
   void _startFramePump() {
     _pollTimer?.cancel();
-    // 60fps low-latency frame pump (16ms cadence + immediate catch-up when decode completes)
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+    void tick() {
       if (_disposed || _handle == ffi.nullptr) return;
       _pollCursorOnce();
       if (_decodingFrame) return;
@@ -482,7 +481,12 @@ class RdpFfiClient {
         _lastFrameSeq = seq;
         _pullAndDecodeFrame();
       }
-    });
+    }
+
+    // Immediate first tick so initial desktop frame renders with 0ms extra timer wait
+    tick();
+    // 60fps low-latency frame pump (16ms cadence + immediate catch-up when decode completes)
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 16), (_) => tick());
   }
 
   void _pollCursorOnce() {

@@ -466,6 +466,15 @@ class SshKnownHostsStore {
 
   static String normalizeEndpoint(String host, int port) => '${host.trim().toLowerCase()}:$port';
 
+  bool hasPinnedEndpoint(String host, int port) =>
+      _entries.containsKey(normalizeEndpoint(host, port));
+
+  bool verifyPinnedOnly(String host, int port, Uint8List fingerprint) {
+    final existing = _entries[normalizeEndpoint(host, port)];
+    if (existing == null) return false;
+    return existing.rawHex == bytesToHex(fingerprint);
+  }
+
   static String bytesToHex(Uint8List bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 

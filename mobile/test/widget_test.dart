@@ -1092,18 +1092,19 @@ void main() {
     await tester.ensureVisible(find.byKey(const ValueKey('btn_inline_new_jump_host')));
     await tester.tap(find.byKey(const ValueKey('btn_inline_new_jump_host')));
     await tester.pumpAndSettle();
-    expect(find.text('New SSH Jump Host / Bastion'), findsOneWidget);
+    expect(find.byKey(const Key('dialog_jump_host_editor')), findsOneWidget);
+    expect(find.text('New Jump Host Gateway'), findsOneWidget);
 
-    // Fill out the nested SSH Jump Host modal
+    // Fill out the dedicated SSH Jump Host Gateway modal
     await tester.enterText(
-      find.widgetWithText(TextField, 'Display Name (optional)').last,
+      find.byKey(const Key('jump_editor_name')),
       'Batam SSH Bastion',
     );
     await tester.enterText(
-      find.widgetWithText(TextField, 'Host / IP Address *').last,
+      find.byKey(const Key('jump_editor_host')),
       '198.51.100.20',
     );
-    await tester.tap(find.text('Save Host').last);
+    await tester.tap(find.byKey(const Key('btn_save_jump_gateway')));
     await tester.pumpAndSettle();
 
     // Verify `Batam SSH Bastion` is now auto-selected in the RDP host's Jump Host dropdown!
@@ -3081,5 +3082,550 @@ void main() {
     await gesture6.up();
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'v1.11.0+13 Test A: Dedicated Jump Host Gateway Editor & Gateway Section without non-SSH protocol clutter',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final shellKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
+    await tester.pumpAndSettle();
+
+    // Open dedicated Jump Host Gateway dialog from header action strip
+    await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+    await tester.pumpAndSettle();
+
+    final dialogFinder = find.byKey(const Key('dialog_jump_host_editor'));
+    expect(dialogFinder, findsOneWidget);
+    expect(find.text('New Jump Host Gateway'), findsOneWidget);
+
+    // Gateway-focused fields exist
+    expect(find.byKey(const Key('jump_editor_name')), findsOneWidget);
+    expect(find.byKey(const Key('jump_editor_host')), findsOneWidget);
+    expect(find.byKey(const Key('jump_editor_port')), findsOneWidget);
+    expect(find.byKey(const Key('jump_editor_user')), findsOneWidget);
+    expect(find.byKey(const Key('jump_editor_key')), findsOneWidget);
+    expect(find.byKey(const Key('btn_test_jump_gateway')), findsOneWidget);
+    expect(find.byKey(const Key('btn_save_jump_gateway')), findsOneWidget);
+
+    // Confusing regular-host protocol chips (RDP/VNC/HYPERVISOR) & AD Domain clutter are absent,
+    // while SSH bastion auth mode chips (SSH Key / Password) are cleanly exposed
+    expect(find.descendant(of: dialogFinder, matching: find.widgetWithText(ChoiceChip, 'RDP')), findsNothing);
+    expect(find.descendant(of: dialogFinder, matching: find.widgetWithText(ChoiceChip, 'VNC')), findsNothing);
+    expect(find.descendant(of: dialogFinder, matching: find.widgetWithText(ChoiceChip, 'HYPERVISOR')), findsNothing);
+    expect(find.descendant(of: dialogFinder, matching: find.text('AD Domain (optional)')), findsNothing);
+    expect(find.descendant(of: dialogFinder, matching: find.text('SSH Key')), findsOneWidget);
+    expect(find.descendant(of: dialogFinder, matching: find.text('Password')), findsOneWidget);
+
+    await tester.enterText(find.byKey(const Key('jump_editor_name')), 'PLN Public Jump');
+    await tester.enterText(find.byKey(const Key('jump_editor_host')), '103.172.170.203');
+    await tester.enterText(find.byKey(const Key('jump_editor_port')), '22022');
+    await tester.enterText(find.byKey(const Key('jump_editor_user')), 'ribato');
+
+    await tester.tap(find.byKey(const Key('btn_save_jump_gateway')));
+    await tester.pumpAndSettle();
+
+    // Verify `isJumpHost == true` and dedicated `section_jump_gateways` rendering
+    final savedGateways = shellKey.currentState!.hosts;
+    expect(savedGateways.length, 1);
+    expect(savedGateways.single.name, 'PLN Public Jump');
+    expect(savedGateways.single.address, '103.172.170.203');
+    expect(savedGateways.single.port, 22022);
+    expect(savedGateways.single.username, 'ribato');
+    expect(savedGateways.single.protocol, RemoteProtocol.ssh);
+    expect(savedGateways.single.isJumpHost, isTrue);
+
+    final gatewaySection = find.byKey(const Key('section_jump_gateways'));
+    expect(gatewaySection, findsOneWidget);
+    expect(
+      find.descendant(of: gatewaySection, matching: find.text('PLN Public Jump')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: gatewaySection, matching: find.textContaining('103.172.170.203:22022')),
+      findsOneWidget,
+    );
+
+    // Verify encrypted/local vault persistence across cold remount
+    final reloadedKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(
+      JalaDeskMobileApp(
+        key: const ValueKey('reloaded_app_test_a'),
+        disableNetworkProbes: true,
+        shellKey: reloadedKey,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(reloadedKey.currentState!.hosts.single.isJumpHost, isTrue);
+    expect(find.byKey(const Key('section_jump_gateways')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'v1.11.0+13 Test B: Royal TSX-Style Folder Jump Host Configuration, Inheritance & Direct Override',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final shellKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
+    await tester.pumpAndSettle();
+
+    // 1. Create `'PLN Public Jump'` gateway
+    await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('jump_editor_name')), 'PLN Public Jump');
+    await tester.enterText(find.byKey(const Key('jump_editor_host')), '103.172.170.203');
+    await tester.enterText(find.byKey(const Key('jump_editor_port')), '22022');
+    await tester.tap(find.byKey(const Key('btn_save_jump_gateway')));
+    await tester.pumpAndSettle();
+
+    final gateway = shellKey.currentState!.hosts.singleWhere((h) => h.name == 'PLN Public Jump');
+
+    // 2. Configure folder `'PLN Internal'` with `'PLN Public Jump'` as Folder Default Jump Host
+    await tester.tap(find.byKey(const Key('btn_add_folder')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('dialog_folder_settings')), findsOneWidget);
+
+    await tester.enterText(find.byKey(const Key('folder_settings_name')), 'PLN Internal');
+    await tester.tap(find.byKey(const Key('folder_settings_jump_dropdown')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('PLN Public Jump (103.172.170.203:22022)').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('btn_save_folder_settings')));
+    await tester.pumpAndSettle();
+
+    expect(shellKey.currentState!.folderConfigs['PLN Internal']?.jumpHostId, gateway.id);
+    expect(find.byKey(const Key('btn_folder_settings_PLN Internal')), findsOneWidget);
+
+    // 3. Add an RDP host inside `'PLN Internal'` keeping default folder inheritance (`jumpHostId` empty)
+    await tester.ensureVisible(find.byKey(const Key('btn_folder_add_host_PLN Internal')));
+    await tester.tap(find.byKey(const Key('btn_folder_add_host_PLN Internal')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('RDP')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Inherit from Folder "PLN Internal" (via PLN Public Jump)'), findsOneWidget);
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Display Name (optional)'),
+      'AD1 Internal',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Host / IP Address *'),
+      '10.28.0.154',
+    );
+    await tester.tap(find.text('Save Host'));
+    await tester.pumpAndSettle();
+
+    final ad1 = shellKey.currentState!.hosts.singleWhere((h) => h.name == 'AD1 Internal');
+    expect(ad1.jumpHostId, isNull);
+    expect(shellKey.currentState!.effectiveJumpHostIdForVerification(ad1), gateway.id);
+    expect(shellKey.currentState!.routeBadgeForVerification(ad1), 'via PLN Public Jump • Folder');
+    expect(find.text('via PLN Public Jump • Folder'), findsOneWidget);
+
+    // Connecting includes the inherited folder Jump Host route!
+    await shellKey.currentState!.connectHostForVerification(ad1.id);
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Connected to AD1 Internal (10.28.0.154:3389 • via PLN Public Jump • Folder)'),
+      findsOneWidget,
+    );
+    shellKey.currentState!.switchTabForVerification(0);
+    await tester.pumpAndSettle();
+
+    // 4. Add another host in `'PLN Internal'` with explicit `kDirectNoJumpOverride` (`'__direct__'`)
+    await tester.ensureVisible(find.byKey(const Key('btn_folder_add_host_PLN Internal')));
+    await tester.tap(find.byKey(const Key('btn_folder_add_host_PLN Internal')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('RDP')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Display Name (optional)'),
+      'Local Edge Host',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Host / IP Address *'),
+      '10.28.0.10',
+    );
+    await tester.ensureVisible(find.byKey(const ValueKey('dropdown_jump_host')));
+    await tester.tap(find.byKey(const ValueKey('dropdown_jump_host')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Direct Connection (Bypass Folder Jump Host)').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save Host'));
+    await tester.pumpAndSettle();
+
+    final directHost = shellKey.currentState!.hosts.singleWhere((h) => h.name == 'Local Edge Host');
+    expect(directHost.jumpHostId, kDirectNoJumpOverride);
+    expect(directHost.isDirectNoJumpOverride, isTrue);
+    expect(shellKey.currentState!.effectiveJumpHostIdForVerification(directHost), isNull);
+    expect(shellKey.currentState!.routeBadgeForVerification(directHost), isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'v1.11.0+13 Test C: Clean SSH Disconnect Auto-Returns to Connections & Shows Disconnected Empty State',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final shellKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
+    await tester.pumpAndSettle();
+
+    // Create `'PLN Public Jump'` and connect via its Terminal button
+    await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('jump_editor_name')), 'PLN Public Jump');
+    await tester.enterText(find.byKey(const Key('jump_editor_host')), '103.172.170.203');
+    await tester.enterText(find.byKey(const Key('jump_editor_port')), '22022');
+    await tester.tap(find.byKey(const Key('btn_save_jump_gateway')));
+    await tester.pumpAndSettle();
+
+    final gatewaySection = find.byKey(const Key('section_jump_gateways'));
+    await tester.tap(find.descendant(of: gatewaySection, matching: find.text('Terminal')));
+    await tester.pumpAndSettle();
+
+    // Confirm Tab 2 (SSH Terminal) is active & live/simulated terminal is shown
+    expect(find.byType(TermiusInteractiveTerminal), findsOneWidget);
+    expect(find.byKey(const Key('ssh_disconnected_empty_state')), findsNothing);
+    expect(find.byKey(const ValueKey('btn_disconnect_ssh')), findsOneWidget);
+
+    // Emit command output into terminal buffer before disconnecting
+    shellKey.currentState!.sendTerminalRawForVerification('uname -a\r');
+    await tester.pumpAndSettle();
+    final activeTerm = tester.widget<TermiusInteractiveTerminal>(find.byType(TermiusInteractiveTerminal));
+    expect(activeTerm.buffer.toPlainText(), contains('Connected to PLN Public Jump'));
+
+    // Trigger Disconnect -> must auto-return to Tab 0 (`Connections`) and clear terminal buffer!
+    await tester.tap(find.byKey(const ValueKey('btn_disconnect_ssh')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('section_jump_gateways')), findsOneWidget);
+    expect(find.byType(TermiusInteractiveTerminal), findsNothing);
+    expect(activeTerm.buffer.toPlainText().trim(), isEmpty);
+
+    // Manually switch to Tab 2 (`SSH & SFTP`) -> verify clean `ssh_disconnected_empty_state`
+    await tester.tap(find.text('SSH & SFTP'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('ssh_disconnected_empty_state')), findsOneWidget);
+    expect(find.text('No Active SSH / SFTP Session'), findsOneWidget);
+    expect(find.text('Browse Connections'), findsOneWidget);
+    expect(find.byKey(const Key('btn_reconnect_last_ssh')), findsOneWidget);
+    expect(find.text('Reconnect PLN Public Jump'), findsOneWidget);
+    expect(find.byKey(const Key('btn_open_offline_scratch_shell')), findsOneWidget);
+    expect(find.byType(TermiusInteractiveTerminal), findsNothing);
+
+    // Quick-reconnect action restores the session cleanly
+    await tester.tap(find.byKey(const Key('btn_reconnect_last_ssh')));
+    await tester.pumpAndSettle();
+    expect(find.byType(TermiusInteractiveTerminal), findsOneWidget);
+
+    // Disconnect again, go to Tab 2, and tap `Browse Connections` -> returns to Tab 0
+    await tester.tap(find.byKey(const ValueKey('btn_disconnect_ssh')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('SSH & SFTP'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Browse Connections'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('section_jump_gateways')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  test(
+      'v1.11.0+13 Test D: FolderGatewayConfig JSON round-trip, NoDelaySshSocket TCP_NODELAY, Pre-Warmed Channel & BastionSessionPool',
+      () async {
+    // 1. FolderGatewayConfig serialization + copyWith semantics
+    const cfg = FolderGatewayConfig(
+      name: 'PLN Private Network',
+      jumpHostId: 'jh-pln-01',
+      credentialId: 'cred-ad-01',
+      accentTint: 'sapphire',
+    );
+    expect(cfg.hasJumpHost, isTrue);
+    expect(cfg.hasCredential, isTrue);
+    final roundTripped = FolderGatewayConfig.fromJson(jsonDecode(jsonEncode(cfg.toJson())) as Map<String, dynamic>);
+    expect(roundTripped.name, 'PLN Private Network');
+    expect(roundTripped.jumpHostId, 'jh-pln-01');
+    expect(roundTripped.credentialId, 'cred-ad-01');
+    expect(roundTripped.accentTint, 'sapphire');
+
+    final cleared = roundTripped.copyWith(clearJumpHost: true, clearCredential: true);
+    expect(cleared.hasJumpHost, isFalse);
+    expect(cleared.hasCredential, isFalse);
+
+    // 2. BastionSessionPool signature isolation, in-flight coalescing, warm reuse & eviction
+    const hopA = BastionHopSpec(
+      id: 'jh-1',
+      name: 'PLN Public Jump',
+      address: '103.172.170.203',
+      port: 22022,
+      username: 'ribato',
+      password: 'secret-a',
+    );
+    const hopADiffAuth = BastionHopSpec(
+      id: 'jh-1',
+      name: 'PLN Public Jump',
+      address: '103.172.170.203',
+      port: 22022,
+      username: 'ribato',
+      password: 'secret-b',
+    );
+    expect(
+      BastionSessionPool.computeRouteSignature([hopA]),
+      isNot(equals(BastionSessionPool.computeRouteSignature([hopADiffAuth]))),
+    );
+
+    final pool = BastionSessionPool();
+    int connectCalls = 0;
+    Future<SshBastionChain> fakeConnect(List<BastionHopSpec> hops) async {
+      connectCalls++;
+      await Future<void>.delayed(const Duration(milliseconds: 15));
+      return SshBastionChain.testFake(hops);
+    }
+
+    // Concurrent calls coalesce into 1 handshake
+    final concurrent = await Future.wait([
+      pool.acquire([hopA], connectorOverride: fakeConnect),
+      pool.acquire([hopA], connectorOverride: fakeConnect),
+    ]);
+    expect(connectCalls, 1);
+    expect(identical(concurrent[0], concurrent[1]), isTrue);
+    expect(pool.warmCount, 1);
+    expect(pool.isHopWarm('jh-1'), isTrue);
+
+    // Subsequent acquire hits warm pool (0 new handshakes)
+    final stages = <String>[];
+    final reused = await pool.acquire([hopA], onStage: stages.add, connectorOverride: fakeConnect);
+    expect(identical(reused, concurrent[0]), isTrue);
+    expect(connectCalls, 1);
+    expect(stages.single, contains('warm Jump Host tunnel'));
+
+    // Evicting hop disposes chain and resets warmCount
+    await pool.evictHopId('jh-1');
+    expect(pool.warmCount, 0);
+    expect(reused.isDisposed, isTrue);
+
+    // 3. NoDelaySshSocket TCP_NODELAY + Live OpenSSH Pre-Warmed Port-Forward Tunnel
+    final echoServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(echoServer.close);
+    echoServer.listen((Socket client) {
+      client.setOption(SocketOption.tcpNoDelay, true);
+      client.listen((data) => client.add(data), onDone: () => client.close());
+    });
+
+    final noDelaySock = await NoDelaySshSocket.connect('127.0.0.1', echoServer.port);
+    expect(noDelaySock.tcpNoDelayApplied, isTrue);
+    await noDelaySock.close();
+
+    final sshdBin = File('/usr/sbin/sshd');
+    final sshKeygenBin = File('/usr/bin/ssh-keygen');
+    if (sshdBin.existsSync() && sshKeygenBin.existsSync()) {
+      final tmpDir = await Directory.systemTemp.createTemp('jaladesk_pool_prewarm_');
+      addTearDown(() async {
+        try {
+          if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+        } on FileSystemException catch (_) {}
+      });
+      final hostKeyPath = '${tmpDir.path}/host_ed25519';
+      final clientKeyPath = '${tmpDir.path}/id_ed25519';
+      await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', hostKeyPath]);
+      await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', clientKeyPath]);
+      final pem = await File(clientKeyPath).readAsString();
+      final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final sshPort = probe.port;
+      await probe.close();
+
+      final cfgPath = '${tmpDir.path}/sshd.conf';
+      await File(cfgPath).writeAsString([
+        'Port $sshPort',
+        'ListenAddress 127.0.0.1',
+        'HostKey $hostKeyPath',
+        'AuthorizedKeysFile $clientKeyPath.pub',
+        'PasswordAuthentication no',
+        'PubkeyAuthentication yes',
+        'UsePAM no',
+        'AllowTcpForwarding yes',
+        'PermitOpen any',
+        'StrictModes no',
+        'PidFile ${tmpDir.path}/sshd.pid',
+      ].join('\n'));
+
+      final sshdProc = await Process.start(sshdBin.path, ['-D', '-e', '-f', cfgPath]);
+      addTearDown(() => sshdProc.kill());
+      for (int i = 0; i < 30; i++) {
+        try {
+          final s = await Socket.connect('127.0.0.1', sshPort, timeout: const Duration(milliseconds: 100));
+          s.destroy();
+          break;
+        } catch (_) {
+          await Future<void>.delayed(const Duration(milliseconds: 60));
+        }
+      }
+
+      final currentUser =
+          Platform.environment['USER'] ?? (await Process.run('whoami', [])).stdout.toString().trim();
+      final liveHop = BastionHopSpec(
+        id: 'jh-live',
+        name: 'Local Fast Jump',
+        address: '127.0.0.1',
+        port: sshPort,
+        username: currentUser,
+        privateKeyPem: pem,
+      );
+
+      final livePool = BastionSessionPool();
+      addTearDown(livePool.disposeAll);
+      final chain1 = await livePool.acquire([liveHop]);
+      final chain2 = await livePool.acquire([liveHop]);
+      expect(identical(chain1, chain2), isTrue);
+      expect(SshBastionChain.cachedKeyCount, greaterThanOrEqualTo(1));
+
+      final tunnel = await chain1.startLocalPortForward(
+        remoteHost: '127.0.0.1',
+        remotePort: echoServer.port,
+        prewarmChannel: true,
+      );
+      final clientSock = await Socket.connect('127.0.0.1', tunnel.localPort);
+      clientSock.setOption(SocketOption.tcpNoDelay, true);
+      clientSock.add(utf8.encode('PING_FAST_BASTION'));
+      final echoed = await clientSock.first.timeout(const Duration(seconds: 4));
+      expect(utf8.decode(echoed), 'PING_FAST_BASTION');
+      expect(tunnel.usedPrewarmedChannel, isTrue);
+
+      await clientSock.close();
+      await tunnel.close();
+      await livePool.disposeAll();
+      expect(livePool.warmCount, 0);
+      expect(SshBastionChain.cachedKeyCount, 0);
+    }
+  });
+
+  testWidgets(
+      'v1.11.0+13 Test E: Multi-Viewport Zero-Overflow Check across 360x800 Portrait & 920x420 Oppo Find X9 Pro Cutout Landscape',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewPadding);
+    addTearDown(tester.view.resetPadding);
+
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1.0;
+
+    final shellKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // Populate Jump Gateway + Routed Folder + Inherited RDP Host + SSH Disconnect state
+    await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.enterText(find.byKey(const Key('jump_editor_name')), 'PLN Public Jump Gateway');
+    await tester.enterText(find.byKey(const Key('jump_editor_host')), '103.172.170.203');
+    await tester.enterText(find.byKey(const Key('jump_editor_port')), '22022');
+    await tester.tap(find.byKey(const Key('btn_save_jump_gateway')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.byKey(const Key('btn_add_folder')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.enterText(find.byKey(const Key('folder_settings_name')), 'PLN Private Datacenter');
+    await tester.tap(find.byKey(const Key('folder_settings_jump_dropdown')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('PLN Public Jump Gateway').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('btn_save_folder_settings')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    await tester.ensureVisible(find.byKey(const Key('btn_folder_add_host_PLN Private Datacenter')));
+    await tester.tap(find.byKey(const Key('btn_folder_add_host_PLN Private Datacenter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('RDP')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Display Name (optional)'),
+      'Windows Server 2025 Core SCADA',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Host / IP Address *'),
+      '10.28.37.14',
+    );
+    await tester.tap(find.text('Save Host'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // Connect & disconnect SSH once so `btn_reconnect_last_ssh` also renders in Empty State
+    final gw = shellKey.currentState!.hosts.firstWhere((h) => h.isJumpHost);
+    await shellKey.currentState!.connectHostForVerification(gw.id);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('btn_disconnect_ssh')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    Future<void> verifyAllSurfacesZeroOverflow() async {
+      // 1. Connections Hub (Jump Gateways + Configured Folders + Hosts)
+      shellKey.currentState!.switchTabForVerification(0);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('section_jump_gateways')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      // 2. Dedicated Jump Host Gateway Editor Dialog
+      await tester.ensureVisible(find.byKey(const Key('btn_header_add_jump_host')));
+      await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('dialog_jump_host_editor')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      // 3. Folder Settings Dialog
+      await tester.ensureVisible(find.byKey(const Key('btn_add_folder')));
+      await tester.tap(find.byKey(const Key('btn_add_folder')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('dialog_folder_settings')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      // 4. Disconnected SSH Empty State (with Reconnect + Browse Connections + Scratch Shell)
+      shellKey.currentState!.switchTabForVerification(2);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('ssh_disconnected_empty_state')), findsOneWidget);
+      expect(find.byKey(const Key('btn_reconnect_last_ssh')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }
+
+    // Check 1: Compact 360x800 Portrait
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.viewPadding = FakeViewPadding.zero;
+    tester.view.padding = FakeViewPadding.zero;
+    await tester.pumpAndSettle();
+    await verifyAllSurfacesZeroOverflow();
+
+    // Check 2: Oppo Find X9 Pro 920x420 Cutout Landscape (`left/right: 36px` safe padding)
+    tester.view.physicalSize = const Size(920, 420);
+    tester.view.viewPadding = const FakeViewPadding(left: 36, right: 36, top: 0, bottom: 12);
+    tester.view.padding = const FakeViewPadding(left: 36, right: 36, top: 0, bottom: 12);
+    await tester.pumpAndSettle();
+    await verifyAllSurfacesZeroOverflow();
   });
 }

@@ -4,8 +4,116 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:pointycastle/export.dart';
+
+/// Explicit override value stored in `RemoteHostItem.jumpHostId` when a host inside a
+/// Jump-configured folder intentionally bypasses its folder's inherited Jump Host.
+const String kDirectNoJumpOverride = '__direct__';
+
+/// Royal TSX-style Folder-Level Gateway & Credential Inheritance Configuration.
+/// All connections placed inside `name` automatically inherit `jumpHostId` (unless the host
+/// specifies its own `jumpHostId` or `kDirectNoJumpOverride`) and optional `credentialId`.
+class FolderGatewayConfig {
+  final String name;
+  final String? jumpHostId;
+  final String? credentialId;
+  final String accentTint;
+
+  const FolderGatewayConfig({
+    required this.name,
+    this.jumpHostId,
+    this.credentialId,
+    this.accentTint = 'gold',
+  });
+
+  bool get hasJumpHost => jumpHostId != null && jumpHostId!.trim().isNotEmpty;
+  bool get hasCredential => credentialId != null && credentialId!.trim().isNotEmpty;
+
+  FolderGatewayConfig copyWith({
+    String? name,
+    String? jumpHostId,
+    bool clearJumpHost = false,
+    String? credentialId,
+    bool clearCredential = false,
+    String? accentTint,
+  }) {
+    return FolderGatewayConfig(
+      name: name ?? this.name,
+      jumpHostId: clearJumpHost ? null : (jumpHostId ?? this.jumpHostId),
+      credentialId: clearCredential ? null : (credentialId ?? this.credentialId),
+      accentTint: accentTint ?? this.accentTint,
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'name': name,
+        'jumpHostId': jumpHostId,
+        'credentialId': credentialId,
+        'accentTint': accentTint,
+      };
+
+  factory FolderGatewayConfig.fromJson(Map<String, dynamic> json) {
+    final rawJump = (json['jumpHostId'] as String?)?.trim();
+    final rawCred = (json['credentialId'] as String?)?.trim();
+    return FolderGatewayConfig(
+      name: (json['name'] as String? ?? 'General').trim(),
+      jumpHostId: (rawJump == null || rawJump.isEmpty) ? null : rawJump,
+      credentialId: (rawCred == null || rawCred.isEmpty) ? null : rawCred,
+      accentTint: (json['accentTint'] as String?)?.trim().isNotEmpty == true
+          ? (json['accentTint'] as String).trim()
+          : 'gold',
+    );
+  }
+}
+
+/// Low-Latency `SSHSocket` transport that explicitly enables `SocketOption.tcpNoDelay` (`TCP_NODELAY`)
+/// on the outer WAN TCP socket, eliminating 1.2–2.5s of Nagle + Delayed-ACK stalls across
+/// multi-round-trip FreeRDP CredSSP/NLA/TLS/MCS handshakes over SSH Jump Hosts.
+class NoDelaySshSocket implements SSHSocket {
+  final Socket _socket;
+  final bool tcpNoDelayApplied;
+
+  NoDelaySshSocket._(this._socket, {required this.tcpNoDelayApplied});
+
+  static Future<NoDelaySshSocket> connect(
+    String host,
+    int port, {
+    Duration? timeout,
+  }) async {
+    final socket = await Socket.connect(host, port, timeout: timeout);
+    bool applied = false;
+    try {
+      applied = socket.setOption(SocketOption.tcpNoDelay, true);
+    } catch (_) {
+      applied = false;
+    }
+    return NoDelaySshSocket._(socket, tcpNoDelayApplied: applied);
+  }
+
+  @override
+  Stream<Uint8List> get stream => _socket;
+
+  @override
+  StreamSink<List<int>> get sink => _socket;
+
+  @override
+  Future<void> get done => _socket.done;
+
+  @override
+  Future<void> close() => _socket.close();
+
+  @override
+  void destroy() => _socket.destroy();
+
+  @override
+  Future<void> flush() => _socket.flush();
+
+  @override
+  String toString() =>
+      'NoDelaySshSocket(${_socket.remoteAddress.address}:${_socket.remotePort}, tcpNoDelay=$tcpNoDelayApplied)';
+}
 
 /// Reusable Vault Credential (inspired by JalaDesk Desktop `src/credentials/` & Royal TS)
 /// Allows binding a single Domain/User/Password or SSH Private Key across multiple
@@ -218,6 +326,7 @@ class ActiveLocalPortForward {
   final ServerSocket _server;
   final SSHClient _exitSshClient;
   final SshBastionChain? _ownedChain;
+  final VoidCallbackRef? _onClosedFromParent;
   final DateTime startedAt;
   final VoidCallbackRef? onStatsUpdated;
 
@@ -226,6 +335,8 @@ class ActiveLocalPortForward {
   int activeStreams = 0;
   int totalConnections = 0;
   bool _closed = false;
+  bool _usedPrewarmedChannel = false;
+  Future<SSHForwardChannel>? _prewarmedForwardFuture;
   final Set<Socket> _openSockets = <Socket>{};
   final Set<SSHForwardChannel> _openChannels = <SSHForwardChannel>{};
   late final StreamSubscription<Socket> _acceptSub;
@@ -239,11 +350,22 @@ class ActiveLocalPortForward {
     required ServerSocket server,
     required SSHClient exitSshClient,
     SshBastionChain? ownedChain,
+    VoidCallbackRef? onClosedFromParent,
+    bool prewarmChannel = false,
     this.onStatsUpdated,
   })  : _server = server,
         _exitSshClient = exitSshClient,
         _ownedChain = ownedChain,
+        _onClosedFromParent = onClosedFromParent,
         startedAt = DateTime.now() {
+    if (prewarmChannel) {
+      final Future<SSHForwardChannel> fut = _exitSshClient
+          .forwardLocal(remoteHost, remotePort)
+          .timeout(const Duration(seconds: 10));
+      // Prevent unhandled async error if never consumed before close()
+      unawaited(fut.then((_) {}, onError: (_) {}));
+      _prewarmedForwardFuture = fut;
+    }
     _acceptSub = _server.listen(
       (Socket sock) {
         sock.done.catchError((_) {});
@@ -258,6 +380,7 @@ class ActiveLocalPortForward {
   String get localEndpoint => '127.0.0.1:$localPort';
   String get remoteEndpoint => '$remoteHost:$remotePort';
   bool get isClosed => _closed;
+  bool get usedPrewarmedChannel => _usedPrewarmedChannel;
 
   Future<void> _handleIncomingSocket(Socket clientSocket) async {
     clientSocket.done.catchError((_) {});
@@ -319,10 +442,17 @@ class ActiveLocalPortForward {
       cancelOnError: true,
     );
 
+    final prewarmed = _prewarmedForwardFuture;
+    _prewarmedForwardFuture = null;
     try {
-      forward = await _exitSshClient
-          .forwardLocal(remoteHost, remotePort)
-          .timeout(const Duration(seconds: 10));
+      if (prewarmed != null) {
+        forward = await prewarmed;
+        _usedPrewarmedChannel = true;
+      } else {
+        forward = await _exitSshClient
+            .forwardLocal(remoteHost, remotePort)
+            .timeout(const Duration(seconds: 10));
+      }
     } catch (_) {
       await tearDownPair();
       return;
@@ -374,6 +504,20 @@ class ActiveLocalPortForward {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    final unclaimedPrewarm = _prewarmedForwardFuture;
+    _prewarmedForwardFuture = null;
+    if (unclaimedPrewarm != null) {
+      unawaited(
+        unclaimedPrewarm.then(
+          (ch) {
+            try {
+              ch.destroy();
+            } catch (_) {}
+          },
+          onError: (_) {},
+        ),
+      );
+    }
     try {
       await _acceptSub.cancel();
     } catch (_) {}
@@ -393,6 +537,7 @@ class ActiveLocalPortForward {
     }
     _openSockets.clear();
     activeStreams = 0;
+    _onClosedFromParent?.call();
     if (_ownedChain != null) {
       await _ownedChain.dispose();
     }
@@ -405,6 +550,28 @@ typedef VoidCallbackRef = void Function();
 /// Provides both direct `SSHForwardChannel` (`ProxyJump` for SSH/SFTP) and
 /// local loopback `127.0.0.1` port-forward tunnels (for native FreeRDP, VNC, & HTTPS).
 class SshBastionChain {
+  static final Map<String, List<SSHKeyPair>> _parsedKeyCache = <String, List<SSHKeyPair>>{};
+
+  /// Parses PEM private key once and caches the `SSHKeyPair` list in memory until Vault Lock / Clear.
+  static List<SSHKeyPair> parseOrGetCachedKeys(String privateKeyPem, [String? passphrase]) {
+    final cleanPem = privateKeyPem.trim();
+    if (cleanPem.isEmpty) return const <SSHKeyPair>[];
+    final cleanPass = (passphrase != null && passphrase.isNotEmpty) ? passphrase : null;
+    final cacheKey = '$cleanPem\u0000${cleanPass ?? ''}';
+    final cached = _parsedKeyCache[cacheKey];
+    if (cached != null) return cached;
+    final parsed = List<SSHKeyPair>.unmodifiable(SSHKeyPair.fromPem(cleanPem, cleanPass));
+    if (_parsedKeyCache.length >= 32) {
+      _parsedKeyCache.remove(_parsedKeyCache.keys.first);
+    }
+    _parsedKeyCache[cacheKey] = parsed;
+    return parsed;
+  }
+
+  static int get cachedKeyCount => _parsedKeyCache.length;
+
+  static void clearKeyCache() => _parsedKeyCache.clear();
+
   final List<BastionHopSpec> hops;
   final List<SSHClient> _clients;
   final List<ActiveLocalPortForward> _tunnels = [];
@@ -412,7 +579,17 @@ class SshBastionChain {
 
   SshBastionChain._(this.hops, this._clients);
 
+  /// Test-only factory for deterministic unit tests of `BastionSessionPool` without live SSH daemons.
+  factory SshBastionChain.testFake(List<BastionHopSpec> hops, {bool initiallyDisposed = false}) {
+    final chain = SshBastionChain._(List<BastionHopSpec>.unmodifiable(hops), const <SSHClient>[]);
+    chain._disposed = initiallyDisposed;
+    return chain;
+  }
+
   SSHClient get exitClient => _clients.last;
+  bool get isDisposed => _disposed;
+  bool get isHealthy =>
+      !_disposed && (_clients.isEmpty || _clients.every((c) => !c.isClosed));
 
   String get routeSummary =>
       SshBastionRouteResolver.formatRouteBadge(hops.map((h) => h.name).toList());
@@ -442,7 +619,7 @@ class SshBastionChain {
 
         final SSHSocket transport;
         if (i == 0) {
-          transport = await SSHSocket.connect(
+          transport = await NoDelaySshSocket.connect(
             hop.address,
             hop.port,
             timeout: hopTimeout,
@@ -455,10 +632,7 @@ class SshBastionChain {
 
         List<SSHKeyPair>? identities;
         if (hop.privateKeyPem.trim().isNotEmpty) {
-          identities = SSHKeyPair.fromPem(
-            hop.privateKeyPem.trim(),
-            hop.password.isNotEmpty ? hop.password : null,
-          );
+          identities = parseOrGetCachedKeys(hop.privateKeyPem, hop.password);
         }
 
         onStage?.call(
@@ -498,7 +672,7 @@ class SshBastionChain {
     int targetPort, {
     Duration timeout = const Duration(seconds: 9),
   }) async {
-    if (_disposed) {
+    if (_disposed || !isHealthy) {
       throw const BastionRoutingException('Bastion chain has already been closed.');
     }
     return exitClient.forwardLocal(targetHost, targetPort).timeout(timeout);
@@ -512,9 +686,10 @@ class SshBastionChain {
     int localBindPort = 0,
     String label = '',
     bool ownChainLifecycle = false,
+    bool prewarmChannel = false,
     VoidCallbackRef? onStatsUpdated,
   }) async {
-    if (_disposed) {
+    if (_disposed || !isHealthy) {
       throw const BastionRoutingException('Bastion chain has already been closed.');
     }
     final server = await ServerSocket.bind(
@@ -522,7 +697,8 @@ class SshBastionChain {
       localBindPort,
       shared: false,
     );
-    final tunnel = ActiveLocalPortForward._(
+    late final ActiveLocalPortForward tunnel;
+    tunnel = ActiveLocalPortForward._(
       id: 'tun-${DateTime.now().microsecondsSinceEpoch}',
       label: label.isEmpty ? '$remoteHost:$remotePort' : label,
       bastionSummary: routeSummary,
@@ -531,6 +707,8 @@ class SshBastionChain {
       server: server,
       exitSshClient: exitClient,
       ownedChain: ownChainLifecycle ? this : null,
+      onClosedFromParent: () => _tunnels.remove(tunnel),
+      prewarmChannel: prewarmChannel,
       onStatsUpdated: onStatsUpdated,
     );
     _tunnels.add(tunnel);
@@ -551,6 +729,126 @@ class SshBastionChain {
       try {
         c.close();
       } catch (_) {}
+    }
+  }
+}
+
+/// Warm SSH Bastion Connection Multiplexing Pool (`ControlPersist`-style session reuse).
+/// Keeps authenticated SSH Jump Host chains warm across RDP / VNC / SSH / SFTP sessions so
+/// subsequent connections skip TCP + SSH KEX + Ed25519/RSA auth (`0ms` bastion acquisition).
+class BastionSessionPool {
+  final Map<String, SshBastionChain> _pool = <String, SshBastionChain>{};
+  final Map<String, Future<SshBastionChain>> _inFlight = <String, Future<SshBastionChain>>{};
+
+  static String computeRouteSignature(List<BastionHopSpec> hops) {
+    final buf = StringBuffer();
+    for (int i = 0; i < hops.length; i++) {
+      final h = hops[i];
+      final authDigest = sha256
+          .convert(utf8.encode('${h.password}\u0000${h.privateKeyPem.trim()}'))
+          .toString()
+          .substring(0, 16);
+      if (i > 0) buf.write('>>');
+      buf.write('${h.id}|${h.username.trim()}@${h.address.trim()}:${h.port}|$authDigest');
+    }
+    return buf.toString();
+  }
+
+  int get warmCount => _pool.values.where((c) => c.isHealthy).length;
+
+  bool isHopWarm(String hopId) =>
+      _pool.values.any((c) => c.isHealthy && c.hops.any((h) => h.id == hopId));
+
+  bool containsChain(SshBastionChain? chain) =>
+      chain != null && _pool.values.contains(chain);
+
+  Future<SshBastionChain> acquire(
+    List<BastionHopSpec> hops, {
+    void Function(String stage)? onStage,
+    FutureOr<bool> Function(BastionHopSpec hop, String keyType, Uint8List fingerprint)? onVerifyHopHostKey,
+    Duration hopTimeout = const Duration(seconds: 9),
+    Future<SshBastionChain> Function(List<BastionHopSpec> hops)? connectorOverride,
+  }) async {
+    if (hops.isEmpty) {
+      throw const BastionRoutingException('Cannot acquire SSH Bastion chain with zero hops.');
+    }
+    final sig = computeRouteSignature(hops);
+    final existing = _pool[sig];
+    if (existing != null) {
+      if (existing.isHealthy) {
+        onStage?.call('Using warm Jump Host tunnel (${existing.routeSummary})...');
+        return existing;
+      }
+      _pool.remove(sig);
+      unawaited(existing.dispose());
+    }
+
+    final pending = _inFlight[sig];
+    if (pending != null) {
+      onStage?.call('Joining active Jump Host handshake...');
+      return pending;
+    }
+
+    final connectFuture = (connectorOverride != null
+        ? connectorOverride(hops)
+        : SshBastionChain.connect(
+            hops,
+            onStage: onStage,
+            onVerifyHopHostKey: onVerifyHopHostKey,
+            hopTimeout: hopTimeout,
+          ));
+    _inFlight[sig] = connectFuture;
+    try {
+      final fresh = await connectFuture;
+      _pool[sig] = fresh;
+      if (fresh._clients.isNotEmpty) {
+        unawaited(
+          fresh.exitClient.done.then(
+            (_) {
+              if (_pool[sig] == fresh) _pool.remove(sig);
+            },
+            onError: (_) {
+              if (_pool[sig] == fresh) _pool.remove(sig);
+            },
+          ),
+        );
+      }
+      return fresh;
+    } finally {
+      if (_inFlight[sig] == connectFuture) {
+        _inFlight.remove(sig);
+      }
+    }
+  }
+
+  Future<void> evictByHops(List<BastionHopSpec> hops) async {
+    final sig = computeRouteSignature(hops);
+    final old = _pool.remove(sig);
+    if (old != null) {
+      await old.dispose();
+    }
+  }
+
+  Future<void> evictHopId(String hopId) async {
+    final matchingKeys = _pool.entries
+        .where((e) => e.value.hops.any((h) => h.id == hopId))
+        .map((e) => e.key)
+        .toList();
+    for (final k in matchingKeys) {
+      final chain = _pool.remove(k);
+      if (chain != null) {
+        await chain.dispose();
+      }
+    }
+  }
+
+  Future<void> disposeAll() async {
+    final all = _pool.values.toList();
+    _pool.clear();
+    _inFlight.clear();
+    SshBastionChain.clearKeyCache();
+    for (final chain in all) {
+      await chain.dispose();
     }
   }
 }
