@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'protocols/rdp_ffi_client.dart';
+import 'protocols/ssh_bastion_tunnel.dart';
 import 'protocols/vnc_rfb_client.dart';
 import 'terminal/sftp_explorer_view.dart';
 import 'terminal/termius_terminal.dart';
@@ -49,6 +50,21 @@ class JalaPalette {
   static const Color amber = Color(0xFFDDA254);
   static const Color ok = Color(0xFF80D3A3);
   static const Color danger = Color(0xFFFFAAA1);
+
+  /// 9 Semantic Object Marks matching JalaDesk Desktop (`--mark-*` in `DESIGN.md`)
+  static const Map<String, Color> semanticMarks = <String, Color>{
+    'sapphire': Color(0xFF5AA2D4),
+    'gold': Color(0xFFEDBA6E),
+    'emerald': Color(0xFF69CE96),
+    'teal': Color(0xFF4CC9C0),
+    'coral': Color(0xFFF27D72),
+    'amber': Color(0xFFE7A34B),
+    'indigo': Color(0xFF8492F6),
+    'purple': Color(0xFFB98CF7),
+    'slate': Color(0xFF93A5BA),
+  };
+
+  static Color colorForMark(String mark) => semanticMarks[mark] ?? accentLine;
 }
 
 class JalaDeskMobileApp extends StatelessWidget {
@@ -146,6 +162,9 @@ class RemoteHostItem {
   final String username;
   final String password;
   final String privateKeyPem;
+  final String? jumpHostId;
+  final String? credentialId;
+  final bool isFavorite;
   final int? latencyMs;
   final bool? isOnline;
   final String accentTint;
@@ -162,10 +181,16 @@ class RemoteHostItem {
     this.username = 'root',
     this.password = '',
     this.privateKeyPem = '',
+    this.jumpHostId,
+    this.credentialId,
+    this.isFavorite = false,
     this.latencyMs,
     this.isOnline,
     this.accentTint = 'sapphire',
   });
+
+  bool get hasJumpHost => jumpHostId != null && jumpHostId!.trim().isNotEmpty;
+  bool get hasBoundCredential => credentialId != null && credentialId!.trim().isNotEmpty;
 
   /// Returns `(effectiveDomain, effectiveUsername)` by automatically splitting `DOMAIN\user` or `user@domain`
   (String, String) get resolvedDomainAndUser {
@@ -208,6 +233,11 @@ class RemoteHostItem {
     String? username,
     String? password,
     String? privateKeyPem,
+    String? jumpHostId,
+    bool clearJumpHost = false,
+    String? credentialId,
+    bool clearCredential = false,
+    bool? isFavorite,
     int? latencyMs,
     bool? isOnline,
     String? accentTint,
@@ -224,6 +254,9 @@ class RemoteHostItem {
       username: username ?? this.username,
       password: password ?? this.password,
       privateKeyPem: privateKeyPem ?? this.privateKeyPem,
+      jumpHostId: clearJumpHost ? null : (jumpHostId ?? this.jumpHostId),
+      credentialId: clearCredential ? null : (credentialId ?? this.credentialId),
+      isFavorite: isFavorite ?? this.isFavorite,
       latencyMs: latencyMs ?? this.latencyMs,
       isOnline: isOnline ?? this.isOnline,
       accentTint: accentTint ?? this.accentTint,
@@ -242,6 +275,9 @@ class RemoteHostItem {
         'username': username,
         'password': password,
         'privateKeyPem': privateKeyPem,
+        'jumpHostId': jumpHostId,
+        'credentialId': credentialId,
+        'isFavorite': isFavorite,
         'latencyMs': latencyMs,
         'isOnline': isOnline,
         'accentTint': accentTint,
@@ -253,6 +289,8 @@ class RemoteHostItem {
       (e) => e.name == protoStr,
       orElse: () => RemoteProtocol.ssh,
     );
+    final rawJump = (json['jumpHostId'] as String?)?.trim();
+    final rawCred = (json['credentialId'] as String?)?.trim();
     return RemoteHostItem(
       id: json['id'] as String? ?? 'h-${DateTime.now().millisecondsSinceEpoch}',
       name: json['name'] as String? ?? 'Remote Host',
@@ -265,6 +303,9 @@ class RemoteHostItem {
       username: json['username'] as String? ?? 'root',
       password: json['password'] as String? ?? '',
       privateKeyPem: json['privateKeyPem'] as String? ?? '',
+      jumpHostId: (rawJump == null || rawJump.isEmpty) ? null : rawJump,
+      credentialId: (rawCred == null || rawCred.isEmpty) ? null : rawCred,
+      isFavorite: json['isFavorite'] as bool? ?? false,
       latencyMs: (json['latencyMs'] as num?)?.toInt(),
       isOnline: json['isOnline'] as bool?,
       accentTint: json['accentTint'] as String? ?? 'sapphire',
@@ -438,6 +479,7 @@ class JalaDeskMobileShell extends StatefulWidget {
 
 class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   static const String _prefsHostsKey = 'jaladesk_vault_hosts_v2';
+  static const String _prefsCredentialsKey = 'jaladesk_vault_credentials_v1';
   static const String _prefsTotpKey = 'jaladesk_vault_totp_v2';
   static const String _prefsPairKey = 'jaladesk_vault_pair_v2';
   static const String _prefsTermThemeKey = 'jaladesk_terminal_theme_v1';
@@ -453,7 +495,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   final Set<String> _collapsedFolders = <String>{};
 
   final List<RemoteHostItem> _hosts = [];
+  final List<VaultCredentialItem> _credentials = [];
   final List<TotpEntryItem> _totpItems = [];
+
+  List<RemoteHostItem> get hosts => List.unmodifiable(_hosts);
+  List<VaultCredentialItem> get credentials => List.unmodifiable(_credentials);
+  List<ActiveLocalPortForward> get activePortForwards => List.unmodifiable(_activePortForwards);
 
   RemoteHostItem? _activeRdpHost;
   RemoteHostItem? _activeSshHost;
@@ -461,6 +508,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   // Live RDP (FreeRDP 3.x FFI) & VNC (RFB 3.8 / Apple ARD) Framebuffer Engine state
   RdpFfiClient? _rdpFfiClient;
   VncRfbClient? _vncRfbClient;
+  ActiveLocalPortForward? _desktopBastionTunnel;
   ui.Image? _remoteDesktopFrame;
   bool _desktopLiveConnected = false;
   String _desktopProtocolBanner = 'No active remote desktop session';
@@ -489,9 +537,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   Size _lastMeasuredCanvasSize = const Size(1280, 800);
   Timer? _autoResizeDebounce;
 
-  // Live SSHv2 Interactive PTY Shell & SFTP Client state (`dartssh2`)
+  // Live SSHv2 Interactive PTY Shell, SFTP Client & Bastion Port-Forwards (`dartssh2`)
   SSHClient? _sshClient;
   SSHSession? _sshPtySession;
+  SshBastionChain? _sshBastionChain;
+  final List<ActiveLocalPortForward> _activePortForwards = [];
   StreamSubscription<Uint8List>? _sshStdoutSub;
   StreamSubscription<Uint8List>? _sshStderrSub;
   SftpClient? _sftpClient;
@@ -774,6 +824,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final rawHosts = prefs.getString(_prefsHostsKey);
+      final rawCreds = prefs.getString(_prefsCredentialsKey);
       final rawTotp = prefs.getString(_prefsTotpKey);
       final savedPair = prefs.getString(_prefsPairKey);
       final savedTheme = prefs.getString(_prefsTermThemeKey);
@@ -786,6 +837,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         for (final item in decoded) {
           if (item is Map<String, dynamic>) {
             loadedHosts.add(RemoteHostItem.fromJson(item));
+          }
+        }
+      }
+
+      final loadedCreds = <VaultCredentialItem>[];
+      if (rawCreds != null && rawCreds.isNotEmpty) {
+        final decoded = jsonDecode(rawCreds) as List<dynamic>;
+        for (final item in decoded) {
+          if (item is Map<String, dynamic>) {
+            loadedCreds.add(VaultCredentialItem.fromJson(item));
           }
         }
       }
@@ -815,6 +876,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         _hosts
           ..clear()
           ..addAll(loadedHosts);
+        _credentials
+          ..clear()
+          ..addAll(loadedCreds);
         _totpItems
           ..clear()
           ..addAll(loadedTotp);
@@ -850,6 +914,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       await prefs.setString(
         _prefsHostsKey,
         jsonEncode(_hosts.map((h) => h.toJson()).toList()),
+      );
+      await prefs.setString(
+        _prefsCredentialsKey,
+        jsonEncode(_credentials.map((c) => c.toJson()).toList()),
       );
       await prefs.setString(
         _prefsTotpKey,
@@ -900,17 +968,24 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     _desktopKeyInputCtrl.dispose();
     _closeDesktopSession();
     _closeSshClient();
+    for (final pf in _activePortForwards.toList()) {
+      unawaited(pf.close());
+    }
+    _activePortForwards.clear();
     super.dispose();
   }
 
   void _closeDesktopSession() {
     final rdp = _rdpFfiClient;
     final vnc = _vncRfbClient;
+    final bastionTunnel = _desktopBastionTunnel;
     _rdpFfiClient = null;
     _vncRfbClient = null;
+    _desktopBastionTunnel = null;
     _desktopLiveConnected = false;
     if (rdp != null) unawaited(rdp.dispose());
     if (vnc != null) unawaited(vnc.dispose());
+    if (bastionTunnel != null) unawaited(bastionTunnel.close());
   }
 
   void _closeSshClient() {
@@ -927,6 +1002,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     try {
       _sshClient?.close();
     } catch (_) {}
+    final bastion = _sshBastionChain;
+    _sshBastionChain = null;
+    if (bastion != null) unawaited(bastion.dispose());
     _sshPtySession = null;
     _sftpClient = null;
     _sshClient = null;
@@ -938,14 +1016,111 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     _terminalBuffer.write(chunk);
   }
 
+  VaultCredentialItem? _findCredential(String? id) {
+    if (id == null || id.trim().isEmpty) return null;
+    for (final c in _credentials) {
+      if (c.id == id) return c;
+    }
+    return null;
+  }
+
+  /// Resolves effective authentication fields by applying any bound `VaultCredentialItem`
+  /// (mirrors JalaDesk Desktop's credential binding & inheritance model).
+  RemoteHostItem _resolveEffectiveHost(RemoteHostItem host) {
+    final bound = _findCredential(host.credentialId);
+    if (bound == null) return host;
+    return host.copyWith(
+      domain: bound.domain.trim().isNotEmpty ? bound.domain.trim() : host.domain,
+      username: bound.username.trim().isNotEmpty ? bound.username.trim() : host.username,
+      password: bound.password.isNotEmpty ? bound.password : host.password,
+      privateKeyPem: bound.privateKeyPem.trim().isNotEmpty ? bound.privateKeyPem.trim() : host.privateKeyPem,
+    );
+  }
+
+  List<RemoteHostItem> _tryResolveHopHosts(RemoteHostItem host) {
+    try {
+      return SshBastionRouteResolver.resolveHopItems<RemoteHostItem>(
+        target: host,
+        allHosts: _hosts,
+        idOf: (h) => h.id,
+        nameOf: (h) => h.name,
+        jumpHostIdOf: (h) => h.jumpHostId,
+        isSshCapable: (h) => h.protocol == RemoteProtocol.ssh,
+      );
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  String _routeBadgeForHost(RemoteHostItem host) {
+    if (!host.hasJumpHost) return '';
+    try {
+      final hops = SshBastionRouteResolver.resolveHopItems<RemoteHostItem>(
+        target: host,
+        allHosts: _hosts,
+        idOf: (h) => h.id,
+        nameOf: (h) => h.name,
+        jumpHostIdOf: (h) => h.jumpHostId,
+        isSshCapable: (h) => h.protocol == RemoteProtocol.ssh,
+      );
+      return SshBastionRouteResolver.formatRouteBadge(hops.map((h) => h.name).toList());
+    } on BastionRoutingException {
+      return 'Jump Host Warning';
+    }
+  }
+
+  /// Resolves all SSH Jump Host hops (`[hop1, hop2, ...]`) for `target`, prompting for missing
+  /// bastion credentials if needed before opening the encrypted tunnel. Returns `null` if cancelled.
+  Future<List<BastionHopSpec>?> _prepareBastionHops(RemoteHostItem target) async {
+    if (!target.hasJumpHost) return const <BastionHopSpec>[];
+    final hopItems = SshBastionRouteResolver.resolveHopItems<RemoteHostItem>(
+      target: target,
+      allHosts: _hosts,
+      idOf: (h) => h.id,
+      nameOf: (h) => h.name,
+      jumpHostIdOf: (h) => h.jumpHostId,
+      isSshCapable: (h) => h.protocol == RemoteProtocol.ssh,
+    );
+
+    final specs = <BastionHopSpec>[];
+    for (final rawHop in hopItems) {
+      RemoteHostItem effectiveHop = _resolveEffectiveHost(rawHop);
+      if (effectiveHop.password.isEmpty && effectiveHop.privateKeyPem.trim().isEmpty) {
+        final prompted = await _promptCredentialsIfNeeded(
+          effectiveHop,
+          forcePrompt: true,
+          customTitle: 'Jump Host Auth: ${rawHop.name}',
+        );
+        if (prompted == null) return null;
+        effectiveHop = prompted;
+      }
+      final (_, hopUser) = effectiveHop.resolvedDomainAndUser;
+      specs.add(
+        BastionHopSpec(
+          id: effectiveHop.id,
+          name: effectiveHop.name,
+          address: effectiveHop.address,
+          port: effectiveHop.port,
+          username: hopUser.isEmpty ? 'root' : hopUser,
+          password: effectiveHop.password,
+          privateKeyPem: effectiveHop.privateKeyPem,
+        ),
+      );
+    }
+    return specs;
+  }
+
   /// Real TCP Socket RTT Prober (`dart:io` `Socket.connect`)
+  /// Bastion-aware: if a host tunnels through an SSH Jump Host, probes the entry Jump Host gateway!
   Future<void> _probeSingleHost(RemoteHostItem host) async {
     if (widget.disableNetworkProbes) return;
+    final hopChain = _tryResolveHopHosts(host);
+    final probeTarget = hopChain.isNotEmpty ? hopChain.first : host;
     final sw = Stopwatch()..start();
     try {
       final socket = await Socket.connect(
-        host.address,
-        host.port,
+        probeTarget.address,
+        probeTarget.port,
         timeout: const Duration(milliseconds: 2500),
       );
       sw.stop();
@@ -1012,24 +1187,18 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     );
   }
 
-  /// Opens Add or Edit Connection Dialog
-  Future<void> _showHostEditorDialog({RemoteHostItem? existing}) async {
-    RemoteProtocol selectedProto = existing?.protocol ?? RemoteProtocol.ssh;
-    final nameCtrl = TextEditingController(text: existing?.name ?? '');
-    final hostCtrl = TextEditingController(text: existing?.address ?? '');
-    final portCtrl = TextEditingController(
-      text: (existing?.port ?? defaultPortForProtocol(selectedProto)).toString(),
-    );
+  /// Opens Add or Edit Reusable Vault Credential Dialog (Desktop `src/credentials/` parity)
+  Future<VaultCredentialItem?> _showVaultCredentialEditorDialog({VaultCredentialItem? existing}) async {
+    final labelCtrl = TextEditingController(text: existing?.label ?? '');
     final domainCtrl = TextEditingController(text: existing?.domain ?? '');
     final userCtrl = TextEditingController(text: existing?.username ?? 'root');
     final passCtrl = TextEditingController(text: existing?.password ?? '');
     final keyCtrl = TextEditingController(text: existing?.privateKeyPem ?? '');
-    final folderCtrl = TextEditingController(text: existing?.folder ?? 'Production');
-    final notesCtrl = TextEditingController(text: existing?.osLabel ?? '');
+    final notesCtrl = TextEditingController(text: existing?.notes ?? '');
     bool obscurePass = true;
-    bool showKeyField = (existing?.privateKeyPem ?? '').isNotEmpty;
+    bool showKeyField = (existing?.privateKeyPem ?? '').trim().isNotEmpty;
 
-    await showDialog<void>(
+    return showDialog<VaultCredentialItem>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setModalState) => AlertDialog(
@@ -1040,16 +1209,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           ),
           title: Row(
             children: [
-              _buildJalaBrandLogo(size: 26, radius: 7),
+              const Icon(Icons.vpn_key_rounded, size: 20, color: JalaPalette.brandGold),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  existing == null ? 'New Remote Connection' : 'Edit Connection',
-                  style: const TextStyle(
-                    fontSize: 15.5,
-                    fontWeight: FontWeight.w700,
-                    color: JalaPalette.text,
-                  ),
+                  existing == null ? 'New Vault Credential' : 'Edit Vault Credential',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: JalaPalette.text),
                 ),
               ),
             ],
@@ -1061,132 +1226,41 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Protocol',
-                    style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: JalaPalette.brandGold),
-                  ),
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: [
-                      for (final proto in RemoteProtocol.values)
-                        ChoiceChip(
-                          label: Text(
-                            proto.name.toUpperCase(),
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                              color: selectedProto == proto ? JalaPalette.brandGold : JalaPalette.text2,
-                            ),
-                          ),
-                          selected: selectedProto == proto,
-                          selectedColor: JalaPalette.selected,
-                          backgroundColor: JalaPalette.header,
-                          side: BorderSide(
-                            color: selectedProto == proto ? JalaPalette.brandGold : JalaPalette.lineInput,
-                          ),
-                          onSelected: (_) {
-                            setModalState(() {
-                              final prevDefault = defaultPortForProtocol(selectedProto).toString();
-                              selectedProto = proto;
-                              if (portCtrl.text.trim().isEmpty || portCtrl.text.trim() == prevDefault) {
-                                portCtrl.text = defaultPortForProtocol(proto).toString();
-                              }
-                            });
-                          },
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
                   _buildModalField(
-                    controller: nameCtrl,
-                    label: 'Display Name (optional)',
-                    hint: 'e.g. AD1 or prod-bastion-01',
-                    icon: Icons.label_outline_rounded,
+                    controller: labelCtrl,
+                    label: 'Credential Name *',
+                    hint: 'e.g. PLN Batam AD Admin or Prod Bastion Key',
+                    icon: Icons.badge_outlined,
                   ),
                   const SizedBox(height: 10),
                   Row(
                     children: [
                       Expanded(
-                        flex: 3,
                         child: _buildModalField(
-                          controller: hostCtrl,
-                          label: 'Host / IP Address *',
-                          hint: 'e.g. 10.28.0.154',
-                          icon: Icons.dns_outlined,
+                          controller: domainCtrl,
+                          label: 'AD Domain (optional)',
+                          hint: 'e.g. plnbatam',
+                          icon: Icons.domain_rounded,
                         ),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
-                        flex: 1,
                         child: _buildModalField(
-                          controller: portCtrl,
-                          label: 'Port *',
-                          hint: '3389',
-                          keyboardType: TextInputType.number,
+                          controller: userCtrl,
+                          label: 'Username *',
+                          hint: 'adminit / ribato',
+                          icon: Icons.person_outline_rounded,
                         ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 10),
-                  if (selectedProto == RemoteProtocol.rdp) ...[
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _buildModalField(
-                            controller: domainCtrl,
-                            label: 'AD Domain (optional)',
-                            hint: 'e.g. plnbatam',
-                            icon: Icons.domain_rounded,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _buildModalField(
-                            controller: userCtrl,
-                            label: 'Username (or domain\\user)',
-                            hint: 'adminit',
-                            icon: Icons.person_outline_rounded,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                  ] else ...[
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _buildModalField(
-                            controller: userCtrl,
-                            label: selectedProto == RemoteProtocol.vnc
-                                ? 'Username (macOS / ARD)'
-                                : 'Username',
-                            hint: selectedProto == RemoteProtocol.vnc
-                                ? 'ribato (optional)'
-                                : 'root / ubuntu',
-                            icon: Icons.person_outline_rounded,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _buildModalField(
-                            controller: folderCtrl,
-                            label: 'Folder / Group',
-                            hint: 'Production',
-                            icon: Icons.folder_outlined,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                  ],
                   TextField(
                     controller: passCtrl,
                     obscureText: obscurePass,
                     style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
                     decoration: InputDecoration(
-                      labelText: 'Password',
+                      labelText: 'Password / Key Passphrase',
                       labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.text2),
                       prefixIcon: const Icon(Icons.lock_outline_rounded, size: 17, color: JalaPalette.brandGold),
                       suffixIcon: IconButton(
@@ -1206,57 +1280,48 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                       ),
                     ),
                   ),
-                  if (selectedProto == RemoteProtocol.ssh || selectedProto == RemoteProtocol.sftp) ...[
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton.icon(
-                        onPressed: () => setModalState(() => showKeyField = !showKeyField),
-                        icon: Icon(
-                          showKeyField ? Icons.expand_less_rounded : Icons.vpn_key_outlined,
-                          size: 16,
-                          color: JalaPalette.brandGold,
-                        ),
-                        label: Text(
-                          showKeyField ? 'Hide Private Key (PEM)' : '+ Use SSH Private Key (Ed25519 / RSA PEM)',
-                          style: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: () => setModalState(() => showKeyField = !showKeyField),
+                      icon: Icon(
+                        showKeyField ? Icons.expand_less_rounded : Icons.key_rounded,
+                        size: 16,
+                        color: JalaPalette.brandGold,
+                      ),
+                      label: Text(
+                        showKeyField ? 'Hide Private Key (PEM)' : '+ Attach SSH Private Key (Ed25519 / RSA PEM)',
+                        style: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                      ),
+                    ),
+                  ),
+                  if (showKeyField) ...[
+                    TextField(
+                      controller: keyCtrl,
+                      maxLines: 3,
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: JalaPalette.text),
+                      decoration: InputDecoration(
+                        labelText: 'OpenSSH / PEM Private Key',
+                        hintText: '-----BEGIN OPENSSH PRIVATE KEY-----',
+                        hintStyle: const TextStyle(fontSize: 11, color: JalaPalette.muted),
+                        labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                        filled: true,
+                        fillColor: JalaPalette.header,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(color: JalaPalette.lineInput),
                         ),
                       ),
                     ),
-                    if (showKeyField)
-                      TextField(
-                        controller: keyCtrl,
-                        maxLines: 3,
-                        style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: JalaPalette.text),
-                        decoration: InputDecoration(
-                          labelText: 'OpenSSH / PEM Private Key',
-                          hintText: '-----BEGIN OPENSSH PRIVATE KEY-----',
-                          hintStyle: const TextStyle(fontSize: 11, color: JalaPalette.muted),
-                          labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
-                          filled: true,
-                          fillColor: JalaPalette.header,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(color: JalaPalette.lineInput),
-                          ),
-                        ),
-                      ),
+                    const SizedBox(height: 10),
                   ],
-                  const SizedBox(height: 10),
-                  if (selectedProto == RemoteProtocol.rdp)
-                    _buildModalField(
-                      controller: folderCtrl,
-                      label: 'Folder / Group',
-                      hint: 'PLN Batam / Production',
-                      icon: Icons.folder_outlined,
-                    )
-                  else
-                    _buildModalField(
-                      controller: notesCtrl,
-                      label: 'OS / Description Label (optional)',
-                      hint: 'e.g. Ubuntu 24.04 LTS • Windows Server',
-                      icon: Icons.info_outline_rounded,
-                    ),
+                  _buildModalField(
+                    controller: notesCtrl,
+                    label: 'Scope / Notes (optional)',
+                    hint: 'Shared across Core AD & Linux Bastions',
+                    icon: Icons.notes_rounded,
+                  ),
                 ],
               ),
             ),
@@ -1265,76 +1330,56 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             if (existing != null)
               TextButton.icon(
                 onPressed: () {
-                  Navigator.of(ctx).pop();
-                  _deleteHost(existing);
+                  setState(() {
+                    _credentials.removeWhere((c) => c.id == existing.id);
+                    for (int i = 0; i < _hosts.length; i++) {
+                      if (_hosts[i].credentialId == existing.id) {
+                        _hosts[i] = _hosts[i].copyWith(clearCredential: true);
+                      }
+                    }
+                  });
+                  _saveVaultToDisk();
+                  Navigator.of(ctx).pop(null);
                 },
                 icon: const Icon(Icons.delete_outline_rounded, size: 16, color: JalaPalette.danger),
                 label: const Text('Delete', style: TextStyle(color: JalaPalette.danger)),
               ),
             TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
+              onPressed: () => Navigator.of(ctx).pop(null),
               child: const Text('Cancel', style: TextStyle(color: JalaPalette.muted)),
             ),
             FilledButton.icon(
-              style: FilledButton.styleFrom(
-                backgroundColor: JalaPalette.accent,
-                foregroundColor: Colors.white,
-              ),
+              style: FilledButton.styleFrom(backgroundColor: JalaPalette.accent, foregroundColor: Colors.white),
               onPressed: () {
-                final addr = hostCtrl.text.trim();
-                if (addr.isEmpty) {
+                final lbl = labelCtrl.text.trim();
+                if (lbl.isEmpty) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Please enter a valid Hostname or IP address.')),
+                    const SnackBar(content: Text('Please enter a Credential Name.')),
                   );
                   return;
                 }
-                final parsedPort = int.tryParse(portCtrl.text.trim()) ?? defaultPortForProtocol(selectedProto);
-                final displayName = nameCtrl.text.trim().isNotEmpty ? nameCtrl.text.trim() : addr;
-                final rawUser = userCtrl.text.trim().isEmpty
-                    ? (selectedProto == RemoteProtocol.vnc ? '' : 'root')
-                    : userCtrl.text.trim();
-                final rawDom = domainCtrl.text.trim();
-                final acctDesc = rawDom.isNotEmpty && rawUser.isNotEmpty && !rawUser.contains('\\')
-                    ? '$rawDom\\$rawUser'
-                    : rawUser;
-                final osDesc = notesCtrl.text.trim().isNotEmpty
-                    ? notesCtrl.text.trim()
-                    : (acctDesc.isNotEmpty
-                        ? '${selectedProto.name.toUpperCase()} • $acctDesc@$addr'
-                        : '${selectedProto.name.toUpperCase()} • $addr');
-
-                final newItem = RemoteHostItem(
-                  id: existing?.id ?? 'h-${DateTime.now().millisecondsSinceEpoch}',
-                  name: displayName,
-                  address: addr,
-                  port: parsedPort,
-                  protocol: selectedProto,
-                  folder: folderCtrl.text.trim().isEmpty ? 'General' : folderCtrl.text.trim(),
-                  osLabel: osDesc,
-                  domain: rawDom,
-                  username: rawUser,
+                final saved = VaultCredentialItem(
+                  id: existing?.id ?? 'cred-${DateTime.now().microsecondsSinceEpoch}',
+                  label: lbl,
+                  domain: domainCtrl.text.trim(),
+                  username: userCtrl.text.trim().isEmpty ? 'root' : userCtrl.text.trim(),
                   password: passCtrl.text,
                   privateKeyPem: keyCtrl.text.trim(),
-                  accentTint: (selectedProto == RemoteProtocol.ssh || selectedProto == RemoteProtocol.hypervisor)
-                      ? 'gold'
-                      : 'sapphire',
+                  notes: notesCtrl.text.trim(),
                 );
-
                 setState(() {
                   if (existing != null) {
-                    final idx = _hosts.indexWhere((h) => h.id == existing.id);
-                    if (idx >= 0) _hosts[idx] = newItem;
+                    final idx = _credentials.indexWhere((c) => c.id == existing.id);
+                    if (idx >= 0) _credentials[idx] = saved;
                   } else {
-                    _hosts.insert(0, newItem);
+                    _credentials.insert(0, saved);
                   }
-                  _syncActiveHostSelection();
                 });
                 _saveVaultToDisk();
-                Navigator.of(ctx).pop();
-                _probeSingleHost(newItem);
+                Navigator.of(ctx).pop(saved);
               },
               icon: const Icon(Icons.check_rounded, size: 16),
-              label: Text(existing == null ? 'Save Host' : 'Update'),
+              label: Text(existing == null ? 'Save Credential' : 'Update'),
             ),
           ],
         ),
@@ -1342,8 +1387,611 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     );
   }
 
+  /// Opens Add or Edit Connection Dialog (supports Jump Host / Bastion Tunneling & Vault Credential Binding)
+  Future<RemoteHostItem?> _showHostEditorDialog({
+    RemoteHostItem? existing,
+    RemoteProtocol? presetProtocol,
+    String? presetFolder,
+    String? customDialogTitle,
+  }) async {
+    RemoteProtocol selectedProto = existing?.protocol ?? presetProtocol ?? RemoteProtocol.ssh;
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final hostCtrl = TextEditingController(text: existing?.address ?? '');
+    final portCtrl = TextEditingController(
+      text: (existing?.port ?? defaultPortForProtocol(selectedProto)).toString(),
+    );
+    final domainCtrl = TextEditingController(text: existing?.domain ?? '');
+    final userCtrl = TextEditingController(text: existing?.username ?? 'root');
+    final passCtrl = TextEditingController(text: existing?.password ?? '');
+    final keyCtrl = TextEditingController(text: existing?.privateKeyPem ?? '');
+    final folderCtrl = TextEditingController(text: existing?.folder ?? presetFolder ?? 'Production');
+    final notesCtrl = TextEditingController(text: existing?.osLabel ?? '');
+    String selectedJumpHostId = existing?.jumpHostId ?? '';
+    String selectedCredentialId = existing?.credentialId ?? '';
+    String selectedAccentTint = existing?.accentTint ??
+        ((selectedProto == RemoteProtocol.ssh || selectedProto == RemoteProtocol.hypervisor)
+            ? 'gold'
+            : 'sapphire');
+    bool isFavorite = existing?.isFavorite ?? false;
+    bool obscurePass = true;
+    bool showKeyField = (existing?.privateKeyPem ?? '').isNotEmpty;
+
+    return showDialog<RemoteHostItem>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          final validJumpHosts = _hosts.where((candidate) {
+            if (candidate.protocol != RemoteProtocol.ssh) return false;
+            return !SshBastionRouteResolver.wouldCreateCycle<RemoteHostItem>(
+              editingHostId: existing?.id,
+              candidateJumpId: candidate.id,
+              allHosts: _hosts,
+              idOf: (h) => h.id,
+              jumpHostIdOf: (h) => h.jumpHostId,
+            );
+          }).toList();
+
+          if (selectedJumpHostId.isNotEmpty &&
+              !validJumpHosts.any((h) => h.id == selectedJumpHostId)) {
+            selectedJumpHostId = '';
+          }
+          final boundCred = _findCredential(selectedCredentialId);
+          if (selectedCredentialId.isNotEmpty && boundCred == null) {
+            selectedCredentialId = '';
+          }
+
+          return AlertDialog(
+            backgroundColor: JalaPalette.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: const BorderSide(color: JalaPalette.lineInput),
+            ),
+            title: Row(
+              children: [
+                _buildJalaBrandLogo(size: 26, radius: 7),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    customDialogTitle ??
+                        (existing == null ? 'New Remote Connection' : 'Edit Connection'),
+                    style: const TextStyle(
+                      fontSize: 15.5,
+                      fontWeight: FontWeight.w700,
+                      color: JalaPalette.text,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: isFavorite ? 'Unpin Favorite' : 'Pin to Favorites',
+                  onPressed: () => setModalState(() => isFavorite = !isFavorite),
+                  icon: Icon(
+                    isFavorite ? Icons.star_rounded : Icons.star_border_rounded,
+                    size: 20,
+                    color: isFavorite ? JalaPalette.brandGold : JalaPalette.muted,
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Protocol',
+                      style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: JalaPalette.brandGold),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final proto in RemoteProtocol.values)
+                          ChoiceChip(
+                            label: Text(
+                              proto.name.toUpperCase(),
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: selectedProto == proto ? JalaPalette.brandGold : JalaPalette.text2,
+                              ),
+                            ),
+                            selected: selectedProto == proto,
+                            selectedColor: JalaPalette.selected,
+                            backgroundColor: JalaPalette.header,
+                            side: BorderSide(
+                              color: selectedProto == proto ? JalaPalette.brandGold : JalaPalette.lineInput,
+                            ),
+                            onSelected: (_) {
+                              setModalState(() {
+                                final prevDefault = defaultPortForProtocol(selectedProto).toString();
+                                selectedProto = proto;
+                                if (portCtrl.text.trim().isEmpty || portCtrl.text.trim() == prevDefault) {
+                                  portCtrl.text = defaultPortForProtocol(proto).toString();
+                                }
+                              });
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    _buildModalField(
+                      controller: nameCtrl,
+                      label: 'Display Name (optional)',
+                      hint: 'e.g. AD1 or prod-bastion-01',
+                      icon: Icons.label_outline_rounded,
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: _buildModalField(
+                            controller: hostCtrl,
+                            label: 'Host / IP Address *',
+                            hint: 'e.g. 10.28.0.154',
+                            icon: Icons.dns_outlined,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          flex: 1,
+                          child: _buildModalField(
+                            controller: portCtrl,
+                            label: 'Port *',
+                            hint: '3389',
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+
+                    // ==========================================================
+                    // SSH JUMP HOST / BASTION TUNNEL (`ProxyJump` & Local Tunnel)
+                    // ==========================================================
+                    Row(
+                      children: [
+                        const Icon(Icons.alt_route_rounded, size: 15, color: JalaPalette.brandGold),
+                        const SizedBox(width: 5),
+                        const Expanded(
+                          child: Text(
+                            'SSH Jump Host / Bastion Tunnel',
+                            style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        InkWell(
+                          key: const ValueKey('btn_inline_new_jump_host'),
+                          borderRadius: BorderRadius.circular(6),
+                          onTap: () async {
+                            final createdJump = await _showHostEditorDialog(
+                              presetProtocol: RemoteProtocol.ssh,
+                              presetFolder: 'Bastions',
+                              customDialogTitle: 'New SSH Jump Host / Bastion',
+                            );
+                            if (createdJump != null && createdJump.protocol == RemoteProtocol.ssh) {
+                              setModalState(() => selectedJumpHostId = createdJump.id);
+                            }
+                          },
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            child: Text(
+                              '+ New Jump Host',
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: JalaPalette.accentLine),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    DropdownButtonFormField<String>(
+                      key: const ValueKey('dropdown_jump_host'),
+                      initialValue: selectedJumpHostId,
+                      isExpanded: true,
+                      dropdownColor: JalaPalette.surface,
+                      style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        filled: true,
+                        fillColor: JalaPalette.header,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(color: JalaPalette.lineInput),
+                        ),
+                      ),
+                      items: [
+                        const DropdownMenuItem<String>(
+                          value: '',
+                          child: Text(
+                            'Direct Connection (No Jump Host)',
+                            style: TextStyle(fontSize: 12, color: JalaPalette.text2),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        for (final jh in validJumpHosts)
+                          DropdownMenuItem<String>(
+                            value: jh.id,
+                            child: Text(
+                              'via ${jh.name} (${jh.address}:${jh.port})',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: JalaPalette.brandGold),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: (val) => setModalState(() => selectedJumpHostId = val ?? ''),
+                    ),
+                    if (selectedJumpHostId.isNotEmpty) ...[
+                      const SizedBox(height: 5),
+                      Text(
+                        selectedProto == RemoteProtocol.ssh || selectedProto == RemoteProtocol.sftp
+                            ? 'Uses SSH ProxyJump (RFC 4254 direct-tcpip channel) through the selected bastion.'
+                            : 'Creates an encrypted local loopback SSH tunnel for ${selectedProto.name.toUpperCase()} traffic automatically.',
+                        style: const TextStyle(fontSize: 10.5, color: JalaPalette.ok),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+
+                    // ==========================================================
+                    // AUTHENTICATION SOURCE (Inline vs Vault Credential Binding)
+                    // ==========================================================
+                    Row(
+                      children: [
+                        const Icon(Icons.key_rounded, size: 15, color: JalaPalette.brandGold),
+                        const SizedBox(width: 5),
+                        const Expanded(
+                          child: Text(
+                            'Authentication & Credentials',
+                            style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        InkWell(
+                          key: const ValueKey('btn_inline_new_credential'),
+                          borderRadius: BorderRadius.circular(6),
+                          onTap: () async {
+                            final createdCred = await _showVaultCredentialEditorDialog();
+                            if (createdCred != null) {
+                              setModalState(() => selectedCredentialId = createdCred.id);
+                            }
+                          },
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            child: Text(
+                              '+ New Credential',
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: JalaPalette.accentLine),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    DropdownButtonFormField<String>(
+                      key: const ValueKey('dropdown_vault_credential'),
+                      initialValue: selectedCredentialId,
+                      isExpanded: true,
+                      dropdownColor: JalaPalette.surface,
+                      style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        filled: true,
+                        fillColor: JalaPalette.header,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(color: JalaPalette.lineInput),
+                        ),
+                      ),
+                      items: [
+                        const DropdownMenuItem<String>(
+                          value: '',
+                          child: Text(
+                            'Custom Inline Credentials (this host only)',
+                            style: TextStyle(fontSize: 12, color: JalaPalette.text2),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        for (final cred in _credentials)
+                          DropdownMenuItem<String>(
+                            value: cred.id,
+                            child: Text(
+                              'Vault: ${cred.label} (${cred.displayPrincipal})',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: JalaPalette.brandGold),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: (val) => setModalState(() => selectedCredentialId = val ?? ''),
+                    ),
+                    const SizedBox(height: 10),
+
+                    if (boundCred != null) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+                        decoration: BoxDecoration(
+                          color: JalaPalette.header,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.4)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.verified_user_outlined, size: 16, color: JalaPalette.ok),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Bound to "${boundCred.label}" • ${boundCred.displayPrincipal} (${boundCred.kindBadge})',
+                                style: const TextStyle(fontSize: 11.5, color: JalaPalette.text2),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      _buildModalField(
+                        controller: folderCtrl,
+                        label: 'Folder / Group',
+                        hint: 'Production',
+                        icon: Icons.folder_outlined,
+                      ),
+                    ] else ...[
+                      if (selectedProto == RemoteProtocol.rdp) ...[
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _buildModalField(
+                                controller: domainCtrl,
+                                label: 'AD Domain (optional)',
+                                hint: 'e.g. plnbatam',
+                                icon: Icons.domain_rounded,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _buildModalField(
+                                controller: userCtrl,
+                                label: 'Username (or domain\\user)',
+                                hint: 'adminit',
+                                icon: Icons.person_outline_rounded,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                      ] else ...[
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _buildModalField(
+                                controller: userCtrl,
+                                label: selectedProto == RemoteProtocol.vnc
+                                    ? 'Username (macOS / ARD)'
+                                    : 'Username',
+                                hint: selectedProto == RemoteProtocol.vnc
+                                    ? 'ribato (optional)'
+                                    : 'root / ubuntu',
+                                icon: Icons.person_outline_rounded,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _buildModalField(
+                                controller: folderCtrl,
+                                label: 'Folder / Group',
+                                hint: 'Production',
+                                icon: Icons.folder_outlined,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                      ],
+                      TextField(
+                        controller: passCtrl,
+                        obscureText: obscurePass,
+                        style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                        decoration: InputDecoration(
+                          labelText: 'Password',
+                          labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.text2),
+                          prefixIcon: const Icon(Icons.lock_outline_rounded, size: 17, color: JalaPalette.brandGold),
+                          suffixIcon: IconButton(
+                            icon: Icon(
+                              obscurePass ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                              size: 17,
+                              color: JalaPalette.muted,
+                            ),
+                            onPressed: () => setModalState(() => obscurePass = !obscurePass),
+                          ),
+                          isDense: true,
+                          filled: true,
+                          fillColor: JalaPalette.header,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(color: JalaPalette.lineInput),
+                          ),
+                        ),
+                      ),
+                      if (selectedProto == RemoteProtocol.ssh || selectedProto == RemoteProtocol.sftp) ...[
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            onPressed: () => setModalState(() => showKeyField = !showKeyField),
+                            icon: Icon(
+                              showKeyField ? Icons.expand_less_rounded : Icons.vpn_key_outlined,
+                              size: 16,
+                              color: JalaPalette.brandGold,
+                            ),
+                            label: Text(
+                              showKeyField ? 'Hide Private Key (PEM)' : '+ Use SSH Private Key (Ed25519 / RSA PEM)',
+                              style: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                            ),
+                          ),
+                        ),
+                        if (showKeyField)
+                          TextField(
+                            controller: keyCtrl,
+                            maxLines: 3,
+                            style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: JalaPalette.text),
+                            decoration: InputDecoration(
+                              labelText: 'OpenSSH / PEM Private Key',
+                              hintText: '-----BEGIN OPENSSH PRIVATE KEY-----',
+                              hintStyle: const TextStyle(fontSize: 11, color: JalaPalette.muted),
+                              labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                              filled: true,
+                              fillColor: JalaPalette.header,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(8),
+                                borderSide: const BorderSide(color: JalaPalette.lineInput),
+                              ),
+                            ),
+                          ),
+                      ],
+                      const SizedBox(height: 10),
+                      if (selectedProto == RemoteProtocol.rdp)
+                        _buildModalField(
+                          controller: folderCtrl,
+                          label: 'Folder / Group',
+                          hint: 'PLN Batam / Production',
+                          icon: Icons.folder_outlined,
+                        )
+                      else
+                        _buildModalField(
+                          controller: notesCtrl,
+                          label: 'OS / Description Label (optional)',
+                          hint: 'e.g. Ubuntu 24.04 LTS • Windows Server',
+                          icon: Icons.info_outline_rounded,
+                        ),
+                    ],
+                    const SizedBox(height: 10),
+                    // 9 Desktop Semantic Mark Colors
+                    Wrap(
+                      spacing: 7,
+                      runSpacing: 6,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        const Text(
+                          'Color Mark:',
+                          style: TextStyle(fontSize: 11, color: JalaPalette.muted, fontWeight: FontWeight.w600),
+                        ),
+                        for (final entry in JalaPalette.semanticMarks.entries)
+                          InkWell(
+                            borderRadius: BorderRadius.circular(99),
+                            onTap: () => setModalState(() => selectedAccentTint = entry.key),
+                            child: Container(
+                              width: 19,
+                              height: 19,
+                              decoration: BoxDecoration(
+                                color: entry.value,
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: selectedAccentTint == entry.key ? Colors.white : Colors.transparent,
+                                  width: 2,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              if (existing != null)
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.of(ctx).pop(null);
+                    _deleteHost(existing);
+                  },
+                  icon: const Icon(Icons.delete_outline_rounded, size: 16, color: JalaPalette.danger),
+                  label: const Text('Delete', style: TextStyle(color: JalaPalette.danger)),
+                ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(null),
+                child: const Text('Cancel', style: TextStyle(color: JalaPalette.muted)),
+              ),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: JalaPalette.accent,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () {
+                  final addr = hostCtrl.text.trim();
+                  if (addr.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Please enter a valid Hostname or IP address.')),
+                    );
+                    return;
+                  }
+                  final parsedPort = int.tryParse(portCtrl.text.trim()) ?? defaultPortForProtocol(selectedProto);
+                  final displayName = nameCtrl.text.trim().isNotEmpty ? nameCtrl.text.trim() : addr;
+                  final effectiveCred = _findCredential(selectedCredentialId);
+                  final rawUser = effectiveCred != null
+                      ? effectiveCred.username
+                      : (userCtrl.text.trim().isEmpty
+                          ? (selectedProto == RemoteProtocol.vnc ? '' : 'root')
+                          : userCtrl.text.trim());
+                  final rawDom = effectiveCred != null ? effectiveCred.domain : domainCtrl.text.trim();
+                  final acctDesc = rawDom.isNotEmpty && rawUser.isNotEmpty && !rawUser.contains('\\')
+                      ? '$rawDom\\$rawUser'
+                      : rawUser;
+                  final osDesc = notesCtrl.text.trim().isNotEmpty
+                      ? notesCtrl.text.trim()
+                      : (acctDesc.isNotEmpty
+                          ? '${selectedProto.name.toUpperCase()} • $acctDesc@$addr'
+                          : '${selectedProto.name.toUpperCase()} • $addr');
+
+                  final newItem = RemoteHostItem(
+                    id: existing?.id ?? 'h-${DateTime.now().microsecondsSinceEpoch}',
+                    name: displayName,
+                    address: addr,
+                    port: parsedPort,
+                    protocol: selectedProto,
+                    folder: folderCtrl.text.trim().isEmpty ? 'General' : folderCtrl.text.trim(),
+                    osLabel: osDesc,
+                    domain: rawDom,
+                    username: rawUser,
+                    password: passCtrl.text,
+                    privateKeyPem: keyCtrl.text.trim(),
+                    jumpHostId: selectedJumpHostId.isEmpty ? null : selectedJumpHostId,
+                    credentialId: selectedCredentialId.isEmpty ? null : selectedCredentialId,
+                    isFavorite: isFavorite,
+                    accentTint: selectedAccentTint,
+                  );
+
+                  setState(() {
+                    if (existing != null) {
+                      final idx = _hosts.indexWhere((h) => h.id == existing.id);
+                      if (idx >= 0) _hosts[idx] = newItem;
+                    } else {
+                      _hosts.insert(0, newItem);
+                    }
+                    _syncActiveHostSelection();
+                  });
+                  _saveVaultToDisk();
+                  Navigator.of(ctx).pop(newItem);
+                  _probeSingleHost(newItem);
+                },
+                icon: const Icon(Icons.check_rounded, size: 16),
+                label: Text(existing == null ? 'Save Host' : 'Update'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   /// Prompts the user for password/credentials if connecting to a host whose password hasn't been entered yet
-  Future<RemoteHostItem?> _promptCredentialsIfNeeded(RemoteHostItem host, {bool forcePrompt = false}) async {
+  Future<RemoteHostItem?> _promptCredentialsIfNeeded(
+    RemoteHostItem host, {
+    bool forcePrompt = false,
+    String? customTitle,
+  }) async {
     if (!forcePrompt && (host.password.isNotEmpty || host.privateKeyPem.isNotEmpty)) {
       return host;
     }
@@ -1371,7 +2019,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Authenticate to ${host.name}',
+                  customTitle ?? 'Authenticate to ${host.name}',
                   style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: JalaPalette.text),
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -1516,6 +2164,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   void _deleteHost(RemoteHostItem host) {
     setState(() {
       _hosts.removeWhere((h) => h.id == host.id);
+      for (int i = 0; i < _hosts.length; i++) {
+        if (_hosts[i].jumpHostId == host.id) {
+          _hosts[i] = _hosts[i].copyWith(clearJumpHost: true);
+        }
+      }
       if (_activeRdpHost?.id == host.id) _activeRdpHost = null;
       if (_activeSshHost?.id == host.id) _activeSshHost = null;
       _syncActiveHostSelection();
@@ -1538,6 +2191,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         osLabel: 'Windows 11 Enterprise • FreeRDP 3.x NLA',
         username: 'ribato',
         accentTint: 'sapphire',
+        jumpHostId: 'sample-ssh-bastion',
       ),
       RemoteHostItem(
         id: 'sample-ssh-bastion',
@@ -1595,28 +2249,51 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     bool forceCredentialPrompt = false,
     String? initialSshSubMode,
   }) async {
+    final resolvedInitial = _resolveEffectiveHost(rawHost);
+    final routeBadge = _routeBadgeForHost(rawHost);
+    final routeSuffix = routeBadge.isEmpty ? '' : ' • $routeBadge';
+
     if (widget.disableNetworkProbes) {
       setState(() {
-        if (rawHost.protocol == RemoteProtocol.ssh || rawHost.protocol == RemoteProtocol.sftp) {
-          _activeSshHost = rawHost;
-          _sshSubMode = initialSshSubMode ?? (rawHost.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal');
+        if (resolvedInitial.protocol == RemoteProtocol.ssh ||
+            resolvedInitial.protocol == RemoteProtocol.sftp) {
+          _activeSshHost = resolvedInitial;
+          _sshSubMode = initialSshSubMode ??
+              (resolvedInitial.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal');
           _tabIndex = 2;
           _offlineTerminalLine = '';
           _terminalBuffer.write(
-            '\r\n\x1b[1;32m✓ Connected to ${rawHost.name} (${rawHost.address}:${rawHost.port})\x1b[0m\r\n'
+            '\r\n\x1b[1;32m✓ Connected to ${resolvedInitial.name} (${resolvedInitial.address}:${resolvedInitial.port}$routeSuffix)\x1b[0m\r\n'
             '$_offlinePrompt',
           );
         } else {
-          _activeRdpHost = rawHost;
+          _activeRdpHost = resolvedInitial;
           _tabIndex = 1;
-          _lastRdpAction = 'Connected to ${rawHost.name} (${rawHost.address}:${rawHost.port})';
+          _lastRdpAction =
+              'Connected to ${resolvedInitial.name} (${resolvedInitial.address}:${resolvedInitial.port}$routeSuffix)';
         }
       });
       return;
     }
 
-    // Prompt for password if none is stored yet (for RDP/SSH/SFTP/VNC)
-    RemoteHostItem host = rawHost;
+    // 1. Resolve & authenticate any SSH Jump Host / Bastion chain (`Hop 1 -> ... -> Hop N`)
+    List<BastionHopSpec> bastionHops = const <BastionHopSpec>[];
+    if (resolvedInitial.hasJumpHost) {
+      try {
+        final prepared = await _prepareBastionHops(resolvedInitial);
+        if (prepared == null) return;
+        bastionHops = prepared;
+      } on BastionRoutingException catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.message)),
+        );
+        return;
+      }
+    }
+
+    // 2. Prompt for target password if none is stored/inherited yet (for RDP/SSH/SFTP/VNC)
+    RemoteHostItem host = resolvedInitial;
     if (forceCredentialPrompt ||
         ((host.protocol == RemoteProtocol.rdp ||
                 host.protocol == RemoteProtocol.ssh ||
@@ -1629,7 +2306,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       host = prompted;
     }
 
-    String stageText = 'Connecting to ${host.address}:${host.port} (${host.protocol.name.toUpperCase()})...';
+    String stageText =
+        'Connecting to ${host.address}:${host.port}$routeSuffix (${host.protocol.name.toUpperCase()})...';
     String? errorDetail;
     bool connecting = true;
     bool dialogOpen = true;
@@ -1637,19 +2315,33 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
     Future<void> performHandshake() async {
       final sw = Stopwatch()..start();
+      SshBastionChain? pendingBastionChain;
+      ActiveLocalPortForward? pendingLocalTunnel;
+
       try {
+        if (bastionHops.isNotEmpty) {
+          pendingBastionChain = await SshBastionChain.connect(
+            bastionHops,
+            onStage: (s) => modalSetState?.call(() => stageText = s),
+          );
+        }
+
         // =====================================================================
-        // 1. SSHv2 INTERACTIVE PTY SHELL & SFTP ENGINE (dartssh2)
+        // 1. SSHv2 INTERACTIVE PTY SHELL & SFTP ENGINE (dartssh2 + ProxyJump)
         // =====================================================================
         if (host.protocol == RemoteProtocol.ssh || host.protocol == RemoteProtocol.sftp) {
           modalSetState?.call(() {
-            stageText = '1/3 Opening TCP socket to ${host.address}:${host.port}...';
+            stageText = pendingBastionChain != null
+                ? 'Opening ProxyJump channel (${pendingBastionChain.routeSummary}) → ${host.address}:${host.port}...'
+                : '1/3 Opening TCP socket to ${host.address}:${host.port}...';
           });
-          final sshSocket = await SSHSocket.connect(
-            host.address,
-            host.port,
-            timeout: const Duration(seconds: 7),
-          );
+          final SSHSocket sshSocket = pendingBastionChain != null
+              ? await pendingBastionChain.openTargetForward(host.address, host.port)
+              : await SSHSocket.connect(
+                  host.address,
+                  host.port,
+                  timeout: const Duration(seconds: 7),
+                );
           final rtt = sw.elapsedMilliseconds.clamp(1, 9999);
 
           final (_, cleanUser) = host.resolvedDomainAndUser;
@@ -1700,14 +2392,19 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
           if (!mounted) {
             client.close();
+            await pendingBastionChain?.dispose();
             return;
           }
 
           _closeSshClient();
+          final activeChain = pendingBastionChain;
+          pendingBastionChain = null;
+
           _offlineTerminalLine = '';
           _terminalBuffer.clear();
           _terminalBuffer.write(
-            '\x1b[1;32m✓ SSHv2 PTY Connected\x1b[0m to \x1b[1;33m${host.formattedEndpoint}\x1b[0m (${rtt}ms)\r\n',
+            '\x1b[1;32m✓ SSHv2 PTY Connected\x1b[0m to \x1b[1;33m${host.formattedEndpoint}\x1b[0m'
+            '${activeChain != null ? " \x1b[1;36m[${activeChain.routeSummary}]\x1b[0m" : ""} (${rtt}ms)\r\n',
           );
 
           setState(() {
@@ -1716,6 +2413,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               _hosts[idx] = _hosts[idx].copyWith(latencyMs: rtt, isOnline: true);
             }
             _activeSshHost = host.copyWith(latencyMs: rtt, isOnline: true);
+            _sshBastionChain = activeChain;
             _sshClient = client;
             _sshPtySession = ptySession;
             _sftpClient = sftp;
@@ -1744,6 +2442,27 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           return;
         }
 
+        // For non-SSH protocols (RDP / VNC / Hypervisor) routed over SSH Jump Host:
+        // Bind a Zero-Trust loopback (`127.0.0.1`) port forward through the Bastion chain!
+        String effectiveTargetHost = host.address;
+        int effectiveTargetPort = host.port;
+        String activeRouteLabel = '';
+        if (pendingBastionChain != null) {
+          activeRouteLabel = pendingBastionChain.routeSummary;
+          modalSetState?.call(() {
+            stageText =
+                'Binding encrypted local SSH tunnel ($activeRouteLabel → ${host.address}:${host.port})...';
+          });
+          pendingLocalTunnel = await pendingBastionChain.startLocalPortForward(
+            remoteHost: host.address,
+            remotePort: host.port,
+            label: '${host.protocol.name.toUpperCase()} → ${host.name}',
+            ownChainLifecycle: true,
+          );
+          effectiveTargetHost = '127.0.0.1';
+          effectiveTargetPort = pendingLocalTunnel.localPort;
+        }
+
         // =====================================================================
         // 2. RDP ENGINE — NATIVE FREERDP 3.32.2 (`libjaladesk_freerdp.so`)
         // =====================================================================
@@ -1751,15 +2470,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           final (resolvedDomain, resolvedUser) = host.resolvedDomainAndUser;
           modalSetState?.call(() {
             stageText =
-                '1/3 Starting FreeRDP 3.32.2 Engine (${resolvedDomain.isNotEmpty ? "$resolvedDomain\\$resolvedUser" : resolvedUser}@${host.address}:${host.port})...';
+                'Starting FreeRDP 3.32.2 Engine (${resolvedDomain.isNotEmpty ? "$resolvedDomain\\$resolvedUser" : resolvedUser}@${host.address}:${host.port}${activeRouteLabel.isNotEmpty ? " • $activeRouteLabel" : ""})...';
           });
 
           if (RdpFfiClient.isNativeAvailable) {
             _closeDesktopSession();
             final (initW, initH) = _resolveTargetDesktopDimensions();
             final rdpClient = RdpFfiClient(
-              host: host.address,
-              port: host.port,
+              host: effectiveTargetHost,
+              port: effectiveTargetPort,
               domain: resolvedDomain,
               username: resolvedUser,
               password: host.password,
@@ -1772,13 +2491,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   _desktopServerWidth = w;
                   _desktopServerHeight = h;
                   _desktopLiveConnected = true;
-                  _desktopProtocolBanner = status;
+                  _desktopProtocolBanner =
+                      activeRouteLabel.isNotEmpty ? '$status • $activeRouteLabel' : status;
                 });
               },
               onStatus: (String status, {bool isError = false}) {
                 if (!mounted) return;
                 setState(() {
-                  _desktopProtocolBanner = status;
+                  _desktopProtocolBanner =
+                      activeRouteLabel.isNotEmpty ? '$status • $activeRouteLabel' : status;
                   _lastRdpAction = status;
                   if (isError) _desktopLiveConnected = false;
                 });
@@ -1789,8 +2510,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
             final rtt = sw.elapsedMilliseconds.clamp(1, 9999);
             if (!mounted) {
               await rdpClient.dispose();
+              await pendingLocalTunnel?.close();
               return;
             }
+
+            final boundTunnel = pendingLocalTunnel;
+            pendingLocalTunnel = null;
+            pendingBastionChain = null;
 
             setState(() {
               final idx = _hosts.indexWhere((h) => h.id == host.id);
@@ -1798,12 +2524,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 _hosts[idx] = _hosts[idx].copyWith(latencyMs: rtt, isOnline: true);
               }
               _activeRdpHost = host.copyWith(latencyMs: rtt, isOnline: true);
+              _desktopBastionTunnel = boundTunnel;
               _rdpFfiClient = rdpClient;
               _desktopLiveConnected = true;
               _desktopServerWidth = rdpClient.width;
               _desktopServerHeight = rdpClient.height;
-              _desktopProtocolBanner = rdpClient.statusText;
-              _lastRdpAction = 'Live FreeRDP 3.x Desktop (${rdpClient.width}x${rdpClient.height})';
+              _desktopProtocolBanner = activeRouteLabel.isNotEmpty
+                  ? '${rdpClient.statusText} • $activeRouteLabel'
+                  : rdpClient.statusText;
+              _lastRdpAction =
+                  'Live FreeRDP 3.x Desktop (${rdpClient.width}x${rdpClient.height}${activeRouteLabel.isNotEmpty ? " • $activeRouteLabel" : ""})';
               _tabIndex = 1;
             });
             _saveVaultToDisk();
@@ -1821,12 +2551,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           final (_, vncUser) = host.resolvedDomainAndUser;
           modalSetState?.call(() {
             stageText =
-                '1/3 Negotiating VNC / Apple Screen Sharing session with ${host.address}:${host.port}...';
+                'Negotiating VNC / Apple Screen Sharing session with ${host.address}:${host.port}${activeRouteLabel.isNotEmpty ? " ($activeRouteLabel)" : ""}...';
           });
           _closeDesktopSession();
           final vncClient = VncRfbClient(
-            host: host.address,
-            port: host.port,
+            host: effectiveTargetHost,
+            port: effectiveTargetPort,
             username: vncUser,
             password: host.password,
             onFrame: (ui.Image img, int w, int h, String status) {
@@ -1836,13 +2566,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 _desktopServerWidth = w;
                 _desktopServerHeight = h;
                 _desktopLiveConnected = true;
-                _desktopProtocolBanner = status;
+                _desktopProtocolBanner =
+                    activeRouteLabel.isNotEmpty ? '$status • $activeRouteLabel' : status;
               });
             },
             onStatus: (String status, {bool isError = false}) {
               if (!mounted) return;
               setState(() {
-                _desktopProtocolBanner = status;
+                _desktopProtocolBanner =
+                    activeRouteLabel.isNotEmpty ? '$status • $activeRouteLabel' : status;
                 _lastRdpAction = status;
                 if (isError) _desktopLiveConnected = false;
               });
@@ -1853,8 +2585,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           final rtt = sw.elapsedMilliseconds.clamp(1, 9999);
           if (!mounted) {
             await vncClient.dispose();
+            await pendingLocalTunnel?.close();
             return;
           }
+
+          final boundTunnel = pendingLocalTunnel;
+          pendingLocalTunnel = null;
+          pendingBastionChain = null;
 
           setState(() {
             final idx = _hosts.indexWhere((h) => h.id == host.id);
@@ -1862,13 +2599,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               _hosts[idx] = _hosts[idx].copyWith(latencyMs: rtt, isOnline: true);
             }
             _activeRdpHost = host.copyWith(latencyMs: rtt, isOnline: true);
+            _desktopBastionTunnel = boundTunnel;
             _vncRfbClient = vncClient;
             _desktopLiveConnected = true;
             _desktopServerWidth = vncClient.width;
             _desktopServerHeight = vncClient.height;
             _desktopProtocolBanner =
-                '${vncClient.negotiatedAuthLabel} • ${vncClient.desktopName} (${vncClient.width}x${vncClient.height})';
-            _lastRdpAction = 'Live VNC Framebuffer (${vncClient.width}x${vncClient.height})';
+                '${vncClient.negotiatedAuthLabel} • ${vncClient.desktopName} (${vncClient.width}x${vncClient.height})${activeRouteLabel.isNotEmpty ? " • $activeRouteLabel" : ""}';
+            _lastRdpAction =
+                'Live VNC Framebuffer (${vncClient.width}x${vncClient.height}${activeRouteLabel.isNotEmpty ? " • $activeRouteLabel" : ""})';
             _tabIndex = 1;
           });
           _saveVaultToDisk();
@@ -1882,21 +2621,27 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         // 4. HYPERVISOR / PROXMOX VE HTTPS API INSPECTOR
         // =====================================================================
         modalSetState?.call(() {
-          stageText = '1/2 Connecting to Hypervisor HTTPS endpoint ${host.address}:${host.port}...';
+          stageText =
+              'Connecting to Hypervisor HTTPS endpoint ${host.address}:${host.port}${activeRouteLabel.isNotEmpty ? " ($activeRouteLabel)" : ""}...';
         });
         final httpClient = HttpClient()..badCertificateCallback = (_, __, ___) => true;
         httpClient.connectionTimeout = const Duration(seconds: 6);
-        final uri = Uri.parse('https://${host.address}:${host.port}/api2/json/version');
+        final uri = Uri.parse('https://$effectiveTargetHost:$effectiveTargetPort/api2/json/version');
         final req = await httpClient.getUrl(uri);
+        req.headers.set(HttpHeaders.hostHeader, '${host.address}:${host.port}');
         final resp = await req.close().timeout(const Duration(seconds: 6));
         final rtt = sw.elapsedMilliseconds.clamp(1, 9999);
         final body = await resp.transform(utf8.decoder).join();
         httpClient.close();
+        await pendingLocalTunnel?.close();
+        pendingLocalTunnel = null;
+        pendingBastionChain = null;
 
         if (!mounted) return;
         _terminalBuffer.clear();
         _terminalBuffer.write(
-          '\x1b[1;32m✓ Hypervisor HTTPS Connected\x1b[0m to https://${host.address}:${host.port} ($rtt ms)\r\n'
+          '\x1b[1;32m✓ Hypervisor HTTPS Connected\x1b[0m to https://${host.address}:${host.port}'
+          '${activeRouteLabel.isNotEmpty ? " [$activeRouteLabel]" : ""} ($rtt ms)\r\n'
           'HTTP Status: ${resp.statusCode} ${resp.reasonPhrase}\r\n'
           '${body.isNotEmpty ? "Response: $body" : "TLS Endpoint Verified."}\r\n'
           '$_offlinePrompt',
@@ -1916,6 +2661,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         }
       } catch (err) {
         sw.stop();
+        await pendingLocalTunnel?.close();
+        await pendingBastionChain?.dispose();
         if (!mounted) return;
         modalSetState?.call(() {
           connecting = false;
@@ -1963,7 +2710,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${host.protocol.name.toUpperCase()} • ${host.formattedEndpoint}',
+                  '${host.protocol.name.toUpperCase()} • ${host.formattedEndpoint}$routeSuffix',
                   style: const TextStyle(
                     fontSize: 12,
                     fontFamily: 'monospace',
@@ -2058,6 +2805,685 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       ),
     );
     dialogOpen = false;
+  }
+
+  String _formatByteCount(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
+  }
+
+  void _toggleHostFavorite(RemoteHostItem host) {
+    setState(() {
+      final idx = _hosts.indexWhere((h) => h.id == host.id);
+      if (idx >= 0) {
+        _hosts[idx] = _hosts[idx].copyWith(isFavorite: !host.isFavorite);
+      }
+    });
+    _saveVaultToDisk();
+  }
+
+  /// Desktop-Parity Ad-Hoc Quick Connect (`ssh://user@host:2222`, `rdp://domain\user@host`, or `host:port`)
+  /// Supports optional Jump Host routing and optional 1-click Save to Vault.
+  Future<void> _showQuickConnectDialog() async {
+    final targetCtrl = TextEditingController();
+    final userCtrl = TextEditingController(text: 'root');
+    final passCtrl = TextEditingController();
+    RemoteProtocol selectedProto = RemoteProtocol.ssh;
+    String? selectedJumpHostId;
+    bool saveToVault = false;
+    bool obscurePass = true;
+
+    void parseQuickTarget(String raw, StateSetter setModalState) {
+      final trimmed = raw.trim();
+      if (trimmed.startsWith('ssh://')) {
+        setModalState(() => selectedProto = RemoteProtocol.ssh);
+      } else if (trimmed.startsWith('sftp://')) {
+        setModalState(() => selectedProto = RemoteProtocol.sftp);
+      } else if (trimmed.startsWith('rdp://')) {
+        setModalState(() => selectedProto = RemoteProtocol.rdp);
+      } else if (trimmed.startsWith('vnc://')) {
+        setModalState(() => selectedProto = RemoteProtocol.vnc);
+      }
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          final jumpCandidates = _hosts.where((h) => h.protocol == RemoteProtocol.ssh).toList();
+          if (selectedJumpHostId != null && !jumpCandidates.any((j) => j.id == selectedJumpHostId)) {
+            selectedJumpHostId = null;
+          }
+          return AlertDialog(
+            backgroundColor: JalaPalette.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: const BorderSide(color: JalaPalette.lineInput),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.bolt_rounded, size: 20, color: JalaPalette.brandGold),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Quick Connect',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 410,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final p in RemoteProtocol.values)
+                          ChoiceChip(
+                            label: Text(p.name.toUpperCase(), style: const TextStyle(fontSize: 11)),
+                            selected: selectedProto == p,
+                            selectedColor: JalaPalette.selected,
+                            backgroundColor: JalaPalette.header,
+                            labelStyle: TextStyle(
+                              color: selectedProto == p ? JalaPalette.brandGold : JalaPalette.text2,
+                              fontWeight: FontWeight.w700,
+                            ),
+                            onSelected: (_) => setModalState(() => selectedProto = p),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      key: const Key('field_quick_connect_target'),
+                      controller: targetCtrl,
+                      onChanged: (v) => parseQuickTarget(v, setModalState),
+                      style: const TextStyle(fontSize: 12.5, fontFamily: 'monospace', color: JalaPalette.text),
+                      decoration: InputDecoration(
+                        labelText: 'Host, IP:Port, or URI *',
+                        hintText: 'e.g. ssh://ubuntu@192.168.1.20:22 or 10.0.0.50:3389',
+                        hintStyle: const TextStyle(fontSize: 11, color: JalaPalette.muted),
+                        labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                        prefixIcon: const Icon(Icons.lan_outlined, size: 17, color: JalaPalette.brandGold),
+                        isDense: true,
+                        filled: true,
+                        fillColor: JalaPalette.header,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(color: JalaPalette.lineInput),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildModalField(
+                            controller: userCtrl,
+                            label: selectedProto == RemoteProtocol.rdp ? 'Domain\\Username' : 'Username',
+                            hint: 'root / CORP\\admin',
+                            icon: Icons.person_outline_rounded,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextField(
+                            controller: passCtrl,
+                            obscureText: obscurePass,
+                            style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                            decoration: InputDecoration(
+                              labelText: 'Password',
+                              labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.text2),
+                              suffixIcon: IconButton(
+                                icon: Icon(
+                                  obscurePass ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                                  size: 16,
+                                  color: JalaPalette.muted,
+                                ),
+                                onPressed: () => setModalState(() => obscurePass = !obscurePass),
+                              ),
+                              isDense: true,
+                              filled: true,
+                              fillColor: JalaPalette.header,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(8),
+                                borderSide: const BorderSide(color: JalaPalette.lineInput),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (jumpCandidates.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<String?>(
+                        initialValue: selectedJumpHostId,
+                        isExpanded: true,
+                        dropdownColor: JalaPalette.surface,
+                        style: const TextStyle(fontSize: 12, color: JalaPalette.text),
+                        decoration: InputDecoration(
+                          labelText: 'Route via SSH Jump Host (optional)',
+                          labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                          prefixIcon: const Icon(Icons.alt_route_rounded, size: 17, color: JalaPalette.brandGold),
+                          isDense: true,
+                          filled: true,
+                          fillColor: JalaPalette.header,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(color: JalaPalette.lineInput),
+                          ),
+                        ),
+                        items: [
+                          const DropdownMenuItem<String?>(
+                            value: null,
+                            child: Text('Direct Connection (No Bastion)', overflow: TextOverflow.ellipsis),
+                          ),
+                          for (final j in jumpCandidates)
+                            DropdownMenuItem<String?>(
+                              value: j.id,
+                              child: Text('${j.name} (${j.address}:${j.port})', overflow: TextOverflow.ellipsis),
+                            ),
+                        ],
+                        onChanged: (v) => setModalState(() => selectedJumpHostId = v),
+                      ),
+                    ],
+                    const SizedBox(height: 6),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      activeColor: JalaPalette.brandGold,
+                      checkColor: JalaPalette.header,
+                      value: saveToVault,
+                      onChanged: (v) => setModalState(() => saveToVault = v ?? false),
+                      title: const Text(
+                        'Save connection to Vault for future sessions',
+                        style: TextStyle(fontSize: 12, color: JalaPalette.text2),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Cancel', style: TextStyle(color: JalaPalette.muted)),
+              ),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: JalaPalette.accent,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () {
+                  String raw = targetCtrl.text.trim();
+                  if (raw.isEmpty) return;
+                  for (final prefix in ['ssh://', 'sftp://', 'rdp://', 'vnc://', 'https://']) {
+                    if (raw.startsWith(prefix)) {
+                      raw = raw.substring(prefix.length);
+                      break;
+                    }
+                  }
+                  String parsedUser = userCtrl.text.trim();
+                  if (raw.contains('@')) {
+                    final atIdx = raw.lastIndexOf('@');
+                    parsedUser = raw.substring(0, atIdx);
+                    raw = raw.substring(atIdx + 1);
+                  }
+                  String hostPart = raw;
+                  int portPart = defaultPortForProtocol(selectedProto);
+                  if (raw.contains(':')) {
+                    final colonIdx = raw.lastIndexOf(':');
+                    final maybePort = int.tryParse(raw.substring(colonIdx + 1));
+                    if (maybePort != null && maybePort > 0 && maybePort <= 65535) {
+                      hostPart = raw.substring(0, colonIdx);
+                      portPart = maybePort;
+                    }
+                  }
+                  String domainPart = '';
+                  if (parsedUser.contains('\\')) {
+                    final parts = parsedUser.split('\\');
+                    domainPart = parts.first;
+                    parsedUser = parts.sublist(1).join('\\');
+                  }
+
+                  final adHoc = RemoteHostItem(
+                    id: 'quick-${DateTime.now().microsecondsSinceEpoch}',
+                    name: hostPart,
+                    folder: 'Quick Connect',
+                    protocol: selectedProto,
+                    address: hostPart,
+                    port: portPart,
+                    domain: domainPart,
+                    username: parsedUser,
+                    password: passCtrl.text,
+                    osLabel: '${selectedProto.name.toUpperCase()} • Ad-Hoc Session',
+                    accentTint: selectedProto == RemoteProtocol.rdp ? 'gold' : 'sapphire',
+                    jumpHostId: selectedJumpHostId,
+                  );
+
+                  if (saveToVault) {
+                    setState(() => _hosts.add(adHoc));
+                    _saveVaultToDisk();
+                  }
+                  Navigator.of(ctx).pop();
+                  _connectToHost(adHoc);
+                },
+                icon: const Icon(Icons.play_arrow_rounded, size: 17),
+                label: const Text('Connect'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// Standalone SSH Local Port Forwarding Studio (`ssh -L 127.0.0.1:<localPort>:<remoteHost>:<remotePort>`)
+  /// Works over single-hop or multi-hop SSH Bastion chains!
+  Future<void> _showPortForwardStudioSheet({RemoteHostItem? initialSshHost}) async {
+    final sshHosts = _hosts.where((h) => h.protocol == RemoteProtocol.ssh).toList();
+    String? selectedBastionId = initialSshHost?.id ?? (sshHosts.isNotEmpty ? sshHosts.first.id : null);
+    final remoteHostCtrl = TextEditingController(text: '127.0.0.1');
+    final remotePortCtrl = TextEditingController(text: '5432');
+    final localPortCtrl = TextEditingController(text: '0');
+    final labelCtrl = TextEditingController();
+    bool startingTunnel = false;
+    String? tunnelError;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: JalaPalette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          final currentSshHosts = _hosts.where((h) => h.protocol == RemoteProtocol.ssh).toList();
+          if (selectedBastionId != null && !currentSshHosts.any((h) => h.id == selectedBastionId)) {
+            selectedBastionId = currentSshHosts.isNotEmpty ? currentSshHosts.first.id : null;
+          }
+
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 14,
+                bottom: MediaQuery.viewInsetsOf(ctx).bottom + 16,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.swap_calls_rounded, size: 20, color: JalaPalette.brandGold),
+                        const SizedBox(width: 9),
+                        const Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'SSH Port Forwarding Studio (ssh -L)',
+                                style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: JalaPalette.text),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              Text(
+                                'Expose private DBs, web consoles, or internal ports on 127.0.0.1',
+                                style: TextStyle(fontSize: 11, color: JalaPalette.muted),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () => Navigator.of(ctx).pop(),
+                          icon: const Icon(Icons.close_rounded, size: 18, color: JalaPalette.muted),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 18, color: JalaPalette.line),
+                    if (_activePortForwards.isNotEmpty) ...[
+                      const Text(
+                        'ACTIVE LOCAL TUNNELS',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.6,
+                          color: JalaPalette.ok,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      for (final pf in _activePortForwards)
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: JalaPalette.header,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.4)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  const Icon(Icons.circle, size: 8, color: JalaPalette.ok),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      pf.label,
+                                      style: const TextStyle(
+                                        fontSize: 12.5,
+                                        fontWeight: FontWeight.w700,
+                                        color: JalaPalette.text,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  TextButton.icon(
+                                    style: TextButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                      minimumSize: Size.zero,
+                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    onPressed: () {
+                                      Clipboard.setData(ClipboardData(text: pf.localEndpoint));
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(content: Text('Copied ${pf.localEndpoint}')),
+                                      );
+                                    },
+                                    icon: const Icon(Icons.copy_rounded, size: 13, color: JalaPalette.brandGold),
+                                    label: const Text(
+                                      'Copy',
+                                      style: TextStyle(fontSize: 11, color: JalaPalette.brandGold),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  TextButton.icon(
+                                    style: TextButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                      minimumSize: Size.zero,
+                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    onPressed: () async {
+                                      await pf.close();
+                                      if (!mounted) return;
+                                      setState(() => _activePortForwards.removeWhere((x) => x.id == pf.id));
+                                      setSheetState(() {});
+                                    },
+                                    icon: const Icon(Icons.stop_circle_outlined, size: 14, color: JalaPalette.danger),
+                                    label: const Text(
+                                      'Stop',
+                                      style: TextStyle(fontSize: 11, color: JalaPalette.danger),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                '${pf.localEndpoint} ⇄ ${pf.remoteEndpoint} (${pf.bastionSummary})',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                  color: JalaPalette.brandGold,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                'Conns: ${pf.totalConnections} (${pf.activeStreams} live) • TX ${_formatByteCount(pf.bytesSent)} • RX ${_formatByteCount(pf.bytesReceived)}',
+                                style: const TextStyle(fontSize: 10.5, color: JalaPalette.muted),
+                              ),
+                            ],
+                          ),
+                        ),
+                      const SizedBox(height: 8),
+                    ],
+                    const Text(
+                      'NEW LOCAL PORT FORWARD',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.6,
+                        color: JalaPalette.brandGold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    if (currentSshHosts.isEmpty)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: JalaPalette.header,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: JalaPalette.lineInput),
+                        ),
+                        child: Column(
+                          children: [
+                            const Text(
+                              'Add an SSH Bastion / Jump Host first to open local port forwards.',
+                              style: TextStyle(fontSize: 12, color: JalaPalette.muted),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 8),
+                            OutlinedButton.icon(
+                              onPressed: () async {
+                                final created = await _showHostEditorDialog(
+                                  presetProtocol: RemoteProtocol.ssh,
+                                  presetFolder: 'Jump Hosts / Bastions',
+                                  customDialogTitle: 'New SSH Jump Host',
+                                );
+                                if (created != null) {
+                                  setSheetState(() => selectedBastionId = created.id);
+                                }
+                              },
+                              icon: const Icon(Icons.add_rounded, size: 16, color: JalaPalette.brandGold),
+                              label: const Text(
+                                '+ Add SSH Jump Host',
+                                style: TextStyle(fontSize: 12, color: JalaPalette.brandGold),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else ...[
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedBastionId,
+                        isExpanded: true,
+                        dropdownColor: JalaPalette.surface,
+                        style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                        decoration: InputDecoration(
+                          labelText: 'Tunnel via SSH Host / Bastion *',
+                          labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                          prefixIcon: const Icon(Icons.alt_route_rounded, size: 17, color: JalaPalette.brandGold),
+                          isDense: true,
+                          filled: true,
+                          fillColor: JalaPalette.header,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(color: JalaPalette.lineInput),
+                          ),
+                        ),
+                        items: [
+                          for (final h in currentSshHosts)
+                            DropdownMenuItem<String>(
+                              value: h.id,
+                              child: Text(
+                                '${h.name} (${h.address}:${h.port})',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: (v) => setSheetState(() => selectedBastionId = v),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            flex: 2,
+                            child: _buildModalField(
+                              controller: remoteHostCtrl,
+                              label: 'Remote Target Host *',
+                              hint: '127.0.0.1 or 10.0.0.25',
+                              icon: Icons.dns_outlined,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _buildModalField(
+                              controller: remotePortCtrl,
+                              label: 'Remote Port *',
+                              hint: '5432',
+                              icon: Icons.numbers_rounded,
+                              keyboardType: TextInputType.number,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildModalField(
+                              controller: localPortCtrl,
+                              label: 'Local Port (0=Auto)',
+                              hint: '0',
+                              icon: Icons.hearing_rounded,
+                              keyboardType: TextInputType.number,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            flex: 2,
+                            child: _buildModalField(
+                              controller: labelCtrl,
+                              label: 'Label (optional)',
+                              hint: 'e.g. Prod Postgres Tunnel',
+                              icon: Icons.label_outline_rounded,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (tunnelError != null) ...[
+                        const SizedBox(height: 10),
+                        Text(
+                          tunnelError!,
+                          style: const TextStyle(fontSize: 11.5, color: JalaPalette.danger, fontFamily: 'monospace'),
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          key: const Key('btn_start_local_tunnel'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: JalaPalette.accent,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 11),
+                          ),
+                          onPressed: startingTunnel || selectedBastionId == null
+                              ? null
+                              : () async {
+                                  final sshHost = currentSshHosts.firstWhere((h) => h.id == selectedBastionId);
+                                  final rHost = remoteHostCtrl.text.trim();
+                                  final rPort = int.tryParse(remotePortCtrl.text.trim()) ?? 0;
+                                  final lPort = int.tryParse(localPortCtrl.text.trim()) ?? 0;
+                                  if (rHost.isEmpty || rPort <= 0 || rPort > 65535) {
+                                    setSheetState(() => tunnelError = 'Enter a valid remote target host and port (1-65535).');
+                                    return;
+                                  }
+                                  setSheetState(() {
+                                    startingTunnel = true;
+                                    tunnelError = null;
+                                  });
+
+                                  SshBastionChain? chain;
+                                  try {
+                                    // Support multi-hop even for standalone `ssh -L`: resolve upstream hops + selected SSH host!
+                                    final upstreamSpecs = await _prepareBastionHops(sshHost);
+                                    if (upstreamSpecs == null) {
+                                      setSheetState(() => startingTunnel = false);
+                                      return;
+                                    }
+                                    RemoteHostItem effectiveExit = _resolveEffectiveHost(sshHost);
+                                    if (effectiveExit.password.isEmpty && effectiveExit.privateKeyPem.trim().isEmpty) {
+                                      final prompted = await _promptCredentialsIfNeeded(
+                                        effectiveExit,
+                                        forcePrompt: true,
+                                        customTitle: 'SSH Tunnel Auth: ${sshHost.name}',
+                                      );
+                                      if (prompted == null) {
+                                        setSheetState(() => startingTunnel = false);
+                                        return;
+                                      }
+                                      effectiveExit = prompted;
+                                    }
+                                    final (_, exitUser) = effectiveExit.resolvedDomainAndUser;
+                                    final allHops = <BastionHopSpec>[
+                                      ...upstreamSpecs,
+                                      BastionHopSpec(
+                                        id: effectiveExit.id,
+                                        name: effectiveExit.name,
+                                        address: effectiveExit.address,
+                                        port: effectiveExit.port,
+                                        username: exitUser.isEmpty ? 'root' : exitUser,
+                                        password: effectiveExit.password,
+                                        privateKeyPem: effectiveExit.privateKeyPem,
+                                      ),
+                                    ];
+
+                                    chain = await SshBastionChain.connect(allHops);
+                                    final tunnel = await chain.startLocalPortForward(
+                                      remoteHost: rHost,
+                                      remotePort: rPort,
+                                      localBindPort: lPort.clamp(0, 65535),
+                                      label: labelCtrl.text.trim().isEmpty
+                                          ? '${sshHost.name} → $rHost:$rPort'
+                                          : labelCtrl.text.trim(),
+                                      ownChainLifecycle: true,
+                                      onStatsUpdated: () {
+                                        if (mounted) setState(() {});
+                                      },
+                                    );
+                                    if (!mounted) {
+                                      await tunnel.close();
+                                      return;
+                                    }
+                                    setState(() => _activePortForwards.add(tunnel));
+                                    setSheetState(() => startingTunnel = false);
+                                  } catch (err) {
+                                    await chain?.dispose();
+                                    setSheetState(() {
+                                      startingTunnel = false;
+                                      tunnelError = err.toString().replaceFirst('Exception: ', '');
+                                    });
+                                  }
+                                },
+                          icon: Icon(startingTunnel ? Icons.sync_rounded : Icons.play_arrow_rounded, size: 17),
+                          label: Text(
+                            startingTunnel ? 'Opening Encrypted SSH Tunnel...' : 'Start Local Port Forward (127.0.0.1)',
+                            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   String _joinSftpChildPath(String basePath, String childName) {
@@ -3609,6 +5035,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                       final h = _hosts[i];
                       final isSelected = (_tabIndex == 1 && _activeRdpHost?.id == h.id) ||
                           (_tabIndex == 2 && _activeSshHost?.id == h.id);
+                      final routeBadge = _routeBadgeForHost(h);
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 6),
                         child: InkWell(
@@ -3625,7 +5052,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                             ),
                             child: Row(
                               children: [
-                                Icon(_iconForProtocol(h.protocol), size: 16, color: JalaPalette.brandGold),
+                                Icon(
+                                  _iconForProtocol(h.protocol),
+                                  size: 16,
+                                  color: JalaPalette.colorForMark(h.accentTint),
+                                ),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Column(
@@ -3642,7 +5073,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                                         overflow: TextOverflow.ellipsis,
                                       ),
                                       Text(
-                                        '${h.protocol.name.toUpperCase()} • ${h.address}:${h.port}',
+                                        '${h.protocol.name.toUpperCase()} • ${h.address}:${h.port}${routeBadge.isNotEmpty ? " • $routeBadge" : ""}',
                                         style: const TextStyle(fontSize: 10, color: JalaPalette.muted),
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
@@ -3679,11 +5110,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       }
       if (_searchQuery.isNotEmpty) {
         final q = _searchQuery.toLowerCase();
+        final routeText = _routeBadgeForHost(h).toLowerCase();
+        final credLabel = (_findCredential(h.credentialId)?.label ?? '').toLowerCase();
         return h.name.toLowerCase().contains(q) ||
             h.address.toLowerCase().contains(q) ||
             h.username.toLowerCase().contains(q) ||
             h.domain.toLowerCase().contains(q) ||
-            h.folder.toLowerCase().contains(q);
+            h.folder.toLowerCase().contains(q) ||
+            routeText.contains(q) ||
+            credLabel.contains(q);
       }
       return true;
     }).toList();
@@ -3694,9 +5129,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
         ? '—'
         : '${(latencies.reduce((a, b) => a + b) / latencies.length).toStringAsFixed(0)} ms';
 
-    // Group filtered hosts by folder (preserving insertion order)
+    final pinnedFavorites = filtered.where((h) => h.isFavorite).toList();
+    final regularHosts = filtered.where((h) => !h.isFavorite).toList();
+
+    // Group non-pinned filtered hosts by folder (preserving insertion order)
     final Map<String, List<RemoteHostItem>> groupedByFolder = {};
-    for (final h in filtered) {
+    for (final h in regularHosts) {
       final folderName = h.folder.trim().isEmpty ? 'Default' : h.folder.trim();
       groupedByFolder.putIfAbsent(folderName, () => <RemoteHostItem>[]).add(h);
     }
@@ -3705,6 +5143,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       if (proto == 'ALL') return _hosts.length;
       return _hosts.where((h) => h.protocol.name.toUpperCase() == proto).length;
     }
+
+    final bool hasLiveActivity =
+        _desktopLiveConnected || _sshLiveConnected || _activePortForwards.isNotEmpty;
 
     return LayoutBuilder(
       builder: (ctx, constraints) {
@@ -3795,7 +5236,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
               ),
             ),
             const SizedBox(height: 10),
-            // Search + Live Latency Probe Row
+            // Search + Quick Connect + SSH Port Forwards + Live Latency Probe Row
             Row(
               children: [
                 Expanded(
@@ -3803,14 +5244,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                     onChanged: (v) => setState(() => _searchQuery = v),
                     style: const TextStyle(fontSize: 13, color: JalaPalette.text),
                     decoration: InputDecoration(
-                      hintText: 'Search hosts, users, IPs, folders...',
+                      hintText: 'Search hosts, users, Jump Hosts...',
                       hintStyle: const TextStyle(fontSize: 12, color: JalaPalette.muted),
                       prefixIcon: const Icon(Icons.search_rounded, size: 18, color: JalaPalette.brandGold),
-                      prefixIconConstraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+                      prefixIconConstraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                       filled: true,
                       fillColor: JalaPalette.aside,
                       isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+                      contentPadding: const EdgeInsets.symmetric(vertical: 9, horizontal: 10),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(9),
                         borderSide: const BorderSide(color: JalaPalette.lineInput, width: 1),
@@ -3822,11 +5263,55 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                     ),
                   ),
                 ),
+                const SizedBox(width: 6),
+                SizedBox(
+                  height: 36,
+                  width: 36,
+                  child: IconButton(
+                    key: const Key('btn_quick_connect'),
+                    padding: EdgeInsets.zero,
+                    tooltip: 'Quick Connect (Ad-Hoc SSH/RDP/VNC)',
+                    onPressed: _showQuickConnectDialog,
+                    style: IconButton.styleFrom(
+                      backgroundColor: JalaPalette.surface,
+                      side: const BorderSide(color: JalaPalette.lineInput),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                    ),
+                    icon: const Icon(Icons.bolt_rounded, size: 17, color: JalaPalette.brandGold),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                SizedBox(
+                  height: 36,
+                  width: 36,
+                  child: IconButton(
+                    key: const Key('btn_open_port_forwards'),
+                    padding: EdgeInsets.zero,
+                    tooltip: 'SSH Port Forwarding Studio (ssh -L)',
+                    onPressed: () => _showPortForwardStudioSheet(),
+                    style: IconButton.styleFrom(
+                      backgroundColor: _activePortForwards.isNotEmpty
+                          ? JalaPalette.ok.withValues(alpha: 0.14)
+                          : JalaPalette.surface,
+                      side: BorderSide(
+                        color: _activePortForwards.isNotEmpty
+                            ? JalaPalette.ok.withValues(alpha: 0.55)
+                            : JalaPalette.lineInput,
+                      ),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                    ),
+                    icon: Icon(
+                      Icons.swap_calls_rounded,
+                      size: 17,
+                      color: _activePortForwards.isNotEmpty ? JalaPalette.ok : JalaPalette.accentLine,
+                    ),
+                  ),
+                ),
                 if (_hosts.isNotEmpty) ...[
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
                   SizedBox(
-                    height: 38,
-                    width: 38,
+                    height: 36,
+                    width: 36,
                     child: IconButton(
                       padding: EdgeInsets.zero,
                       tooltip: 'Probe Live TCP Latency',
@@ -3838,7 +5323,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                       ),
                       icon: Icon(
                         Icons.network_ping_rounded,
-                        size: 17,
+                        size: 16,
                         color: _probingAll ? JalaPalette.muted : JalaPalette.brandGold,
                       ),
                     ),
@@ -3915,6 +5400,43 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 ],
               ),
             ),
+            // Live Active Sessions & Tunnels Strip (Desktop `#tabs` parity)
+            if (hasLiveActivity) ...[
+              const SizedBox(height: 9),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    if (_desktopLiveConnected && _activeRdpHost != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: _buildActiveSessionPill(
+                          icon: _iconForProtocol(_activeRdpHost!.protocol),
+                          label: '${_activeRdpHost!.protocol.name.toUpperCase()}: ${_activeRdpHost!.name}',
+                          onTap: () => setState(() => _tabIndex = 1),
+                          onDisconnect: () => setState(_closeDesktopSession),
+                        ),
+                      ),
+                    if (_sshLiveConnected && _activeSshHost != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: _buildActiveSessionPill(
+                          icon: Icons.terminal_rounded,
+                          label: 'SSH: ${_activeSshHost!.name}',
+                          onTap: () => setState(() => _tabIndex = 2),
+                          onDisconnect: () => setState(_closeSshClient),
+                        ),
+                      ),
+                    if (_activePortForwards.isNotEmpty)
+                      _buildActiveSessionPill(
+                        icon: Icons.swap_calls_rounded,
+                        label: '${_activePortForwards.length} Active Tunnel${_activePortForwards.length == 1 ? "" : "s"}',
+                        onTap: () => _showPortForwardStudioSheet(),
+                      ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             if (_hosts.isEmpty && _vaultLoaded)
               _buildEmptyConnectionsCard()
@@ -3934,6 +5456,33 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 ),
               )
             else ...[
+              if (pinnedFavorites.isNotEmpty) ...[
+                _buildFolderGroupHeader(
+                  'Pinned Favorites',
+                  pinnedFavorites.length,
+                  iconOverride: Icons.star_rounded,
+                ),
+                if (!_collapsedFolders.contains('Pinned Favorites')) ...[
+                  if (columns == 1)
+                    for (final host in pinnedFavorites) _buildHostCard(host)
+                  else
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Wrap(
+                        spacing: spacing,
+                        runSpacing: 0,
+                        children: [
+                          for (final host in pinnedFavorites)
+                            SizedBox(
+                              width: cardW,
+                              child: _buildHostCard(host),
+                            ),
+                        ],
+                      ),
+                    ),
+                ],
+                const SizedBox(height: 4),
+              ],
               for (final folderEntry in groupedByFolder.entries) ...[
                 _buildFolderGroupHeader(folderEntry.key, folderEntry.value.length),
                 if (!_collapsedFolders.contains(folderEntry.key)) ...[
@@ -3964,13 +5513,32 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 spacing: 8,
                 runSpacing: 2,
                 children: [
-                  TextButton.icon(
-                    onPressed: () => _showHostEditorDialog(),
-                    icon: const Icon(Icons.add_circle_outline_rounded, size: 16, color: JalaPalette.brandGold),
-                    label: const Text(
-                      'Add New Connection',
-                      style: TextStyle(fontSize: 12, color: JalaPalette.brandGold, fontWeight: FontWeight.w600),
-                    ),
+                  Wrap(
+                    spacing: 4,
+                    runSpacing: 2,
+                    children: [
+                      TextButton.icon(
+                        onPressed: () => _showHostEditorDialog(),
+                        icon: const Icon(Icons.add_circle_outline_rounded, size: 16, color: JalaPalette.brandGold),
+                        label: const Text(
+                          'Add New Connection',
+                          style: TextStyle(fontSize: 12, color: JalaPalette.brandGold, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      TextButton.icon(
+                        key: const Key('btn_add_jump_host_shortcut'),
+                        onPressed: () => _showHostEditorDialog(
+                          presetProtocol: RemoteProtocol.ssh,
+                          presetFolder: 'Jump Hosts / Bastions',
+                          customDialogTitle: 'New SSH Jump Host',
+                        ),
+                        icon: const Icon(Icons.alt_route_rounded, size: 15, color: JalaPalette.accentLine),
+                        label: const Text(
+                          'Add Jump Host',
+                          style: TextStyle(fontSize: 11.5, color: JalaPalette.accentLine, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ],
                   ),
                   TextButton.icon(
                     onPressed: () {
@@ -3996,7 +5564,51 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
     );
   }
 
-  Widget _buildFolderGroupHeader(String folderName, int count) {
+  Widget _buildActiveSessionPill({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    VoidCallback? onDisconnect,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(99),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: JalaPalette.ok.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(99),
+          border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.45)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 6,
+              height: 6,
+              decoration: const BoxDecoration(color: JalaPalette.ok, shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 6),
+            Icon(icon, size: 13.5, color: JalaPalette.ok),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: JalaPalette.text),
+            ),
+            if (onDisconnect != null) ...[
+              const SizedBox(width: 6),
+              InkWell(
+                onTap: onDisconnect,
+                child: const Icon(Icons.close_rounded, size: 14, color: JalaPalette.muted),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFolderGroupHeader(String folderName, int count, {IconData? iconOverride}) {
     final collapsed = _collapsedFolders.contains(folderName);
     return Padding(
       padding: const EdgeInsets.only(bottom: 6, top: 2),
@@ -4021,7 +5633,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                 color: JalaPalette.muted,
               ),
               const SizedBox(width: 4),
-              const Icon(Icons.folder_outlined, size: 13.5, color: JalaPalette.brandGold),
+              Icon(iconOverride ?? Icons.folder_outlined, size: 13.5, color: JalaPalette.brandGold),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
@@ -4163,10 +5775,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
 
   /// World-Class Single-Surface Host Row (Termius / Jump Desktop / Royal TSX Craft)
   Widget _buildHostCard(RemoteHostItem host) {
-    final isGold = host.accentTint == 'gold';
-    final badgeColor = isGold ? JalaPalette.brandGold : JalaPalette.accentLine;
+    final badgeColor = JalaPalette.colorForMark(host.accentTint);
     final shortProto = host.protocol == RemoteProtocol.hypervisor ? 'HV' : host.protocol.name.toUpperCase();
     final fullProto = host.protocol.name.toUpperCase();
+    final routeBadge = _routeBadgeForHost(host);
+    final boundCred = _findCredential(host.credentialId);
 
     final bool? online = host.isOnline;
     final Color statusColor = online == true
@@ -4231,6 +5844,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                     children: [
                       Row(
                         children: [
+                          if (host.isFavorite) ...[
+                            const Icon(Icons.star_rounded, size: 13.5, color: JalaPalette.brandGold),
+                            const SizedBox(width: 4),
+                          ],
                           Flexible(
                             child: Text(
                               host.name,
@@ -4288,6 +5905,71 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      if (routeBadge.isNotEmpty || boundCred != null) ...[
+                        const SizedBox(height: 4),
+                        Wrap(
+                          spacing: 5,
+                          runSpacing: 4,
+                          children: [
+                            if (routeBadge.isNotEmpty)
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                decoration: BoxDecoration(
+                                  color: JalaPalette.selected,
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.alt_route_rounded, size: 11, color: JalaPalette.brandGold),
+                                    const SizedBox(width: 3),
+                                    Flexible(
+                                      child: Text(
+                                        routeBadge,
+                                        style: const TextStyle(
+                                          fontSize: 9.5,
+                                          fontWeight: FontWeight.w700,
+                                          color: JalaPalette.brandGold,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            if (boundCred != null)
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                decoration: BoxDecoration(
+                                  color: JalaPalette.header,
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: JalaPalette.accentLine.withValues(alpha: 0.45)),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.vpn_key_rounded, size: 10.5, color: JalaPalette.accentLine),
+                                    const SizedBox(width: 3),
+                                    Flexible(
+                                      child: Text(
+                                        'Vault: ${boundCred.label}',
+                                        style: const TextStyle(
+                                          fontSize: 9.5,
+                                          fontWeight: FontWeight.w700,
+                                          color: JalaPalette.accentLine,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                          ],
+                        ),
+                      ],
                       if (hasCustomOsLabel) ...[
                         const SizedBox(height: 2),
                         Text(
@@ -4381,12 +6063,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
   void _showHostActionsSheet(RemoteHostItem host) {
     showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: JalaPalette.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       builder: (ctx) => SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(vertical: 10),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -4430,7 +6113,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                   _connectToHost(host);
                 },
               ),
-              if (host.protocol == RemoteProtocol.ssh)
+              if (host.protocol == RemoteProtocol.ssh) ...[
                 ListTile(
                   dense: true,
                   leading: const Icon(Icons.folder_special_outlined, color: JalaPalette.brandGold, size: 19),
@@ -4443,10 +6126,39 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
                     _connectToHost(host, initialSshSubMode: 'sftp');
                   },
                 ),
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.swap_calls_rounded, color: JalaPalette.accentLine, size: 19),
+                  title: const Text(
+                    'Start Local Port Forward (ssh -L)',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+                  ),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    _showPortForwardStudioSheet(initialSshHost: host);
+                  },
+                ),
+              ],
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  host.isFavorite ? Icons.star_rounded : Icons.star_border_rounded,
+                  color: JalaPalette.brandGold,
+                  size: 19,
+                ),
+                title: Text(
+                  host.isFavorite ? 'Remove from Pinned Favorites' : 'Pin to Favorites',
+                  style: const TextStyle(fontSize: 13, color: JalaPalette.text),
+                ),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _toggleHostFavorite(host);
+                },
+              ),
               ListTile(
                 dense: true,
                 leading: const Icon(Icons.edit_outlined, color: JalaPalette.accentLine, size: 19),
-                title: const Text('Edit Connection', style: TextStyle(fontSize: 13, color: JalaPalette.text)),
+                title: const Text('Edit Connection & Jump Host', style: TextStyle(fontSize: 13, color: JalaPalette.text)),
                 onTap: () {
                   Navigator.of(ctx).pop();
                   _showHostEditorDialog(existing: host);
@@ -5814,79 +7526,255 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
       ),
     );
 
+    final credentialsVaultCard = Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.vpn_key_outlined, size: 17, color: JalaPalette.accentLine),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'Reusable Credential Vault',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                InkWell(
+                  key: const Key('btn_add_vault_credential'),
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: () => _showVaultCredentialEditorDialog(),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+                    decoration: BoxDecoration(
+                      color: JalaPalette.header,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: JalaPalette.lineInput),
+                    ),
+                    child: const Text(
+                      '+ Add Credential',
+                      style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (_credentials.isEmpty)
+              const Text(
+                'Store shared AD Domain accounts, SSH Ed25519/RSA keys, and Bastion logins once — bind them to any host or Jump Host.',
+                style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
+              )
+            else
+              for (int i = 0; i < _credentials.length; i++) ...[
+                if (i > 0) const Divider(height: 16),
+                Builder(
+                  builder: (ctx) {
+                    final cred = _credentials[i];
+                    final boundCount = _hosts.where((h) => h.credentialId == cred.id).length;
+                    return InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: () => _showVaultCredentialEditorDialog(existing: cred),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  cred.label,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: JalaPalette.text,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '${cred.displayPrincipal} • ${cred.kindBadge} • $boundCount host${boundCount == 1 ? "" : "s"}',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: JalaPalette.muted,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            tooltip: 'Delete Credential',
+                            onPressed: () => _deleteVaultCredential(cred),
+                            icon: const Icon(Icons.delete_outline_rounded, size: 17, color: JalaPalette.muted),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
+          ],
+        ),
+      ),
+    );
+
+    final encryptedBackupCard = Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.enhanced_encryption_outlined, size: 17, color: JalaPalette.brandGold),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Encrypted Vault Snapshot (.jvault)',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Authenticated AES-256-GCM + PBKDF2-HMAC-SHA256 (100k) portable backup of hosts, Jump Host routes, credentials, 2FA seeds, and snippets.',
+              style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  key: const Key('btn_export_encrypted_vault'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: JalaPalette.brandGold,
+                    side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: _showExportEncryptedVaultDialog,
+                  icon: const Icon(Icons.upload_file_rounded, size: 15),
+                  label: const Text('Export .jvault', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                ),
+                OutlinedButton.icon(
+                  key: const Key('btn_import_encrypted_vault'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: JalaPalette.accentLine,
+                    side: BorderSide(color: JalaPalette.accentLine.withValues(alpha: 0.45)),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: _showImportEncryptedVaultDialog,
+                  icon: const Icon(Icons.download_rounded, size: 15),
+                  label: const Text('Import .jvault', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+
     return LayoutBuilder(
       builder: (ctx, constraints) {
         final isTwoColumn = constraints.maxWidth >= 720;
-        return ListView(
+        return SingleChildScrollView(
           padding: const EdgeInsets.all(14),
-          children: [
-            Container(
-              padding: const EdgeInsets.all(13),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [JalaPalette.chip, JalaPalette.surface],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(13),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [JalaPalette.chip, JalaPalette.surface],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.35)),
                 ),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.35)),
+                child: Row(
+                  children: [
+                    _buildJalaBrandLogo(size: 38, radius: 10),
+                    const SizedBox(width: 11),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Zero-Trust Hardware Enclave',
+                            style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          SizedBox(height: 2),
+                          Text(
+                            'AES-256-GCM • PBKDF2 210k • Secure Enclave Active',
+                            style: TextStyle(fontSize: 11, color: JalaPalette.brandGold),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: JalaPalette.ok.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(99),
+                        border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.45)),
+                      ),
+                      child: const Text(
+                        'SEALED',
+                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: JalaPalette.ok),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              child: Row(
-                children: [
-                  _buildJalaBrandLogo(size: 38, radius: 10),
-                  const SizedBox(width: 11),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Zero-Trust Hardware Enclave',
-                          style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        SizedBox(height: 2),
-                        Text(
-                          'AES-256-GCM • PBKDF2 210k • Secure Enclave Active',
-                          style: TextStyle(fontSize: 11, color: JalaPalette.brandGold),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: JalaPalette.ok.withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(99),
-                      border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.45)),
-                    ),
-                    child: const Text(
-                      'SEALED',
-                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: JalaPalette.ok),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            if (isTwoColumn)
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(child: totpCard),
-                  const SizedBox(width: 12),
-                  Expanded(child: securitySwitchesCard),
-                ],
-              )
-            else ...[
-              totpCard,
               const SizedBox(height: 12),
-              securitySwitchesCard,
+              if (isTwoColumn) ...[
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: credentialsVaultCard),
+                    const SizedBox(width: 12),
+                    Expanded(child: totpCard),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: encryptedBackupCard),
+                    const SizedBox(width: 12),
+                    Expanded(child: securitySwitchesCard),
+                  ],
+                ),
+              ] else ...[
+                credentialsVaultCard,
+                const SizedBox(height: 12),
+                totpCard,
+                const SizedBox(height: 12),
+                encryptedBackupCard,
+                const SizedBox(height: 12),
+                securitySwitchesCard,
+              ],
             ],
-          ],
+          ),
         );
       },
     );
@@ -5945,6 +7833,331 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> {
           ),
         ),
       ],
+    );
+  }
+
+  void _deleteVaultCredential(VaultCredentialItem cred) {
+    setState(() {
+      _credentials.removeWhere((c) => c.id == cred.id);
+      for (int i = 0; i < _hosts.length; i++) {
+        if (_hosts[i].credentialId == cred.id) {
+          _hosts[i] = _hosts[i].copyWith(clearCredential: true);
+        }
+      }
+    });
+    _saveVaultToDisk();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Removed credential "${cred.label}"')),
+    );
+  }
+
+  Future<void> _showExportEncryptedVaultDialog() async {
+    final passCtrl = TextEditingController();
+    String? sealedResult;
+    String? errorMsg;
+    bool obscure = true;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => AlertDialog(
+          backgroundColor: JalaPalette.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: JalaPalette.lineInput),
+          ),
+          title: const Row(
+            children: [
+              Icon(Icons.enhanced_encryption_rounded, size: 20, color: JalaPalette.brandGold),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Export Encrypted Vault (.jvault)',
+                  style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                ),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 400,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Choose a strong master passphrase to seal your hosts, Jump Host chains, reusable credentials, 2FA seeds, and snippets with AES-256-GCM.',
+                    style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    key: const Key('field_export_vault_passphrase'),
+                    controller: passCtrl,
+                    obscureText: obscure,
+                    style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                    decoration: InputDecoration(
+                      labelText: 'Master Backup Passphrase *',
+                      labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                      prefixIcon: const Icon(Icons.lock_outline_rounded, size: 17, color: JalaPalette.brandGold),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                          size: 17,
+                          color: JalaPalette.muted,
+                        ),
+                        onPressed: () => setModalState(() => obscure = !obscure),
+                      ),
+                      isDense: true,
+                      filled: true,
+                      fillColor: JalaPalette.header,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: const BorderSide(color: JalaPalette.lineInput),
+                      ),
+                    ),
+                  ),
+                  if (errorMsg != null) ...[
+                    const SizedBox(height: 8),
+                    Text(errorMsg!, style: const TextStyle(fontSize: 11.5, color: JalaPalette.danger)),
+                  ],
+                  if (sealedResult != null) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.all(9),
+                      decoration: BoxDecoration(
+                        color: JalaPalette.header,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.5)),
+                      ),
+                      child: SelectableText(
+                        sealedResult!,
+                        maxLines: 5,
+                        style: const TextStyle(fontSize: 10, fontFamily: 'monospace', color: JalaPalette.ok),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close', style: TextStyle(color: JalaPalette.muted)),
+            ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: JalaPalette.accent,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () {
+                final pass = passCtrl.text;
+                if (pass.length < 4) {
+                  setModalState(() => errorMsg = 'Passphrase must be at least 4 characters.');
+                  return;
+                }
+                final payload = <String, dynamic>{
+                  'hosts': _hosts.map((h) => h.toJson()).toList(),
+                  'credentials': _credentials.map((c) => c.toJson()).toList(),
+                  'totp': _totpItems.map((t) => t.toJson()).toList(),
+                  'snippets': _customSnippets.map((s) => s.toJson()).toList(),
+                };
+                final sealed = EncryptedVaultBackupCodec.sealJson(
+                  payload: payload,
+                  passphrase: pass,
+                );
+                Clipboard.setData(ClipboardData(text: sealed));
+                setModalState(() {
+                  errorMsg = null;
+                  sealedResult = sealed;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Encrypted .jvault snapshot copied to clipboard!')),
+                );
+              },
+              icon: const Icon(Icons.copy_rounded, size: 15),
+              label: Text(sealedResult == null ? 'Seal & Copy .jvault' : 'Re-Seal & Copy'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showImportEncryptedVaultDialog() async {
+    final jsonCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
+    String? errorMsg;
+    bool obscure = true;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => AlertDialog(
+          backgroundColor: JalaPalette.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: JalaPalette.lineInput),
+          ),
+          title: const Row(
+            children: [
+              Icon(Icons.lock_open_rounded, size: 20, color: JalaPalette.brandGold),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Import Encrypted Vault (.jvault)',
+                  style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                ),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 400,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    key: const Key('field_import_vault_json'),
+                    controller: jsonCtrl,
+                    maxLines: 4,
+                    style: const TextStyle(fontSize: 11, fontFamily: 'monospace', color: JalaPalette.text),
+                    decoration: InputDecoration(
+                      labelText: 'Paste Encrypted .jvault JSON *',
+                      labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.brandGold),
+                      filled: true,
+                      fillColor: JalaPalette.header,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: const BorderSide(color: JalaPalette.lineInput),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    key: const Key('field_import_vault_passphrase'),
+                    controller: passCtrl,
+                    obscureText: obscure,
+                    style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                    decoration: InputDecoration(
+                      labelText: 'Master Backup Passphrase *',
+                      labelStyle: const TextStyle(fontSize: 11.5, color: JalaPalette.text2),
+                      prefixIcon: const Icon(Icons.key_rounded, size: 17, color: JalaPalette.brandGold),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                          size: 17,
+                          color: JalaPalette.muted,
+                        ),
+                        onPressed: () => setModalState(() => obscure = !obscure),
+                      ),
+                      isDense: true,
+                      filled: true,
+                      fillColor: JalaPalette.header,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: const BorderSide(color: JalaPalette.lineInput),
+                      ),
+                    ),
+                  ),
+                  if (errorMsg != null) ...[
+                    const SizedBox(height: 8),
+                    Text(errorMsg!, style: const TextStyle(fontSize: 11.5, color: JalaPalette.danger)),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel', style: TextStyle(color: JalaPalette.muted)),
+            ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: JalaPalette.accent,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () {
+                try {
+                  final map = EncryptedVaultBackupCodec.openJson(
+                    rawEnvelopeJson: jsonCtrl.text.trim(),
+                    passphrase: passCtrl.text,
+                  );
+                  final importedHosts = (map['hosts'] as List<dynamic>? ?? const [])
+                      .whereType<Map<String, dynamic>>()
+                      .map(RemoteHostItem.fromJson)
+                      .toList();
+                  final importedCreds = (map['credentials'] as List<dynamic>? ?? const [])
+                      .whereType<Map<String, dynamic>>()
+                      .map(VaultCredentialItem.fromJson)
+                      .toList();
+                  final importedTotp = (map['totp'] as List<dynamic>? ?? const [])
+                      .whereType<Map<String, dynamic>>()
+                      .map(TotpEntryItem.fromJson)
+                      .toList();
+                  final importedSnippets = (map['snippets'] as List<dynamic>? ?? const [])
+                      .whereType<Map<String, dynamic>>()
+                      .map(TerminalSnippetItem.fromJson)
+                      .toList();
+
+                  setState(() {
+                    for (final c in importedCreds) {
+                      final idx = _credentials.indexWhere((x) => x.id == c.id);
+                      if (idx >= 0) {
+                        _credentials[idx] = c;
+                      } else {
+                        _credentials.add(c);
+                      }
+                    }
+                    for (final h in importedHosts) {
+                      final idx = _hosts.indexWhere((x) => x.id == h.id);
+                      if (idx >= 0) {
+                        _hosts[idx] = h;
+                      } else {
+                        _hosts.add(h);
+                      }
+                    }
+                    for (final t in importedTotp) {
+                      final idx = _totpItems.indexWhere((x) => x.id == t.id);
+                      if (idx >= 0) {
+                        _totpItems[idx] = t;
+                      } else {
+                        _totpItems.add(t);
+                      }
+                    }
+                    for (final s in importedSnippets) {
+                      final idx = _customSnippets.indexWhere((x) => x.id == s.id);
+                      if (idx >= 0) {
+                        _customSnippets[idx] = s;
+                      } else {
+                        _customSnippets.add(s);
+                      }
+                    }
+                    _syncActiveHostSelection();
+                  });
+                  _saveVaultToDisk();
+                  Navigator.of(ctx).pop();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'Restored ${importedHosts.length} host(s) & ${importedCreds.length} credential(s) from encrypted .jvault.',
+                      ),
+                    ),
+                  );
+                } catch (err) {
+                  setModalState(() {
+                    errorMsg = err.toString().replaceFirst('FormatException: ', '');
+                  });
+                }
+              },
+              icon: const Icon(Icons.verified_user_outlined, size: 15),
+              label: const Text('Decrypt & Restore'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

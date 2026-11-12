@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jaladesk_mobile/main.dart';
 import 'package:jaladesk_mobile/protocols/rdp_ffi_client.dart';
+import 'package:jaladesk_mobile/protocols/ssh_bastion_tunnel.dart';
 import 'package:jaladesk_mobile/protocols/vnc_rfb_client.dart';
 import 'package:jaladesk_mobile/terminal/termius_terminal.dart';
 import 'package:pointycastle/export.dart' as pc;
@@ -738,5 +739,374 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('btn_sftp_toggle_dotfiles')));
     await tester.pumpAndSettle();
     expect(find.text('.htpasswd.sealed'), findsOneWidget);
+  });
+
+  test('SshBastionRouteResolver resolves single-hop & multi-hop chains and rejects circular Jump Host loops', () {
+    const edgeBastion = RemoteHostItem(
+      id: 'hop-edge',
+      name: 'Edge Bastion',
+      address: '203.0.113.10',
+      port: 22,
+      protocol: RemoteProtocol.ssh,
+    );
+    const coreBastion = RemoteHostItem(
+      id: 'hop-core',
+      name: 'Core Bastion',
+      address: '10.10.0.2',
+      port: 2222,
+      protocol: RemoteProtocol.ssh,
+      jumpHostId: 'hop-edge',
+    );
+    const targetRdp = RemoteHostItem(
+      id: 'target-ad',
+      name: 'Internal AD',
+      address: '10.20.0.15',
+      port: 3389,
+      protocol: RemoteProtocol.rdp,
+      jumpHostId: 'hop-core',
+    );
+    final hosts = [edgeBastion, coreBastion, targetRdp];
+
+    final hops = SshBastionRouteResolver.resolveHopItems<RemoteHostItem>(
+      target: targetRdp,
+      allHosts: hosts,
+      idOf: (h) => h.id,
+      nameOf: (h) => h.name,
+      jumpHostIdOf: (h) => h.jumpHostId,
+      isSshCapable: (h) => h.protocol == RemoteProtocol.ssh,
+    );
+    expect(hops.map((h) => h.id).toList(), ['hop-edge', 'hop-core']);
+    expect(
+      SshBastionRouteResolver.formatRouteBadge(hops.map((h) => h.name).toList()),
+      '2-hop: Edge Bastion → Core Bastion',
+    );
+
+    // Assigning target-ad or hop-core as hop-edge's Jump Host would create a cycle!
+    expect(
+      SshBastionRouteResolver.wouldCreateCycle<RemoteHostItem>(
+        editingHostId: 'hop-edge',
+        candidateJumpId: 'hop-core',
+        allHosts: hosts,
+        idOf: (h) => h.id,
+        jumpHostIdOf: (h) => h.jumpHostId,
+      ),
+      isTrue,
+    );
+
+    final cyclicEdge = edgeBastion.copyWith(jumpHostId: 'hop-core');
+    expect(
+      () => SshBastionRouteResolver.resolveHopItems<RemoteHostItem>(
+        target: targetRdp,
+        allHosts: [cyclicEdge, coreBastion, targetRdp],
+        idOf: (h) => h.id,
+        nameOf: (h) => h.name,
+        jumpHostIdOf: (h) => h.jumpHostId,
+        isSshCapable: (h) => h.protocol == RemoteProtocol.ssh,
+      ),
+      throwsA(isA<BastionRoutingException>()),
+    );
+  });
+
+  test('EncryptedVaultBackupCodec seals and opens .jvault with AES-256-GCM + PBKDF2-HMAC-SHA256 and rejects wrong passphrases', () {
+    final payload = <String, dynamic>{
+      'hosts': [
+        const RemoteHostItem(
+          id: 'h1',
+          name: 'Prod DB Bastion',
+          address: '198.51.100.5',
+          port: 22,
+          protocol: RemoteProtocol.ssh,
+          isFavorite: true,
+        ).toJson(),
+      ],
+      'credentials': [
+        const VaultCredentialItem(
+          id: 'cred-1',
+          label: 'Corp AD Admin',
+          domain: 'CORP',
+          username: 'adminit',
+          password: 'SuperSecretPassword!2026',
+        ).toJson(),
+      ],
+    };
+
+    final sealed = EncryptedVaultBackupCodec.sealJson(
+      payload: payload,
+      passphrase: 'Correct-Horse-Battery-Staple-99!',
+    );
+    expect(sealed, contains('jaladesk-encrypted-vault-v1'));
+    expect(sealed, isNot(contains('SuperSecretPassword!2026')));
+
+    final opened = EncryptedVaultBackupCodec.openJson(
+      rawEnvelopeJson: sealed,
+      passphrase: 'Correct-Horse-Battery-Staple-99!',
+    );
+    final restoredCred = VaultCredentialItem.fromJson(
+      (opened['credentials'] as List).first as Map<String, dynamic>,
+    );
+    expect(restoredCred.displayPrincipal, r'CORP\adminit');
+    expect(restoredCred.password, 'SuperSecretPassword!2026');
+
+    expect(
+      () => EncryptedVaultBackupCodec.openJson(
+        rawEnvelopeJson: sealed,
+        passphrase: 'Wrong-Passphrase-Attempt!',
+      ),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('SshBastionChain + ActiveLocalPortForward tunnels real 2-hop SSH ProxyJump + FreeRDP 3.32.2 over OpenSSH sshd', () async {
+    final sshdBin = File('/usr/sbin/sshd');
+    final sshKeygenBin = File('/usr/bin/ssh-keygen');
+    final serverBin = File('/Users/ribato/Documents/APLIKASI/royal-clone/outputs/app/native/test-server/build/rdp-test-server');
+    expect(sshdBin.existsSync(), isTrue);
+    expect(sshKeygenBin.existsSync(), isTrue);
+    expect(serverBin.existsSync(), isTrue);
+
+    final tmpDir = await Directory.systemTemp.createTemp('jaladesk_2hop_bastion_');
+    addTearDown(() => tmpDir.delete(recursive: true));
+
+    // Generate Ed25519 host key & client keypair for local OpenSSH sshd instances
+    final hostKeyPath = '${tmpDir.path}/ssh_host_ed25519_key';
+    final clientKeyPath = '${tmpDir.path}/id_ed25519';
+    expect(
+      (await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', hostKeyPath])).exitCode,
+      0,
+    );
+    expect(
+      (await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', clientKeyPath])).exitCode,
+      0,
+    );
+    final clientPrivateKeyPem = await File(clientKeyPath).readAsString();
+    final currentUser = Platform.environment['USER'] ?? (await Process.run('whoami', [])).stdout.toString().trim();
+
+    Future<(Process, int)> startLocalSshd(String tag) async {
+      final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final p = probe.port;
+      await probe.close();
+
+      final cfgPath = '${tmpDir.path}/sshd_$tag.conf';
+      await File(cfgPath).writeAsString([
+        'Port $p',
+        'ListenAddress 127.0.0.1',
+        'HostKey $hostKeyPath',
+        'AuthorizedKeysFile $clientKeyPath.pub',
+        'PasswordAuthentication no',
+        'PubkeyAuthentication yes',
+        'ChallengeResponseAuthentication no',
+        'UsePAM no',
+        'AllowTcpForwarding yes',
+        'PermitOpen any',
+        'StrictModes no',
+        'PidFile ${tmpDir.path}/sshd_$tag.pid',
+      ].join('\n'));
+
+      final proc = await Process.start(sshdBin.path, ['-D', '-e', '-f', cfgPath]);
+      // Wait until sshd accepts TCP connections
+      for (int i = 0; i < 30; i++) {
+        try {
+          final s = await Socket.connect('127.0.0.1', p, timeout: const Duration(milliseconds: 150));
+          s.destroy();
+          break;
+        } catch (_) {
+          await Future<void>.delayed(const Duration(milliseconds: 80));
+        }
+      }
+      return (proc, p);
+    }
+
+    final (sshdHop1, portHop1) = await startLocalSshd('hop1');
+    addTearDown(() => sshdHop1.kill(ProcessSignal.sigterm));
+    final (sshdHop2, portHop2) = await startLocalSshd('hop2');
+    addTearDown(() => sshdHop2.kill(ProcessSignal.sigterm));
+
+    // Start local FreeRDP 3.32.2 test server on an ephemeral loopback port
+    final certPath = '${tmpDir.path}/rdp.crt';
+    final keyPath = '${tmpDir.path}/rdp.key';
+    expect(
+      (await Process.run('openssl', [
+        'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+        '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=localhost',
+      ])).exitCode,
+      0,
+    );
+    final rdpProbe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final rdpPort = rdpProbe.port;
+    await rdpProbe.close();
+
+    final rdpProc = await Process.start(serverBin.path, [
+      '--port=$rdpPort',
+      '--cert=$certPath',
+      '--key=$keyPath',
+    ]);
+    addTearDown(() => rdpProc.kill(ProcessSignal.sigterm));
+
+    final rdpReady = Completer<void>();
+    final rdpDesktop = Completer<void>();
+    rdpProc.stdout.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
+      if (line.contains('READY') && !rdpReady.isCompleted) rdpReady.complete();
+      if (line.contains('DESKTOP') && !rdpDesktop.isCompleted) rdpDesktop.complete();
+    });
+    await rdpReady.future.timeout(const Duration(seconds: 5));
+
+    // Establish REAL 2-Hop SSH Bastion Chain (`Hop 1 -> Hop 2`) + Local Port Forward -> FreeRDP server!
+    final chain = await SshBastionChain.connect([
+      BastionHopSpec(
+        id: 'hop-1',
+        name: 'Edge-Bastion',
+        address: '127.0.0.1',
+        port: portHop1,
+        username: currentUser,
+        privateKeyPem: clientPrivateKeyPem,
+      ),
+      BastionHopSpec(
+        id: 'hop-2',
+        name: 'Core-Bastion',
+        address: '127.0.0.1',
+        port: portHop2,
+        username: currentUser,
+        privateKeyPem: clientPrivateKeyPem,
+      ),
+    ]);
+    addTearDown(() => chain.dispose());
+
+    final tunnel = await chain.startLocalPortForward(
+      remoteHost: '127.0.0.1',
+      remotePort: rdpPort,
+      label: '2-Hop RDP Tunnel',
+      ownChainLifecycle: true,
+    );
+    expect(tunnel.localPort, greaterThan(0));
+
+    final rdpClient = RdpFfiClient(
+      host: '127.0.0.1',
+      port: tunnel.localPort,
+      domain: 'CORP',
+      username: 'adminit',
+      password: 'testpassword',
+      initialWidth: 1024,
+      initialHeight: 768,
+      onFrame: (img, w, h, status) {},
+      onStatus: (status, {isError = false}) {},
+    );
+    addTearDown(() => rdpClient.dispose());
+
+    await rdpClient.connect();
+    expect(rdpClient.isConnected, isTrue);
+    await rdpDesktop.future.timeout(const Duration(seconds: 5));
+
+    // Verify real bidirectional bytes flowed through the 2-hop SSH port forward!
+    expect(tunnel.totalConnections, greaterThanOrEqualTo(1));
+    expect(tunnel.bytesSent, greaterThan(100));
+    expect(tunnel.bytesReceived, greaterThan(100));
+
+    await rdpClient.dispose();
+    await tunnel.close();
+    expect(tunnel.isClosed, isTrue);
+  });
+
+  testWidgets('Host Editor supports inline + New Jump Host, Reusable Vault Credentials, Favorites & Port Forward Studio',
+      (WidgetTester tester) async {
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final shellKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
+    await tester.pumpAndSettle();
+
+    // 1. Go to Vault & 2FA and add a Reusable Credential
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    expect(find.text('Reusable Credential Vault'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('btn_add_vault_credential')));
+    await tester.pumpAndSettle();
+    expect(find.text('New Vault Credential'), findsOneWidget);
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Credential Name *'),
+      'PLN Batam AD Admin',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'AD Domain (optional)'),
+      'plnbatam',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Username *'),
+      'adminit',
+    );
+    await tester.tap(find.text('Save Credential'));
+    await tester.pumpAndSettle();
+    expect(find.text('PLN Batam AD Admin'), findsOneWidget);
+
+    // 2. Return to Connections -> Open + Add Host -> Create inline + New Jump Host -> Bind both to RDP host
+    await tester.tap(find.text('Connections'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Add Host'));
+    await tester.pumpAndSettle();
+    expect(find.text('New Remote Connection'), findsOneWidget);
+
+    // Select RDP protocol chip inside the dialog
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('RDP')));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Display Name (optional)'),
+      'AD1 Core Server',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Host / IP Address *'),
+      '192.0.2.154',
+    );
+
+    // Tap inline `+ New Jump Host` right inside the RDP connection dialog!
+    await tester.ensureVisible(find.byKey(const ValueKey('btn_inline_new_jump_host')));
+    await tester.tap(find.byKey(const ValueKey('btn_inline_new_jump_host')));
+    await tester.pumpAndSettle();
+    expect(find.text('New SSH Jump Host / Bastion'), findsOneWidget);
+
+    // Fill out the nested SSH Jump Host modal
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Display Name (optional)').last,
+      'Batam SSH Bastion',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Host / IP Address *').last,
+      '198.51.100.20',
+    );
+    await tester.tap(find.text('Save Host').last);
+    await tester.pumpAndSettle();
+
+    // Verify `Batam SSH Bastion` is now auto-selected in the RDP host's Jump Host dropdown!
+    expect(find.textContaining('Batam SSH Bastion (198.51.100.20:22)'), findsOneWidget);
+
+    // Also select the Reusable Credential `PLN Batam AD Admin`
+    await tester.ensureVisible(find.byKey(const ValueKey('dropdown_vault_credential')));
+    await tester.tap(find.byKey(const ValueKey('dropdown_vault_credential')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('PLN Batam AD Admin').last);
+    await tester.pumpAndSettle();
+
+    // Pin AD1 Core Server to Favorites & save
+    await tester.tap(find.byTooltip('Pin to Favorites'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save Host'));
+    await tester.pumpAndSettle();
+
+    // 3. Verify Connections screen shows PINNED FAVORITES, `via Batam SSH Bastion`, and `Vault: PLN Batam AD Admin`!
+    expect(find.text('PINNED FAVORITES'), findsOneWidget);
+    expect(find.text('AD1 Core Server'), findsOneWidget);
+    expect(find.text('via Batam SSH Bastion'), findsOneWidget);
+    expect(find.text('Vault: PLN Batam AD Admin'), findsOneWidget);
+
+    // 4. Open SSH Port Forwarding Studio (`ssh -L`) and verify `Batam SSH Bastion` is ready
+    await tester.tap(find.byKey(const Key('btn_open_port_forwards')));
+    await tester.pumpAndSettle();
+    expect(find.text('SSH Port Forwarding Studio (ssh -L)'), findsOneWidget);
+    expect(find.textContaining('Batam SSH Bastion'), findsWidgets);
   });
 }
