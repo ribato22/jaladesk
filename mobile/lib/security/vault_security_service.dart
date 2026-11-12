@@ -145,27 +145,105 @@ class NativePlatformBridge {
     }
     return fallback;
   }
+
+  /// Wraps the 32-byte Vault DEK (Base64) inside Android Hardware Keystore (`AndroidKeyStore` TEE / StrongBox AES-256-GCM).
+  /// Returns `'aks:v1:<iv>:<ciphertext>'` when supported, or `null` on desktop/test hosts.
+  static Future<String?> wrapMasterSecret(String plainBase64) async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final wrapped = await _channel.invokeMethod<String>(
+        'wrapMasterSecret',
+        {'plainBase64': plainBase64},
+      );
+      if (wrapped != null && wrapped.startsWith('aks:v1:')) {
+        return wrapped;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Unwraps an `'aks:v1:...'` Hardware Keystore envelope back into the 32-byte Vault DEK (Base64).
+  static Future<String?> unwrapMasterSecret(String wrapped) async {
+    try {
+      return await _channel.invokeMethod<String>(
+        'unwrapMasterSecret',
+        {'wrapped': wrapped},
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Checks whether hardware biometric authentication (`BiometricPrompt` Fingerprint / Face / Iris) is enrolled & ready.
+  static Future<bool> isBiometricAvailable() async {
+    try {
+      final res = await _channel.invokeMethod<bool>('isBiometricAvailable');
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Prompts native OS hardware biometric authentication (`BiometricPrompt`), returning `true` when verified.
+  static Future<bool> authenticateBiometric({
+    String title = 'Unlock JalaDesk Vault',
+    String subtitle = 'Verify your identity to unseal encrypted credentials & 2FA',
+  }) async {
+    try {
+      final res = await _channel.invokeMethod<bool>(
+        'authenticateBiometric',
+        {'title': title, 'subtitle': subtitle},
+      );
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
 }
 
 /// Authenticated AES-256-GCM At-Rest Vault Cipher for `SharedPreferences`.
 /// Protects saved hosts, passwords, SSH PEM private keys, reusable credentials, and 2FA seeds
-/// at rest, while transparently migrating legacy v2 plaintext JSON records.
+/// at rest, backed by Android Hardware Keystore (`AndroidKeyStore` StrongBox/TEE) wrapping,
+/// while transparently migrating legacy v2 plaintext JSON records and unwrapped DEKs.
 class VaultAtRestCipher {
   static const String _prefsMasterKey = 'jaladesk_enclave_dek_v1';
+  static const String hardwareWrappedPrefix = 'aks:v1:';
   static const String envelopePrefix = 'jseal:v1:';
   static final Uint8List _aad = Uint8List.fromList(utf8.encode('jaladesk-vault-at-rest-v1'));
 
   static Future<Uint8List> _getOrCreateDeviceKey(SharedPreferences prefs) async {
     final existing = prefs.getString(_prefsMasterKey);
     if (existing != null && existing.isNotEmpty) {
-      try {
-        final decoded = base64Decode(existing);
-        if (decoded.length == 32) return decoded;
-      } catch (_) {}
+      if (existing.startsWith(hardwareWrappedPrefix)) {
+        final unwrappedB64 = await NativePlatformBridge.unwrapMasterSecret(existing);
+        if (unwrappedB64 != null && unwrappedB64.isNotEmpty) {
+          try {
+            final decoded = base64Decode(unwrappedB64);
+            if (decoded.length == 32) return decoded;
+          } catch (_) {}
+        }
+      } else {
+        try {
+          final decoded = base64Decode(existing);
+          if (decoded.length == 32) {
+            // Transparently upgrade legacy unwrapped Base64 DEK into Android Hardware Keystore (`aks:v1:...`)
+            final wrapped = await NativePlatformBridge.wrapMasterSecret(existing);
+            if (wrapped != null && wrapped.startsWith(hardwareWrappedPrefix)) {
+              await prefs.setString(_prefsMasterKey, wrapped);
+            }
+            return decoded;
+          }
+        } catch (_) {}
+      }
     }
     final rng = Random.secure();
     final fresh = Uint8List.fromList(List<int>.generate(32, (_) => rng.nextInt(256)));
-    await prefs.setString(_prefsMasterKey, base64Encode(fresh));
+    final freshB64 = base64Encode(fresh);
+    final wrapped = await NativePlatformBridge.wrapMasterSecret(freshB64);
+    await prefs.setString(
+      _prefsMasterKey,
+      (wrapped != null && wrapped.startsWith(hardwareWrappedPrefix)) ? wrapped : freshB64,
+    );
     return fresh;
   }
 
@@ -211,9 +289,9 @@ class VaultAtRestCipher {
   }
 }
 
-/// PBKDF2-HMAC-SHA256 App-Lock PIN Hasher (Constant-Time Verification)
+/// PBKDF2-HMAC-SHA256 App-Lock PIN Hasher (Constant-Time Verification, OWASP / NIST SP 800-63B 100k iterations)
 class VaultPinHasher {
-  static const int iterations = 60000;
+  static const int iterations = 100000;
 
   static String hashPin(String pin) {
     final rng = Random.secure();

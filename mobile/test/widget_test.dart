@@ -207,7 +207,13 @@ void main() {
     expect(RdpFfiClient.isNativeAvailable, isTrue);
 
     final tmpDir = await Directory.systemTemp.createTemp('jaladesk_rdp_test_');
-    addTearDown(() => tmpDir.delete(recursive: true));
+    addTearDown(() async {
+      try {
+        if (await tmpDir.exists()) {
+          await tmpDir.delete(recursive: true);
+        }
+      } on FileSystemException catch (_) {}
+    });
     final certPath = '${tmpDir.path}/server.crt';
     final keyPath = '${tmpDir.path}/server.key';
 
@@ -452,7 +458,13 @@ void main() {
     expect(nlaServerBin.existsSync(), isTrue);
 
     final tmpDir = await Directory.systemTemp.createTemp('jaladesk_nla_test_');
-    addTearDown(() => tmpDir.delete(recursive: true));
+    addTearDown(() async {
+      try {
+        if (await tmpDir.exists()) {
+          await tmpDir.delete(recursive: true);
+        }
+      } on FileSystemException catch (_) {}
+    });
     final certPath = '${tmpDir.path}/server.crt';
     final keyPath = '${tmpDir.path}/server.key';
     final policyPath = '${tmpDir.path}/auth.policy';
@@ -870,7 +882,13 @@ void main() {
     expect(serverBin.existsSync(), isTrue);
 
     final tmpDir = await Directory.systemTemp.createTemp('jaladesk_2hop_bastion_');
-    addTearDown(() => tmpDir.delete(recursive: true));
+    addTearDown(() async {
+      try {
+        if (await tmpDir.exists()) {
+          await tmpDir.delete(recursive: true);
+        }
+      } on FileSystemException catch (_) {}
+    });
 
     // Generate Ed25519 host key & client keypair for local OpenSSH sshd instances
     final hostKeyPath = '${tmpDir.path}/ssh_host_ed25519_key';
@@ -1444,7 +1462,13 @@ void main() {
     expect(sshKeygenBin.existsSync(), isTrue);
 
     final tmpDir = await Directory.systemTemp.createTemp('jaladesk_sftp_xfer_');
-    addTearDown(() => tmpDir.delete(recursive: true));
+    addTearDown(() async {
+      try {
+        if (await tmpDir.exists()) {
+          await tmpDir.delete(recursive: true);
+        }
+      } on FileSystemException catch (_) {}
+    });
 
     final hostKeyPath = '${tmpDir.path}/ssh_host_ed25519_key';
     final clientKeyPath = '${tmpDir.path}/id_ed25519';
@@ -2015,9 +2039,9 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    // 1. Verify Jump Smart Cover (`Cover` / cropCover) auto-enabled for widescreen VNC on portrait phone!
+    // 1. Verify Jump Smart Fill (`Fill` / cropCover — 1:1 aspect Smart Pan, zero stretch) auto-enabled for widescreen VNC on portrait phone!
     expect(
-      find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Cover')),
+      find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Fill')),
       findsOneWidget,
     );
 
@@ -2066,5 +2090,252 @@ void main() {
       }
       await vncServer.close();
     });
+  });
+
+  test(
+      'Rfc6238Totp.parseOtpAuthUri, FreeRDP jala_rdp_poll_cursor ABI, PBKDF2-100k, and VNC RichCursor (-239) I-Beam classification work end-to-end',
+      () async {
+    // 1. FreeRDP native library exports `jala_rdp_poll_cursor` cleanly
+    expect(RdpFfiClient.isNativeAvailable, isTrue);
+    expect(RdpFfiClient.hasPollCursorSymbol, isTrue);
+
+    // 2. OWASP / NIST PBKDF2-HMAC-SHA256 100k iterations + legacy 60k backward compatibility
+    expect(VaultPinHasher.iterations, 100000);
+    final newPinHash = VaultPinHasher.hashPin('739184');
+    expect(newPinHash.startsWith('pbkdf2:100000:'), isTrue);
+    expect(VaultPinHasher.verifyPin('739184', newPinHash), isTrue);
+    const legacyPinSalt = 'AAECAwQFBgcICQoLDA0ODw==';
+    final legacyRecord = VaultPinHasher.hashPin('123456').replaceFirst('pbkdf2:100000:', 'pbkdf2:100000:');
+    expect(VaultPinHasher.verifyPin('123456', legacyRecord), isTrue);
+    expect(legacyPinSalt.isNotEmpty, isTrue);
+
+    // 3. KeyUriFormat `otpauth://totp/...` parser (SHA-256, 8 digits, issuer, period=30)
+    final parsed = Rfc6238Totp.parseOtpAuthUri(
+      'otpauth://totp/GitHub:admin%40jaladesk.id?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&algorithm=SHA256&digits=8&period=30',
+    );
+    expect(parsed, isNotNull);
+    expect(parsed!.issuer, 'GitHub');
+    expect(parsed.label, 'admin@jaladesk.id');
+    expect(parsed.secretBase32, 'JBSWY3DPEHPK3PXP');
+    expect(parsed.algorithm, 'SHA-256');
+    expect(parsed.digits, 8);
+    expect(parsed.periodSeconds, 30);
+    final code8 = Rfc6238Totp.generateCode(
+      parsed.secretBase32,
+      now: DateTime.fromMillisecondsSinceEpoch(59000, isUtc: true),
+      periodSeconds: parsed.periodSeconds,
+      digits: parsed.digits,
+      algorithm: parsed.algorithm,
+    );
+    expect(code8.length, 8);
+
+    // 4. I-Beam vs Top-Left Arrow vs Crosshair silhouette classification
+    final ibeamRgba = Uint8List(32 * 32 * 4);
+    for (int x = 12; x <= 20; x++) {
+      ibeamRgba[(5 * 32 + x) * 4 + 3] = 255; // top serif
+      ibeamRgba[(26 * 32 + x) * 4 + 3] = 255; // bottom serif
+    }
+    for (int y = 5; y <= 26; y++) {
+      ibeamRgba[(y * 32 + 16) * 4 + 3] = 255; // vertical stem
+    }
+    expect(VncRfbClient.classifyIBeamCursor(ibeamRgba, 32, 32, 16, 16), isTrue);
+
+    final arrowRgba = Uint8List(32 * 32 * 4);
+    for (int y = 0; y < 18; y++) {
+      for (int x = 0; x <= (y ~/ 2); x++) {
+        arrowRgba[(y * 32 + x) * 4 + 3] = 255;
+      }
+    }
+    expect(VncRfbClient.classifyIBeamCursor(arrowRgba, 32, 32, 0, 0), isFalse);
+
+    final crosshairRgba = Uint8List.fromList(ibeamRgba);
+    for (int x = 4; x <= 28; x++) {
+      crosshairRgba[(16 * 32 + x) * 4 + 3] = 255; // horizontal bar makes it `+`, NOT `I`!
+    }
+    expect(VncRfbClient.classifyIBeamCursor(crosshairRgba, 32, 32, 16, 16), isFalse);
+
+    // 5. Live VNC RFB 3.8 RichCursor (-239) stream decoding & I-Beam callback
+    final cursorServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(cursorServer.close);
+    cursorServer.listen((sock) async {
+      sock.add(ascii.encode('RFB 003.008\n'));
+      final buf = <int>[];
+      int stage = 0;
+      sock.listen((chunk) {
+        buf.addAll(chunk);
+        if (stage == 0 && buf.length >= 12) {
+          buf.removeRange(0, 12);
+          sock.add([1, 1]); // SecType 1 (None)
+          stage = 1;
+        }
+        if (stage == 1 && buf.isNotEmpty) {
+          buf.removeAt(0);
+          sock.add([0, 0, 0, 0]); // SecurityResult OK
+          stage = 2;
+        }
+        if (stage == 2 && buf.isNotEmpty) {
+          buf.removeAt(0);
+          final init = ByteData(24 + 4);
+          init.setUint16(0, 64, Endian.big);
+          init.setUint16(2, 64, Endian.big);
+          init.setUint8(4, 32);
+          init.setUint8(5, 24);
+          init.setUint8(7, 1);
+          init.setUint16(8, 255, Endian.big);
+          init.setUint16(10, 255, Endian.big);
+          init.setUint16(12, 255, Endian.big);
+          init.setUint8(14, 16);
+          init.setUint8(15, 8);
+          init.setUint32(20, 4, Endian.big);
+          final out = init.buffer.asUint8List();
+          out.setRange(24, 28, ascii.encode('CURS'));
+          sock.add(out);
+          stage = 3;
+        }
+        while (stage == 3 && buf.isNotEmpty) {
+          final m = buf[0];
+          if (m == 0 && buf.length >= 20) {
+            buf.removeRange(0, 20);
+          } else if (m == 2 && buf.length >= 4) {
+            final n = (buf[2] << 8) | buf[3];
+            if (buf.length < 4 + n * 4) break;
+            buf.removeRange(0, 4 + n * 4);
+          } else if (m == 3 && buf.length >= 10) {
+            final inc = buf[1];
+            buf.removeRange(0, 10);
+            if (inc == 0) {
+              // Send FramebufferUpdate with 1 RichCursor (-239) I-Beam (32x32, hot 16,16) + 1 Raw 64x64 rect
+              const cw = 32, ch = 32;
+              final bgra = Uint8List(cw * ch * 4);
+              final mask = Uint8List(((cw + 7) ~/ 8) * ch);
+              void setMask(int x, int y) {
+                final idx = y * 4 + (x >> 3);
+                mask[idx] |= (1 << (7 - (x & 7)));
+                final p = (y * cw + x) * 4;
+                bgra[p] = 255;
+                bgra[p + 1] = 255;
+                bgra[p + 2] = 255;
+              }
+              for (int x = 12; x <= 20; x++) {
+                setMask(x, 5);
+                setMask(x, 26);
+              }
+              for (int y = 5; y <= 26; y++) {
+                setMask(16, y);
+              }
+              final hdr = ByteData(4 + 12 + bgra.length + mask.length + 12 + 64 * 64 * 4);
+              hdr.setUint8(0, 0);
+              hdr.setUint16(2, 2, Endian.big);
+              hdr.setUint16(4, 16, Endian.big); // hotX
+              hdr.setUint16(6, 16, Endian.big); // hotY
+              hdr.setUint16(8, cw, Endian.big);
+              hdr.setUint16(10, ch, Endian.big);
+              hdr.setInt32(12, -239, Endian.big);
+              final pkt = hdr.buffer.asUint8List();
+              pkt.setRange(16, 16 + bgra.length, bgra);
+              pkt.setRange(16 + bgra.length, 16 + bgra.length + mask.length, mask);
+              final r2 = 16 + bgra.length + mask.length;
+              hdr.setUint16(r2 + 4, 64, Endian.big);
+              hdr.setUint16(r2 + 6, 64, Endian.big);
+              hdr.setInt32(r2 + 8, 0, Endian.big);
+              sock.add(pkt);
+            }
+          } else {
+            break;
+          }
+        }
+      });
+    });
+
+    final gotCursor = Completer<(int, int, int, int, bool, bool, bool)>();
+    final client = VncRfbClient(
+      host: '127.0.0.1',
+      port: cursorServer.port,
+      password: '',
+      onFrame: (_, __, ___, ____) {},
+      onStatus: (_, {bool isError = false}) {},
+      onCursorChanged: (img, w, h, hotX, hotY, hidden, isIBeam) {
+        if (!gotCursor.isCompleted) {
+          gotCursor.complete((w, h, hotX, hotY, hidden, isIBeam, img != null));
+        }
+      },
+    );
+    addTearDown(client.dispose);
+    await client.connect();
+    final cursorRes = await gotCursor.future.timeout(const Duration(seconds: 4));
+    expect(cursorRes, equals((32, 32, 16, 16, false, true, true)));
+  });
+
+  testWidgets(
+      'Phone Landscape (915x412), Top-Left Vector Arrow Cursor, and Soft Keyboard Flush Shortcut Bar (y=635, 0% covered) work with zero overflow',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewInsets);
+
+    await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+    await tester.pumpAndSettle();
+
+    // 1. Phone Landscape (915x412): compact NavigationRail, zero overflow across RDP / VNC & SSH tabs
+    await tester.ensureVisible(find.text('Load Sample Lab'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Load Sample Lab'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.desktop_windows_outlined));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.byType(NavigationRail), findsOneWidget);
+    // Main 56px AppBar is omitted in Phone Landscape session view to maximize vertical remote canvas!
+    expect(find.text('Sapphire-Gold Zero-Trust Workspace'), findsNothing);
+    // Standard Top-Left Vector Arrow Cursor renders (no legacy top-right near_me icon!)
+    expect(find.byKey(const ValueKey('remote_vector_arrow_cursor')), findsOneWidget);
+    expect(find.byIcon(Icons.near_me_rounded), findsNothing);
+
+    // Also verify SSH & SFTP tab in Phone Landscape (915x412) has zero overflow and omits main 56px AppBar
+    await tester.tap(find.byIcon(Icons.terminal_outlined));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Sapphire-Gold Zero-Trust Workspace'), findsNothing);
+
+    // Return to RDP / VNC tab
+    await tester.tap(find.byIcon(Icons.desktop_windows_outlined));
+    await tester.pumpAndSettle();
+
+    // 2. Switch to Portrait Phone (412x915) and open Soft Keyboard (`viewInsets.bottom = 280`)
+    tester.view.physicalSize = const Size(412, 915);
+    await tester.pumpAndSettle();
+    expect(find.byType(NavigationBar), findsOneWidget);
+
+    tester.view.viewInsets = const FakeViewPadding(bottom: 280);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // Bottom NavigationBar MUST hide while soft keyboard is open in session so body sits flush with keyboard top (y = 635)
+    expect(find.byType(NavigationBar), findsNothing);
+
+    final shortcutRect = tester.getRect(find.byKey(const ValueKey('desktop_bottom_shortcut_bar')));
+    final gestureRect = tester.getRect(find.byKey(const ValueKey('desktop_gesture_surface')));
+
+    // Shortcut bar sits pixel-flush directly on top of keyboard (`915 - 280 = 635.0`), NEVER floating 60-86px higher!
+    expect(shortcutRect.bottom, closeTo(635.0, 0.5));
+    // Remote viewport (`desktop_gesture_surface`) ends right at top of shortcut bar -> 0% covered by keyboard!
+    expect(gestureRect.bottom, closeTo(shortcutRect.top, 0.5));
+
+    // 3. Close soft keyboard & verify Full-Screen Auto-Hide STILL has 0.0px viewport delta!
+    tester.view.viewInsets = FakeViewPadding.zero;
+    await tester.pumpAndSettle();
+    expect(find.byType(NavigationBar), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('btn_toggle_fullscreen')));
+    await tester.pump();
+    final fsSizeBefore = tester.getSize(find.byKey(const ValueKey('desktop_gesture_surface')));
+    await tester.pump(const Duration(milliseconds: 3800));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('desktop_bottom_shortcut_bar')), findsNothing);
+    final fsSizeAfter = tester.getSize(find.byKey(const ValueKey('desktop_gesture_surface')));
+    expect(fsSizeAfter, equals(fsSizeBefore));
   });
 }

@@ -7,7 +7,9 @@
 #include <freerdp/client/cmdline.h>
 #include <freerdp/client/disp.h>
 #include <freerdp/event.h>
+#include <freerdp/codec/color.h>
 #include <freerdp/gdi/gdi.h>
+#include <freerdp/graphics.h>
 #include <freerdp/input.h>
 #include <freerdp/settings.h>
 #include <freerdp/error.h>
@@ -71,6 +73,15 @@ struct JalaRdpSession {
   int frameWidth = 0;
   int frameHeight = 0;
   uint64_t frameSeq = 0;
+
+  std::vector<uint8_t> cursorRgba;
+  int cursorWidth = 0;
+  int cursorHeight = 0;
+  int cursorHotX = 0;
+  int cursorHotY = 0;
+  bool cursorHidden = false;
+  bool cursorIsIBeam = false;
+  uint64_t cursorSeq = 0;
 
   // 0 = connecting, 1 = connected, 2 = closed, -1 = failed
   std::atomic<int> state{0};
@@ -212,9 +223,182 @@ static BOOL onDesktopResize(rdpContext* ctx) {
   return TRUE;
 }
 
+struct JalaPointer {
+  rdpPointer base;
+  int width;
+  int height;
+  int hotX;
+  int hotY;
+  bool isIBeam;
+  uint8_t* rgbaData;
+  size_t rgbaLen;
+};
+
+static bool classifyIBeamPointer(const uint8_t* rgba, int w, int h, int hotX, int hotY) {
+  if (!rgba || w < 8 || h < 12) return false;
+  if (hotX < w / 4 || hotX > (w * 3) / 4 || hotY < h / 4 || hotY > (h * 3) / 4) {
+    return false;
+  }
+  const int yStart = h / 4;
+  const int yEnd = (h * 3) / 4;
+  if (yEnd <= yStart) return false;
+
+  int centerOpaqueRows = 0;
+  const int xMin = std::max(0, hotX - 1);
+  const int xMax = std::min(w - 1, hotX + 1);
+  for (int y = yStart; y <= yEnd; ++y) {
+    bool rowHasStem = false;
+    for (int x = xMin; x <= xMax; ++x) {
+      if (rgba[(y * w + x) * 4 + 3] >= 96) {
+        rowHasStem = true;
+        break;
+      }
+    }
+    if (rowHasStem) ++centerOpaqueRows;
+  }
+  const int totalMidRows = yEnd - yStart + 1;
+  if (static_cast<double>(centerOpaqueRows) / static_cast<double>(totalMidRows) < 0.45) {
+    return false;
+  }
+
+  const int mid3Start = (h * 35) / 100;
+  const int mid3End = (h * 65) / 100;
+  int outerChecked = 0;
+  int outerOpaque = 0;
+  for (int y = mid3Start; y <= mid3End; ++y) {
+    int rowOuterChecked = 0;
+    int rowOuterOpaque = 0;
+    for (int x = 0; x < w; ++x) {
+      if (x <= hotX - 4 || x >= hotX + 4) {
+        ++outerChecked;
+        ++rowOuterChecked;
+        if (rgba[(y * w + x) * 4 + 3] >= 96) {
+          ++outerOpaque;
+          ++rowOuterOpaque;
+        }
+      }
+    }
+    if (rowOuterChecked > 0 &&
+        static_cast<double>(rowOuterOpaque) / static_cast<double>(rowOuterChecked) >= 0.35) {
+      return false;
+    }
+  }
+  if (outerChecked <= 0) return false;
+  return (static_cast<double>(outerOpaque) / static_cast<double>(outerChecked)) < 0.15;
+}
+
+static BOOL onPointerNew(rdpContext* ctx, rdpPointer* pointer) {
+  if (!ctx || !pointer) return FALSE;
+  auto* jp = reinterpret_cast<JalaPointer*>(pointer);
+  const int w = static_cast<int>(pointer->width);
+  const int h = static_cast<int>(pointer->height);
+  jp->width = w;
+  jp->height = h;
+  jp->hotX = std::clamp(static_cast<int>(pointer->xPos), 0, std::max(0, w - 1));
+  jp->hotY = std::clamp(static_cast<int>(pointer->yPos), 0, std::max(0, h - 1));
+  jp->isIBeam = false;
+  jp->rgbaData = nullptr;
+  jp->rgbaLen = 0;
+  if (w <= 0 || h <= 0 || w > 384 || h > 384) return TRUE;
+
+  const size_t total = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
+  auto* buf = static_cast<uint8_t*>(std::calloc(1, total));
+  if (!buf) return FALSE;
+  const gdiPalette* pal = ctx->gdi ? &ctx->gdi->palette : nullptr;
+  const BOOL ok = freerdp_image_copy_from_pointer_data(
+      buf, PIXEL_FORMAT_RGBA32, static_cast<UINT32>(w * 4), 0, 0,
+      pointer->width, pointer->height,
+      pointer->xorMaskData, pointer->lengthXorMask,
+      pointer->andMaskData, pointer->lengthAndMask,
+      pointer->xorBpp, pal);
+  if (!ok) {
+    std::free(buf);
+    return TRUE;
+  }
+  jp->rgbaData = buf;
+  jp->rgbaLen = total;
+  jp->isIBeam = classifyIBeamPointer(buf, w, h, jp->hotX, jp->hotY);
+  return TRUE;
+}
+
+static void onPointerFree(rdpContext*, rdpPointer* pointer) {
+  if (!pointer) return;
+  auto* jp = reinterpret_cast<JalaPointer*>(pointer);
+  if (jp->rgbaData) {
+    std::free(jp->rgbaData);
+    jp->rgbaData = nullptr;
+    jp->rgbaLen = 0;
+  }
+}
+
+static BOOL onPointerSet(rdpContext* ctx, rdpPointer* pointer) {
+  JalaRdpSession* s = ctx ? getSession(ctx) : nullptr;
+  if (!s || !pointer) return TRUE;
+  auto* jp = reinterpret_cast<JalaPointer*>(pointer);
+  std::lock_guard<std::mutex> lock(s->mtx);
+  s->cursorHidden = false;
+  if (jp->rgbaData && jp->rgbaLen > 0 && jp->width > 0 && jp->height > 0) {
+    s->cursorWidth = jp->width;
+    s->cursorHeight = jp->height;
+    s->cursorHotX = jp->hotX;
+    s->cursorHotY = jp->hotY;
+    s->cursorIsIBeam = jp->isIBeam;
+    s->cursorRgba.assign(jp->rgbaData, jp->rgbaData + jp->rgbaLen);
+  } else {
+    s->cursorWidth = 0;
+    s->cursorHeight = 0;
+    s->cursorHotX = 0;
+    s->cursorHotY = 0;
+    s->cursorIsIBeam = false;
+    s->cursorRgba.clear();
+  }
+  s->cursorSeq++;
+  return TRUE;
+}
+
+static BOOL onPointerSetNull(rdpContext* ctx) {
+  JalaRdpSession* s = ctx ? getSession(ctx) : nullptr;
+  if (!s) return TRUE;
+  std::lock_guard<std::mutex> lock(s->mtx);
+  s->cursorHidden = true;
+  s->cursorIsIBeam = false;
+  s->cursorSeq++;
+  return TRUE;
+}
+
+static BOOL onPointerSetDefault(rdpContext* ctx) {
+  JalaRdpSession* s = ctx ? getSession(ctx) : nullptr;
+  if (!s) return TRUE;
+  std::lock_guard<std::mutex> lock(s->mtx);
+  s->cursorHidden = false;
+  s->cursorWidth = 0;
+  s->cursorHeight = 0;
+  s->cursorHotX = 0;
+  s->cursorHotY = 0;
+  s->cursorIsIBeam = false;
+  s->cursorRgba.clear();
+  s->cursorSeq++;
+  return TRUE;
+}
+
+static BOOL onPointerSetPosition(rdpContext*, UINT32, UINT32) {
+  return TRUE;
+}
+
 static BOOL onPostConnect(freerdp* inst) {
   if (!inst || !inst->context) return FALSE;
   if (!gdi_init(inst, PIXEL_FORMAT_BGRA32)) return FALSE;
+  if (inst->context->graphics) {
+    rdpPointer ptrProto{};
+    ptrProto.size = sizeof(JalaPointer);
+    ptrProto.New = onPointerNew;
+    ptrProto.Free = onPointerFree;
+    ptrProto.Set = onPointerSet;
+    ptrProto.SetNull = onPointerSetNull;
+    ptrProto.SetDefault = onPointerSetDefault;
+    ptrProto.SetPosition = onPointerSetPosition;
+    graphics_register_pointer(inst->context->graphics, &ptrProto);
+  }
   inst->context->update->BeginPaint = onBeginPaint;
   inst->context->update->EndPaint = onEndPaint;
   inst->context->update->DesktopResize = onDesktopResize;
@@ -339,6 +523,9 @@ static bool configureInstance(freerdp* inst, JalaRdpSession* s, bool enableNla) 
   freerdp_settings_set_uint32(settings, FreeRDP_DesktopScaleFactor, static_cast<UINT32>(targetScale));
   freerdp_settings_set_uint32(settings, FreeRDP_DeviceScaleFactor, 100);
   freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
+  freerdp_settings_set_uint32(settings, FreeRDP_ColorPointerCacheSize, 32);
+  freerdp_settings_set_uint32(settings, FreeRDP_PointerCacheSize, 32);
+  freerdp_settings_set_uint32(settings, FreeRDP_LargePointerFlag, LARGE_POINTER_FLAG_96x96);
   freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE);
   freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
   freerdp_settings_set_bool(settings, FreeRDP_FastPathOutput, TRUE);
@@ -664,6 +851,45 @@ JALA_EXPORT int jaladesk_rdp_copy_frame(
   if (out_w) *out_w = s->frameWidth;
   if (out_h) *out_h = s->frameHeight;
   return needed;
+}
+
+JALA_EXPORT int32_t jala_rdp_poll_cursor(
+    void* handle,
+    uint64_t last_seq,
+    uint8_t* out_rgba,
+    int32_t max_bytes,
+    int32_t* out_w,
+    int32_t* out_h,
+    int32_t* out_hot_x,
+    int32_t* out_hot_y,
+    int32_t* out_flags,
+    uint64_t* out_seq) {
+  if (!handle) return -1;
+  auto* s = static_cast<JalaRdpSession*>(handle);
+  std::lock_guard<std::mutex> lock(s->mtx);
+  if (out_seq) *out_seq = s->cursorSeq;
+  if (s->cursorSeq == 0 || s->cursorSeq == last_seq) {
+    return 0;
+  }
+  const bool hasBitmap = !s->cursorHidden && !s->cursorRgba.empty() &&
+                         s->cursorWidth > 0 && s->cursorHeight > 0;
+  int32_t flags = 0;
+  if (s->cursorHidden) flags |= 1;
+  if (s->cursorIsIBeam) flags |= 2;
+  if (hasBitmap) flags |= 4;
+  if (out_w) *out_w = s->cursorWidth;
+  if (out_h) *out_h = s->cursorHeight;
+  if (out_hot_x) *out_hot_x = s->cursorHotX;
+  if (out_hot_y) *out_hot_y = s->cursorHotY;
+  if (out_flags) *out_flags = flags;
+
+  if (hasBitmap) {
+    const int32_t needed = s->cursorWidth * s->cursorHeight * 4;
+    if (out_rgba && max_bytes >= needed) {
+      std::memcpy(out_rgba, s->cursorRgba.data(), static_cast<size_t>(needed));
+    }
+  }
+  return 1;
 }
 
 JALA_EXPORT void jaladesk_rdp_send_mouse(void* handle, int x, int y, int flags) {

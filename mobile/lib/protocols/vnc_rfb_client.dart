@@ -399,6 +399,15 @@ class VncRfbClient {
   final void Function(ui.Image image, int width, int height, String status) onFrame;
   final void Function(String status, {bool isError}) onStatus;
   final void Function(int width, int height, bool supportsDynamicResize)? onDesktopGeometryChanged;
+  final void Function(
+    ui.Image? cursorImage,
+    int width,
+    int height,
+    int hotX,
+    int hotY,
+    bool isHidden,
+    bool isTextIBeam,
+  )? onCursorChanged;
 
   Socket? _socket;
   SocketByteReader? _reader;
@@ -427,7 +436,82 @@ class VncRfbClient {
     required this.onFrame,
     required this.onStatus,
     this.onDesktopGeometryChanged,
+    this.onCursorChanged,
   });
+
+  /// Classifies whether an RGBA32 server cursor bitmap + hotspot represents a Text Input `I-Beam` (`I`) cursor.
+  /// Cleanly distinguishes `I-Beam` from Top-Left Arrow (`↖`), Crosshair (`+`), Resize (`↔`/`↕`), and Hand cursors.
+  static bool classifyIBeamCursor(Uint8List rgba, int w, int h, int hotX, int hotY) {
+    if (w < 8 || h < 12 || rgba.length < w * h * 4) return false;
+    if (hotX < w ~/ 4 || hotX > (w * 3) ~/ 4 || hotY < h ~/ 4 || hotY > (h * 3) ~/ 4) {
+      return false;
+    }
+    final yStart = h ~/ 4;
+    final yEnd = (h * 3) ~/ 4;
+    if (yEnd <= yStart) return false;
+
+    int centerOpaqueRows = 0;
+    final xMin = max(0, hotX - 1);
+    final xMax = min(w - 1, hotX + 1);
+    for (int y = yStart; y <= yEnd; y++) {
+      bool rowHasStem = false;
+      for (int x = xMin; x <= xMax; x++) {
+        if (rgba[(y * w + x) * 4 + 3] >= 96) {
+          rowHasStem = true;
+          break;
+        }
+      }
+      if (rowHasStem) centerOpaqueRows++;
+    }
+    final totalMidRows = yEnd - yStart + 1;
+    if (centerOpaqueRows / totalMidRows < 0.45) return false;
+
+    final mid3Start = (h * 35) ~/ 100;
+    final mid3End = (h * 65) ~/ 100;
+    int outerChecked = 0;
+    int outerOpaque = 0;
+    for (int y = mid3Start; y <= mid3End; y++) {
+      int rowOuterChecked = 0;
+      int rowOuterOpaque = 0;
+      for (int x = 0; x < w; x++) {
+        if (x <= hotX - 4 || x >= hotX + 4) {
+          outerChecked++;
+          rowOuterChecked++;
+          if (rgba[(y * w + x) * 4 + 3] >= 96) {
+            outerOpaque++;
+            rowOuterOpaque++;
+          }
+        }
+      }
+      if (rowOuterChecked > 0 && (rowOuterOpaque / rowOuterChecked) >= 0.35) {
+        return false;
+      }
+    }
+    if (outerChecked <= 0) return false;
+    return (outerOpaque / outerChecked) < 0.15;
+  }
+
+  /// Decodes RFC 6143 `RichCursor (-239)` 32bpp BGRA pixels + 1-bit MSB-first transparency mask into RGBA32.
+  static Uint8List decodeRichCursorRgba(Uint8List bgraBytes, Uint8List maskBytes, int rw, int rh) {
+    final rgba = Uint8List(rw * rh * 4);
+    final maskRowBytes = (rw + 7) ~/ 8;
+    for (int y = 0; y < rh; y++) {
+      final maskRowOff = y * maskRowBytes;
+      for (int x = 0; x < rw; x++) {
+        final sIdx = (y * rw + x) * 4;
+        final dIdx = sIdx;
+        final mIdx = maskRowOff + (x >> 3);
+        final opaque = mIdx < maskBytes.length && ((maskBytes[mIdx] >> (7 - (x & 7))) & 1) != 0;
+        if (opaque && sIdx + 2 < bgraBytes.length) {
+          rgba[dIdx] = bgraBytes[sIdx + 2]; // R
+          rgba[dIdx + 1] = bgraBytes[sIdx + 1]; // G
+          rgba[dIdx + 2] = bgraBytes[sIdx]; // B
+          rgba[dIdx + 3] = 255;
+        }
+      }
+    }
+    return rgba;
+  }
 
   bool get isConnected => _running && _socket != null;
 
@@ -816,8 +900,8 @@ class VncRfbClient {
 
     // 6. Send SetEncodings (msgType = 2):
     // ZRLE (16), Zlib (6), Hextile (5), RRE (2), CopyRect (1), Raw (0),
-    // ExtendedDesktopSize (-308), DesktopSize (-223), LastRect (-224), Cursor (-239)
-    const encodings = <int>[16, 6, 5, 2, 1, 0, -308, -223, -224, -239];
+    // ExtendedDesktopSize (-308), DesktopSize (-223), Cursor (-239), LastRect (-224)
+    const encodings = <int>[16, 6, 5, 2, 1, 0, -308, -223, -239, -224];
     final setEnc = ByteData(4 + encodings.length * 4);
     setEnc.setUint8(0, 2);
     setEnc.setUint16(2, encodings.length, Endian.big);
@@ -1115,10 +1199,38 @@ class VncRfbClient {
               }
               continue;
             } else if (encoding == -239) {
-              // Cursor / RichCursor pseudo-encoding: consume pixel + bitmask bytes to keep stream aligned
-              if (rw > 0 && rh > 0) {
-                final cursorBytes = rw * rh * 4 + ((rw + 7) ~/ 8) * rh;
-                await reader.readExact(cursorBytes);
+              // Cursor / RichCursor pseudo-encoding (RFC 6143 Section 7.8.1)
+              if (rw <= 0 || rh <= 0) {
+                onCursorChanged?.call(null, 0, 0, 0, 0, true, false);
+              } else {
+                final pixLen = rw * rh * 4;
+                final maskLen = ((rw + 7) ~/ 8) * rh;
+                final bgraBytes = await reader.readExact(pixLen);
+                final maskBytes = await reader.readExact(maskLen);
+                final cursorCb = onCursorChanged;
+                if (cursorCb != null && rw <= 384 && rh <= 384) {
+                  bool anyOpaque = false;
+                  for (int i = 0; i < maskBytes.length; i++) {
+                    if (maskBytes[i] != 0) {
+                      anyOpaque = true;
+                      break;
+                    }
+                  }
+                  if (!anyOpaque) {
+                    cursorCb(null, rw, rh, 0, 0, true, false);
+                  } else {
+                    final hotX = rx.clamp(0, rw - 1);
+                    final hotY = ry.clamp(0, rh - 1);
+                    final rgba = decodeRichCursorRgba(bgraBytes, maskBytes, rw, rh);
+                    final isIBeam = classifyIBeamCursor(rgba, rw, rh, hotX, hotY);
+                    final c = Completer<ui.Image>();
+                    ui.decodeImageFromPixels(rgba, rw, rh, ui.PixelFormat.rgba8888, c.complete);
+                    final cursorImg = await c.future;
+                    if (_running) {
+                      cursorCb(cursorImg, rw, rh, hotX, hotY, false, isIBeam);
+                    }
+                  }
+                }
               }
               continue;
             } else if (encoding == 0) {
@@ -1326,7 +1438,7 @@ class VncRfbClient {
     final sock = _socket;
     if (sock == null || !_running || !supportsExtendedDesktopSize) return false;
     final alignedW = (((newWidth.clamp(320, 4096) + 3) ~/ 4) * 4);
-    final alignedH = (((newHeight.clamp(240, 4096) + 1) ~/ 2) * 2);
+    final alignedH = (((newHeight.clamp(320, 4096) + 1) ~/ 2) * 2);
     if ((alignedW - width).abs() < 4 && (alignedH - height).abs() < 4) return true;
 
     final pkt = ByteData(24);

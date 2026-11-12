@@ -1,15 +1,24 @@
 package com.jaladesk.jaladesk_mobile
 
 import android.app.Activity
+import android.app.KeyguardManager
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.hardware.biometrics.BiometricManager
+import android.hardware.biometrics.BiometricPrompt
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -17,17 +26,26 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.security.KeyStore
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL_NAME = "com.jaladesk.app/native"
+        private const val KEK_ALIAS = "jaladesk_enclave_kek_v1"
+        private const val AKS_PREFIX = "aks:v1:"
         private const val REQ_PICK_FILES = 4101
         private const val REQ_PICK_DIRECTORY = 4102
     }
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private var pendingPickResult: MethodChannel.Result? = null
+    private var biometricCancelSignal: CancellationSignal? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,6 +127,50 @@ class MainActivity : FlutterActivity() {
                                 "cachePath" to cacheDir.absolutePath
                             )
                         )
+                    }
+                    "wrapMasterSecret" -> {
+                        val plainBase64 = call.argument<String>("plainBase64") ?: ""
+                        if (plainBase64.isEmpty()) {
+                            result.error("INVALID_ARG", "plainBase64 is required", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            result.success(wrapMasterSecretInHardware(plainBase64))
+                        } catch (e: Exception) {
+                            result.error("KEYSTORE_WRAP_FAILED", e.message ?: "Hardware Keystore wrap failed", null)
+                        }
+                    }
+                    "unwrapMasterSecret" -> {
+                        val wrapped = call.argument<String>("wrapped") ?: ""
+                        if (!wrapped.startsWith(AKS_PREFIX)) {
+                            result.error("INVALID_ARG", "Unsupported Hardware Keystore envelope", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            result.success(unwrapMasterSecretInHardware(wrapped))
+                        } catch (e: Exception) {
+                            result.error("KEYSTORE_UNWRAP_FAILED", e.message ?: "Hardware Keystore unwrap failed", null)
+                        }
+                    }
+                    "getSecurityHardwareStatus" -> {
+                        val strongBoxSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                            packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
+                        result.success(
+                            mapOf(
+                                "keystoreAvailable" to true,
+                                "strongBoxBacked" to strongBoxSupported,
+                                "biometricAvailable" to checkBiometricAvailable()
+                            )
+                        )
+                    }
+                    "isBiometricAvailable" -> {
+                        result.success(checkBiometricAvailable())
+                    }
+                    "authenticateBiometric" -> {
+                        val title = call.argument<String>("title") ?: "Unlock JalaDesk Vault"
+                        val subtitle = call.argument<String>("subtitle")
+                            ?: "Verify your identity to unseal encrypted credentials & 2FA"
+                        promptHardwareBiometric(title, subtitle, result)
                     }
                     else -> result.notImplemented()
                 }
@@ -329,7 +391,145 @@ class MainActivity : FlutterActivity() {
         return candidate
     }
 
+    private fun getOrCreateHardwareKek(): SecretKey {
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        if (keyStore.containsAlias(KEK_ALIAS)) {
+            val existing = (keyStore.getEntry(KEK_ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+            if (existing != null) return existing
+        }
+
+        val buildSpec = { useStrongBox: Boolean ->
+            val builder = KeyGenParameterSpec.Builder(
+                KEK_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+            if (useStrongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                builder.setIsStrongBoxBacked(true)
+            }
+            builder.build()
+        }
+
+        val keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
+        ) {
+            try {
+                keyGen.init(buildSpec(true))
+                return keyGen.generateKey()
+            } catch (_: Exception) {
+                // Automatic fallback to standard TEE AndroidKeyStore when StrongBox chip rejects GCM or is full
+            }
+        }
+        keyGen.init(buildSpec(false))
+        return keyGen.generateKey()
+    }
+
+    private fun wrapMasterSecretInHardware(plainBase64: String): String {
+        val plainBytes = Base64.decode(plainBase64, Base64.DEFAULT)
+        val secretKey = getOrCreateHardwareKek()
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+        val iv = cipher.iv
+        val ciphertext = cipher.doFinal(plainBytes)
+        val ivB64 = Base64.encodeToString(iv, Base64.NO_WRAP)
+        val ctB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP)
+        return "$AKS_PREFIX$ivB64:$ctB64"
+    }
+
+    private fun unwrapMasterSecretInHardware(wrapped: String): String {
+        val body = wrapped.removePrefix(AKS_PREFIX)
+        val sep = body.indexOf(':')
+        require(sep > 0) { "Malformed AndroidKeyStore envelope" }
+        val iv = Base64.decode(body.substring(0, sep), Base64.DEFAULT)
+        val ciphertext = Base64.decode(body.substring(sep + 1), Base64.DEFAULT)
+        val secretKey = getOrCreateHardwareKek()
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
+        val plainBytes = cipher.doFinal(ciphertext)
+        return Base64.encodeToString(plainBytes, Base64.NO_WRAP)
+    }
+
+    private fun checkBiometricAvailable(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        if (km?.isKeyguardSecure != true) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val bm = getSystemService(BiometricManager::class.java)
+            if (bm != null) {
+                val res = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    bm.canAuthenticate(
+                        BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                            BiometricManager.Authenticators.BIOMETRIC_WEAK
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    bm.canAuthenticate()
+                }
+                return res == BiometricManager.BIOMETRIC_SUCCESS
+            }
+        }
+        @Suppress("DEPRECATION")
+        return packageManager.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT) ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                (packageManager.hasSystemFeature(PackageManager.FEATURE_FACE) ||
+                    packageManager.hasSystemFeature(PackageManager.FEATURE_IRIS)))
+    }
+
+    private fun promptHardwareBiometric(
+        title: String,
+        subtitle: String,
+        result: MethodChannel.Result
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || !checkBiometricAvailable()) {
+            result.success(false)
+            return
+        }
+        biometricCancelSignal?.cancel()
+        val cancelSignal = CancellationSignal()
+        biometricCancelSignal = cancelSignal
+        val completed = AtomicBoolean(false)
+
+        try {
+            val prompt = BiometricPrompt.Builder(this)
+                .setTitle(title)
+                .setSubtitle(subtitle)
+                .setNegativeButton("Use PIN", mainExecutor) { _, _ ->
+                    if (completed.compareAndSet(false, true)) {
+                        runOnUiThread { result.success(false) }
+                    }
+                }
+                .build()
+
+            prompt.authenticate(
+                cancelSignal,
+                mainExecutor,
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(authResult: BiometricPrompt.AuthenticationResult?) {
+                        if (completed.compareAndSet(false, true)) {
+                            runOnUiThread { result.success(true) }
+                        }
+                    }
+
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence?) {
+                        if (completed.compareAndSet(false, true)) {
+                            runOnUiThread { result.success(false) }
+                        }
+                    }
+                }
+            )
+        } catch (_: Exception) {
+            if (completed.compareAndSet(false, true)) {
+                result.success(false)
+            }
+        }
+    }
+
     override fun onDestroy() {
+        biometricCancelSignal?.cancel()
+        biometricCancelSignal = null
         ioExecutor.shutdownNow()
         super.onDestroy()
     }

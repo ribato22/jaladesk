@@ -113,6 +113,31 @@ typedef _JalaRdpDestroyDart = void Function(ffi.Pointer<ffi.Void> handle);
 typedef _JalaRdpSelftestNtlmNative = ffi.Int32 Function();
 typedef _JalaRdpSelftestNtlmDart = int Function();
 
+typedef _JalaRdpPollCursorNative = ffi.Int32 Function(
+  ffi.Pointer<ffi.Void> handle,
+  ffi.Uint64 lastSeq,
+  ffi.Pointer<ffi.Uint8> outRgba,
+  ffi.Int32 maxBytes,
+  ffi.Pointer<ffi.Int32> outW,
+  ffi.Pointer<ffi.Int32> outH,
+  ffi.Pointer<ffi.Int32> outHotX,
+  ffi.Pointer<ffi.Int32> outHotY,
+  ffi.Pointer<ffi.Int32> outFlags,
+  ffi.Pointer<ffi.Uint64> outSeq,
+);
+typedef _JalaRdpPollCursorDart = int Function(
+  ffi.Pointer<ffi.Void> handle,
+  int lastSeq,
+  ffi.Pointer<ffi.Uint8> outRgba,
+  int maxBytes,
+  ffi.Pointer<ffi.Int32> outW,
+  ffi.Pointer<ffi.Int32> outH,
+  ffi.Pointer<ffi.Int32> outHotX,
+  ffi.Pointer<ffi.Int32> outHotY,
+  ffi.Pointer<ffi.Int32> outFlags,
+  ffi.Pointer<ffi.Uint64> outSeq,
+);
+
 /// FreeRDP 3.x Mouse Event Flags (`freerdp/input.h`)
 class RdpMouseFlags {
   static const int move = 0x0800; // PTR_FLAGS_MOVE
@@ -144,11 +169,22 @@ class RdpFfiClient {
   final int initialHeight;
   final void Function(ui.Image image, int width, int height, String status) onFrame;
   final void Function(String status, {bool isError}) onStatus;
+  final void Function(
+    ui.Image? cursorImage,
+    int width,
+    int height,
+    int hotX,
+    int hotY,
+    bool isHidden,
+    bool isTextIBeam,
+  )? onCursorChanged;
 
   ffi.Pointer<ffi.Void> _handle = ffi.nullptr;
   Timer? _pollTimer;
   int _lastFrameSeq = 0;
+  int _lastCursorSeq = 0;
   bool _decodingFrame = false;
+  bool _decodingCursor = false;
   bool _disposed = false;
 
   int width = 1280;
@@ -163,6 +199,15 @@ class RdpFfiClient {
   ffi.Pointer<ffi.Uint8>? _pFrameBuf;
   int _frameBufCap = 0;
 
+  ffi.Pointer<ffi.Int32>? _pCurW;
+  ffi.Pointer<ffi.Int32>? _pCurH;
+  ffi.Pointer<ffi.Int32>? _pCurHotX;
+  ffi.Pointer<ffi.Int32>? _pCurHotY;
+  ffi.Pointer<ffi.Int32>? _pCurFlags;
+  ffi.Pointer<ffi.Uint64>? _pCurSeq;
+  ffi.Pointer<ffi.Uint8>? _pCurBuf;
+  int _curBufCap = 0;
+
   late final _JalaRdpCreateDart _fnCreate;
   late final _JalaRdpRequestResolutionDart _fnRequestResolution;
   late final _JalaRdpGetStateDart _fnGetState;
@@ -171,6 +216,7 @@ class RdpFfiClient {
   late final _JalaRdpSendKeyScancodeDart _fnSendKeyScancode;
   late final _JalaRdpSendUnicodeDart _fnSendUnicode;
   late final _JalaRdpDestroyDart _fnDestroy;
+  _JalaRdpPollCursorDart? _fnPollCursor;
 
   RdpFfiClient({
     required this.host,
@@ -182,6 +228,7 @@ class RdpFfiClient {
     this.initialHeight = 800,
     required this.onFrame,
     required this.onStatus,
+    this.onCursorChanged,
   }) {
     width = initialWidth;
     height = initialHeight;
@@ -259,6 +306,22 @@ class RdpFfiClient {
     }
   }
 
+  /// Verifies `jala_rdp_poll_cursor` C ABI symbol is exported in the loaded FreeRDP native binary.
+  static bool get hasPollCursorSymbol {
+    final lib = _loadLibrary();
+    if (lib == null) return false;
+    try {
+      final fn = lib.lookupFunction<_JalaRdpPollCursorNative, _JalaRdpPollCursorDart>(
+        'jala_rdp_poll_cursor',
+      );
+      return fn(ffi.nullptr, 0, ffi.nullptr, 0, ffi.nullptr, ffi.nullptr, ffi.nullptr, ffi.nullptr, ffi.nullptr,
+              ffi.nullptr) ==
+          -1;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static String _resolveWritableConfigDir() {
     if (Platform.isAndroid) {
       for (final candidate in [
@@ -305,11 +368,26 @@ class RdpFfiClient {
     _fnSendUnicode =
         lib.lookupFunction<_JalaRdpSendUnicodeNative, _JalaRdpSendUnicodeDart>('jaladesk_rdp_send_unicode');
     _fnDestroy = lib.lookupFunction<_JalaRdpDestroyNative, _JalaRdpDestroyDart>('jaladesk_rdp_destroy');
+    try {
+      _fnPollCursor = lib.lookupFunction<_JalaRdpPollCursorNative, _JalaRdpPollCursorDart>('jala_rdp_poll_cursor');
+    } catch (_) {
+      _fnPollCursor = null;
+    }
 
     _pWidth = calloc<ffi.Int32>();
     _pHeight = calloc<ffi.Int32>();
     _pSeq = calloc<ffi.Uint64>();
     _pStatus = calloc<ffi.Uint8>(512).cast<Utf8>();
+    if (_fnPollCursor != null) {
+      _pCurW = calloc<ffi.Int32>();
+      _pCurH = calloc<ffi.Int32>();
+      _pCurHotX = calloc<ffi.Int32>();
+      _pCurHotY = calloc<ffi.Int32>();
+      _pCurFlags = calloc<ffi.Int32>();
+      _pCurSeq = calloc<ffi.Uint64>();
+      _curBufCap = 96 * 96 * 4;
+      _pCurBuf = calloc<ffi.Uint8>(_curBufCap);
+    }
 
     final cHost = host.toNativeUtf8();
     final cDomain = domain.toNativeUtf8();
@@ -390,7 +468,9 @@ class RdpFfiClient {
     _pollTimer?.cancel();
     // 60fps low-latency frame pump (16ms cadence + immediate catch-up when decode completes)
     _pollTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
-      if (_disposed || _handle == ffi.nullptr || _decodingFrame) return;
+      if (_disposed || _handle == ffi.nullptr) return;
+      _pollCursorOnce();
+      if (_decodingFrame) return;
       _pollStateOnce();
       if (state == -1 || state == 2) {
         onStatus(statusText, isError: state == -1);
@@ -403,6 +483,80 @@ class RdpFfiClient {
         _pullAndDecodeFrame();
       }
     });
+  }
+
+  void _pollCursorOnce() {
+    final pollFn = _fnPollCursor;
+    final cb = onCursorChanged;
+    if (_disposed || _handle == ffi.nullptr || pollFn == null || cb == null || _decodingCursor) {
+      return;
+    }
+    int rc = pollFn(
+      _handle,
+      _lastCursorSeq,
+      _pCurBuf!,
+      _curBufCap,
+      _pCurW!,
+      _pCurH!,
+      _pCurHotX!,
+      _pCurHotY!,
+      _pCurFlags!,
+      _pCurSeq!,
+    );
+    if (rc <= 0) return;
+
+    final cw = _pCurW!.value;
+    final ch = _pCurH!.value;
+    final hotX = _pCurHotX!.value;
+    final hotY = _pCurHotY!.value;
+    final flags = _pCurFlags!.value;
+    final newSeq = _pCurSeq!.value;
+    final isHidden = (flags & 1) != 0;
+    final isIBeam = (flags & 2) != 0;
+    final hasBitmap = (flags & 4) != 0;
+
+    if (hasBitmap && cw > 0 && ch > 0) {
+      final needed = cw * ch * 4;
+      if (needed > _curBufCap && needed <= 384 * 384 * 4) {
+        if (_pCurBuf != null) calloc.free(_pCurBuf!);
+        _curBufCap = needed;
+        _pCurBuf = calloc<ffi.Uint8>(_curBufCap);
+        rc = pollFn(
+          _handle,
+          _lastCursorSeq,
+          _pCurBuf!,
+          _curBufCap,
+          _pCurW!,
+          _pCurH!,
+          _pCurHotX!,
+          _pCurHotY!,
+          _pCurFlags!,
+          _pCurSeq!,
+        );
+        if (rc <= 0) return;
+      }
+      if (needed <= _curBufCap) {
+        _lastCursorSeq = newSeq;
+        _decodingCursor = true;
+        final rgbaBytes = Uint8List.fromList(_pCurBuf!.asTypedList(needed));
+        ui.decodeImageFromPixels(
+          rgbaBytes,
+          cw,
+          ch,
+          ui.PixelFormat.rgba8888,
+          (ui.Image img) {
+            _decodingCursor = false;
+            if (!_disposed) {
+              cb(img, cw, ch, hotX, hotY, isHidden, isIBeam);
+            }
+          },
+        );
+        return;
+      }
+    }
+
+    _lastCursorSeq = newSeq;
+    cb(null, cw, ch, hotX, hotY, isHidden, isIBeam);
   }
 
   void _pullAndDecodeFrame() {
@@ -710,10 +864,24 @@ class RdpFfiClient {
     if (_pSeq != null) calloc.free(_pSeq!);
     if (_pStatus != null) calloc.free(_pStatus!);
     if (_pFrameBuf != null) calloc.free(_pFrameBuf!);
+    if (_pCurW != null) calloc.free(_pCurW!);
+    if (_pCurH != null) calloc.free(_pCurH!);
+    if (_pCurHotX != null) calloc.free(_pCurHotX!);
+    if (_pCurHotY != null) calloc.free(_pCurHotY!);
+    if (_pCurFlags != null) calloc.free(_pCurFlags!);
+    if (_pCurSeq != null) calloc.free(_pCurSeq!);
+    if (_pCurBuf != null) calloc.free(_pCurBuf!);
     _pWidth = null;
     _pHeight = null;
     _pSeq = null;
     _pStatus = null;
     _pFrameBuf = null;
+    _pCurW = null;
+    _pCurH = null;
+    _pCurHotX = null;
+    _pCurHotY = null;
+    _pCurFlags = null;
+    _pCurSeq = null;
+    _pCurBuf = null;
   }
 }
