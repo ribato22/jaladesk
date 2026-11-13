@@ -1172,6 +1172,10 @@ class VncRfbClient {
           final hdr = await reader.readExact(3);
           final numRects = ByteData.sublistView(hdr).getUint16(1, Endian.big);
           bool drewPixels = false;
+          bool geometryChangedInBatch = false;
+          bool triggerInitialResizeAfterBatch = false;
+          int? retryResizeW;
+          int? retryResizeH;
           for (int r = 0; r < numRects; r++) {
             final rectHdr = await reader.readExact(12);
             final rbd = ByteData.sublistView(rectHdr);
@@ -1212,7 +1216,7 @@ class VncRfbClient {
               // rx = reason (0=server layout, 1=client requested), ry = status (0=no error)
               if (rx == 1 && ry != 0) {
                 // Server rejected client resize (e.g. tall portrait height > server max Xrandr/Xvnc framebuffer).
-                // Retry ONCE proportionally scaled down to maxEdge = 1280 (even dimensions).
+                // Retry ONCE proportionally scaled down to maxEdge = 1280 (multiple-of-4 dimensions).
                 if (!_retriedScaledDownResize &&
                     _lastRequestedWidth > 0 &&
                     _lastRequestedHeight > 0) {
@@ -1220,9 +1224,8 @@ class VncRfbClient {
                   final maxDim = max(_lastRequestedWidth, _lastRequestedHeight);
                   if (maxDim > 1280) {
                     final scale = 1280.0 / maxDim;
-                    final retryW = (((_lastRequestedWidth * scale).round().clamp(320, 1280) + 3) ~/ 4) * 4;
-                    final retryH = (((_lastRequestedHeight * scale).round().clamp(320, 1280) + 1) ~/ 2) * 2;
-                    requestResolution(retryW, retryH, isFallbackRetry: true);
+                    retryResizeW = (((_lastRequestedWidth * scale).round().clamp(320, 1280)) ~/ 4) * 4;
+                    retryResizeH = (((_lastRequestedHeight * scale).round().clamp(320, 1280)) ~/ 4) * 4;
                   }
                 }
               } else {
@@ -1236,7 +1239,7 @@ class VncRfbClient {
                   for (int i = 3; i < _rgbaBuffer.length; i += 4) {
                     _rgbaBuffer[i] = 255;
                   }
-                  _sendFramebufferUpdateRequest(incremental: false);
+                  geometryChangedInBatch = true;
                 }
               }
               onDesktopGeometryChanged?.call(width, height, true);
@@ -1244,7 +1247,11 @@ class VncRfbClient {
                   initialTargetWidth != null &&
                   initialTargetHeight != null) {
                 _appliedInitialTargetSize = true;
-                requestResolution(initialTargetWidth!, initialTargetHeight!);
+                final alignedInitW = (initialTargetWidth!.clamp(320, 4096) ~/ 4) * 4;
+                final alignedInitH = (initialTargetHeight!.clamp(320, 4096) ~/ 4) * 4;
+                if ((alignedInitW - width).abs() >= 8 || (alignedInitH - height).abs() >= 8) {
+                  triggerInitialResizeAfterBatch = true;
+                }
               }
               continue;
             } else if (encoding == -223) {
@@ -1256,7 +1263,7 @@ class VncRfbClient {
                 for (int i = 3; i < _rgbaBuffer.length; i += 4) {
                   _rgbaBuffer[i] = 255;
                 }
-                _sendFramebufferUpdateRequest(incremental: false);
+                geometryChangedInBatch = true;
                 onDesktopGeometryChanged?.call(width, height, supportsExtendedDesktopSize);
               }
               continue;
@@ -1430,12 +1437,22 @@ class VncRfbClient {
               }
             }
           }
-          if (drewPixels || !_receivedAnyFrame) {
+          if (drewPixels || (!_receivedAnyFrame && !geometryChangedInBatch && !triggerInitialResizeAfterBatch)) {
             _receivedAnyFrame = true;
             _initialFramePulse?.cancel();
             await _emitDecodedImage();
           }
-          _sendFramebufferUpdateRequest(incremental: true);
+          if (retryResizeW != null && retryResizeH != null) {
+            requestResolution(retryResizeW, retryResizeH, isFallbackRetry: true);
+          } else if (triggerInitialResizeAfterBatch &&
+              initialTargetWidth != null &&
+              initialTargetHeight != null) {
+            requestResolution(initialTargetWidth!, initialTargetHeight!);
+          } else if (geometryChangedInBatch) {
+            _sendFramebufferUpdateRequest(incremental: false);
+          } else {
+            _sendFramebufferUpdateRequest(incremental: true);
+          }
         } else if (msgType == 1) {
           final hdr = await reader.readExact(5);
           final nColors = ByteData.sublistView(hdr).getUint16(3, Endian.big);
@@ -1502,8 +1519,8 @@ class VncRfbClient {
   bool requestResolution(int newWidth, int newHeight, {bool isFallbackRetry = false}) {
     final sock = _socket;
     if (sock == null || !_running || !supportsExtendedDesktopSize) return false;
-    final alignedW = (((newWidth.clamp(320, 4096) + 3) ~/ 4) * 4);
-    final alignedH = (((newHeight.clamp(320, 4096) + 1) ~/ 2) * 2);
+    final alignedW = ((newWidth.clamp(320, 4096) ~/ 4) * 4).clamp(320, 4096);
+    final alignedH = ((newHeight.clamp(320, 4096) ~/ 4) * 4).clamp(320, 4096);
     if (!isFallbackRetry && (alignedW - width).abs() < 4 && (alignedH - height).abs() < 4) return true;
 
     _lastRequestedWidth = alignedW;

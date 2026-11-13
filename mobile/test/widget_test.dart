@@ -353,8 +353,8 @@ void main() {
     // 5. Switch to Vault & 2FA Tab
     await tester.tap(find.text('Vault & 2FA'));
     await tester.pumpAndSettle();
-    expect(find.text('RFC 6238 TOTP 2FA Authenticator'), findsOneWidget);
-    expect(find.textContaining('Biometric Enclave Unlock'), findsOneWidget);
+    expect(find.text('Authenticator'), findsOneWidget);
+    expect(find.textContaining('Biometric Unlock'), findsOneWidget);
 
     // 6. Open Zero-Trust QR Pairing modal
     await tester.tap(find.byIcon(Icons.qr_code_scanner));
@@ -377,8 +377,8 @@ void main() {
       await tester.tap(find.text(tab));
       await tester.pumpAndSettle();
     }
-    expect(find.text('Zero-Trust Hardware Enclave'), findsOneWidget);
-    expect(find.text('RFC 6238 TOTP 2FA Authenticator'), findsOneWidget);
+    expect(find.text('Security Vault'), findsOneWidget);
+    expect(find.text('Authenticator'), findsOneWidget);
   });
 
   testWidgets(
@@ -1046,7 +1046,7 @@ void main() {
     // 1. Go to Vault & 2FA and add a Reusable Credential
     await tester.tap(find.text('Vault & 2FA'));
     await tester.pumpAndSettle();
-    expect(find.text('Reusable Credential Vault'), findsOneWidget);
+    expect(find.text('Saved Credentials'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('btn_add_vault_credential')));
     await tester.pumpAndSettle();
@@ -1761,7 +1761,7 @@ void main() {
     }
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('vault_pin_lock_screen')), findsNothing);
-    expect(find.text('Zero-Trust Hardware Enclave'), findsOneWidget);
+    expect(find.text('Security Vault'), findsOneWidget);
 
     await tester.runAsync(() async {
       for (final s in serverSockets) {
@@ -2058,7 +2058,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    // 1. Verify VNC starts cleanly in `Fit` (`aspectFit` — 100% symmetric desktop visible) and cycles `Fit` -> `Fill` -> `Pan`!
+    // 1. Verify VNC starts cleanly in `Fit` (`aspectFit` — 100% symmetric desktop visible) and cycles `Fit` -> `Fill` -> `1:1` (all proportional, zero stretch)!
     expect(
       find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Fit')),
       findsOneWidget,
@@ -2072,7 +2072,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('btn_quick_cycle_fit')));
     await tester.pump();
     expect(
-      find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('Pan')),
+      find.descendant(of: find.byKey(const ValueKey('btn_quick_cycle_fit')), matching: find.text('1:1')),
       findsOneWidget,
     );
 
@@ -2410,7 +2410,7 @@ void main() {
     expect(canvasRect.left, closeTo(0.0, 0.5));
     expect(canvasRect.width, closeTo(915.0, 0.5));
 
-    // Verify quick fit cycle: Fit -> Fill -> Pan -> 1:1 -> Fit
+    // Verify quick fit cycle: Fit -> Fill -> 1:1 -> Fit (zero non-uniform stretch modes!)
     final cycleBtn = find.byKey(const ValueKey('btn_quick_cycle_fit'));
     await tester.ensureVisible(cycleBtn);
     await tester.pumpAndSettle();
@@ -2418,9 +2418,6 @@ void main() {
     await tester.tap(cycleBtn);
     await tester.pump();
     expect(find.descendant(of: cycleBtn, matching: find.text('Fill')), findsOneWidget);
-    await tester.tap(cycleBtn);
-    await tester.pump();
-    expect(find.descendant(of: cycleBtn, matching: find.text('Pan')), findsOneWidget);
     await tester.tap(cycleBtn);
     await tester.pump();
     expect(find.descendant(of: cycleBtn, matching: find.text('1:1')), findsOneWidget);
@@ -2797,8 +2794,8 @@ void main() {
     await tester.tap(find.text('Vault & 2FA'));
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Trusted SSH Host Keys (TOFU Pinning)'));
-    expect(find.text('Trusted SSH Host Keys (TOFU Pinning)'), findsOneWidget);
+    await tester.ensureVisible(find.text('Trusted SSH Keys'));
+    expect(find.text('Trusted SSH Keys'), findsOneWidget);
     expect(find.text('LOCAL DEVICE ONLY • NOT GLOBAL'), findsNothing);
     expect(find.textContaining('never synced globally'), findsNothing);
     expect(find.textContaining('10.28.99.203'), findsNothing);
@@ -3010,7 +3007,7 @@ void main() {
     // Open Vault & 2FA tab and configure a 6-digit PIN (`147258`)
     await tester.tap(find.text('Vault & 2FA'));
     await tester.pumpAndSettle();
-    expect(find.text('Zero-Trust Hardware Enclave'), findsOneWidget);
+    expect(find.text('Security Vault'), findsOneWidget);
 
     await tester.ensureVisible(find.byKey(const Key('btn_configure_vault_pin')));
     await tester.pumpAndSettle();
@@ -3043,8 +3040,8 @@ void main() {
 
     // 2. Warm Shell Curtain: underlying shell is completely hidden from UI/hit-testing/finder,
     //    yet stays warm & mounted offstage so unlock has 0ms cold-mount spike!
-    expect(find.text('Zero-Trust Hardware Enclave'), findsNothing);
-    expect(find.text('Zero-Trust Hardware Enclave', skipOffstage: false), findsOneWidget);
+    expect(find.text('Security Vault'), findsNothing);
+    expect(find.text('Security Vault', skipOffstage: false), findsOneWidget);
 
     // 3. True 0ms Finger-Down (`PointerDown`) Registration:
     //    Press finger down on `btn_pin_digit_1` WITHOUT calling `gesture1.up()` yet!
@@ -3081,7 +3078,7 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.byKey(const ValueKey('vault_pin_lock_screen')), findsNothing);
-    expect(find.text('Zero-Trust Hardware Enclave'), findsOneWidget);
+    expect(find.text('Security Vault'), findsOneWidget);
     await gesture6.up();
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
@@ -3776,6 +3773,270 @@ void main() {
     await tester.tap(find.byKey(const Key('btn_confirm_clear_vault')));
     await tester.pumpAndSettle();
     expect(shellKey.currentState!.hosts, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'v1.13.0+15 Test A: Proportional Fit & Fill guarantee 0.000 stretch across 1920x1080 & 1024x768 on Oppo Find X9 Pro 20:9 viewports + cursor-follow pan',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final shellKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
+    await tester.pumpAndSettle();
+    final state = shellKey.currentState!;
+
+    for (final (srcW, srcH) in const <(int, int)>[(1920, 1080), (1024, 768)]) {
+      final expectedAspect = srcW / srcH;
+      state.setServerDimensionsForVerification(srcW, srcH);
+
+      for (final vp in const <Size>[Size(915, 412), Size(412, 915)]) {
+        // 1. Fit (`aspectFit`) — 100% visible inside viewport, exact source aspect ratio
+        state.setDisplayModeForVerification(fit: JumpCanvasFitMode.aspectFit);
+        final fitRect = state.computeRenderedDesktopRectForVerification(vp);
+        expect(fitRect.width / fitRect.height, closeTo(expectedAspect, 0.001));
+        expect(fitRect.width, lessThanOrEqualTo(vp.width + 0.01));
+        expect(fitRect.height, lessThanOrEqualTo(vp.height + 0.01));
+
+        // 2. Fill (`cropCover`) — covers 100% of viewport with ZERO non-uniform distortion!
+        state.setDisplayModeForVerification(fit: JumpCanvasFitMode.cropCover);
+        state.setCursorNormForVerification(const Offset(0.5, 0.5));
+        final fillCenter = state.computeRenderedDesktopRectForVerification(vp);
+        expect(fillCenter.width / fillCenter.height, closeTo(expectedAspect, 0.001));
+        expect(fillCenter.width, greaterThanOrEqualTo(vp.width - 0.01));
+        expect(fillCenter.height, greaterThanOrEqualTo(vp.height - 0.01));
+
+        // 3. Cursor-following pan reaches top-left (0, 0) and bottom-right cleanly
+        state.setCursorNormForVerification(const Offset(0.0, 0.0));
+        final fillTopLeft = state.computeRenderedDesktopRectForVerification(vp);
+        expect(fillTopLeft.left, closeTo(0.0, 0.01));
+        expect(fillTopLeft.top, closeTo(0.0, 0.01));
+
+        state.setCursorNormForVerification(const Offset(1.0, 1.0));
+        final fillBottomRight = state.computeRenderedDesktopRectForVerification(vp);
+        expect(fillBottomRight.right, closeTo(vp.width, 0.01));
+        expect(fillBottomRight.bottom, closeTo(vp.height, 0.01));
+      }
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  test(
+      'v1.13.0+15 Test B: Connection-level Jump Host without Folder Jump Host buffers VNC RFB server-first greeting & evicts stale pooled SSH sessions',
+      () async {
+    final sshdBin = File('/usr/sbin/sshd');
+    final sshKeygenBin = File('/usr/bin/ssh-keygen');
+    if (!sshdBin.existsSync() || !sshKeygenBin.existsSync()) return;
+
+    // Server-speaks-first fake VNC RFB server: sends `RFB 003.008\n` immediately on TCP accept!
+    final rfbServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(rfbServer.close);
+    rfbServer.listen((Socket client) {
+      client.setOption(SocketOption.tcpNoDelay, true);
+      client.add(ascii.encode('RFB 003.008\n'));
+      client.listen((data) => client.add(data), onDone: () => client.close());
+    });
+
+    final tmpDir = await Directory.systemTemp.createTemp('jaladesk_v113_jump_');
+    addTearDown(() async {
+      try {
+        if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+      } on FileSystemException catch (_) {}
+    });
+    final hostKeyPath = '${tmpDir.path}/host_ed25519';
+    final clientKeyPath = '${tmpDir.path}/id_ed25519';
+    await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', hostKeyPath]);
+    await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', clientKeyPath]);
+    final pem = await File(clientKeyPath).readAsString();
+    final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final sshPort = probe.port;
+    await probe.close();
+
+    final cfgPath = '${tmpDir.path}/sshd.conf';
+    await File(cfgPath).writeAsString([
+      'Port $sshPort',
+      'ListenAddress 127.0.0.1',
+      'HostKey $hostKeyPath',
+      'AuthorizedKeysFile $clientKeyPath.pub',
+      'PasswordAuthentication no',
+      'PubkeyAuthentication yes',
+      'UsePAM no',
+      'AllowTcpForwarding yes',
+      'PermitOpen any',
+      'StrictModes no',
+      'PidFile ${tmpDir.path}/sshd.pid',
+    ].join('\n'));
+
+    final sshdProc = await Process.start(sshdBin.path, ['-D', '-e', '-f', cfgPath]);
+    addTearDown(() => sshdProc.kill());
+    for (int i = 0; i < 30; i++) {
+      try {
+        final s = await Socket.connect('127.0.0.1', sshPort, timeout: const Duration(milliseconds: 100));
+        s.destroy();
+        break;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+      }
+    }
+
+    final currentUser =
+        Platform.environment['USER'] ?? (await Process.run('whoami', [])).stdout.toString().trim();
+    final hop = BastionHopSpec(
+      id: 'jh-conn-only',
+      name: 'Conn-Level Bastion',
+      address: '127.0.0.1',
+      port: sshPort,
+      username: currentUser,
+      privateKeyPem: pem,
+    );
+
+    final pool = BastionSessionPool();
+    addTearDown(pool.disposeAll);
+
+    // 1. Pre-warmed channel buffers immediate `RFB 003.008\n` server greeting with ZERO byte loss!
+    final chain1 = await pool.acquire([hop]);
+    final tunnel1 = await chain1.startLocalPortForward(
+      remoteHost: '127.0.0.1',
+      remotePort: rfbServer.port,
+      prewarmChannel: true,
+      verifyInitialChannel: true,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 60)); // Ensure RFB greeting arrived early
+    final localClient = await Socket.connect('127.0.0.1', tunnel1.localPort);
+    final greeting = await localClient.first.timeout(const Duration(seconds: 4));
+    expect(ascii.decode(greeting), equals('RFB 003.008\n'));
+    expect(tunnel1.usedPrewarmedChannel, isTrue);
+    await localClient.close();
+    await tunnel1.close();
+
+    // 2. Stale/dead pooled SSH chain throws directly in `startLocalPortForward` & evicts cleanly!
+    await chain1.dispose();
+    await expectLater(
+      chain1.startLocalPortForward(
+        remoteHost: '127.0.0.1',
+        remotePort: rfbServer.port,
+        prewarmChannel: true,
+        verifyInitialChannel: true,
+      ),
+      throwsA(anything),
+    );
+    await pool.evictByHops([hop]);
+    final chain2 = await pool.acquire([hop]);
+    expect(identical(chain1, chain2), isFalse);
+    final tunnel2 = await chain2.startLocalPortForward(
+      remoteHost: '127.0.0.1',
+      remotePort: rfbServer.port,
+      prewarmChannel: true,
+      verifyInitialChannel: true,
+    );
+    final localClient2 = await Socket.connect('127.0.0.1', tunnel2.localPort);
+    final greeting2 = await localClient2.first.timeout(const Duration(seconds: 4));
+    expect(ascii.decode(greeting2), equals('RFB 003.008\n'));
+    await localClient2.close();
+    await tunnel2.close();
+  });
+
+  testWidgets(
+      'v1.13.0+15 Test C: Connection-level Jump Host in unconfigured folder, Full-Screen VaultPinSetupSheet & VaultPinLockView (Portrait + Landscape), and Minimalist Vault Tab',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final shellKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
+    await tester.pumpAndSettle();
+    final state = shellKey.currentState!;
+
+    // 1. Add connection inside `'Unconfigured Office'` (NO FolderGatewayConfig!) with inline `+ New Jump Host`
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_connection')));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.widgetWithText(TextField, 'Display Name (optional)'), 'VNC via Jump Box');
+    await tester.enterText(find.widgetWithText(TextField, 'Host / IP Address *'), '10.90.1.25');
+    await tester.enterText(find.byKey(const Key('host_editor_folder')), 'Unconfigured Office');
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.byKey(const ValueKey('btn_inline_new_jump_host')));
+    await tester.tap(find.byKey(const ValueKey('btn_inline_new_jump_host')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('jump_editor_name')), 'Edge Bastion');
+    await tester.enterText(find.byKey(const Key('jump_editor_host')), '203.0.113.10');
+    await tester.tap(find.byKey(const Key('btn_save_jump_gateway')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Save Host'));
+    await tester.pumpAndSettle();
+
+    final savedHost = state.hosts.firstWhere((h) => h.name == 'VNC via Jump Box');
+    final savedGateway = state.hosts.firstWhere((h) => h.name == 'Edge Bastion');
+    expect(state.folderConfigs.containsKey('Unconfigured Office'), isFalse);
+    expect(savedHost.jumpHostId, equals(savedGateway.id));
+    expect(state.effectiveJumpHostIdForVerification(savedHost), equals(savedGateway.id));
+    expect(state.routeBadgeForVerification(savedHost), contains('Edge Bastion'));
+
+    // 2. Minimalist `Vault & 2FA` Tab — zero jargon walls!
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    expect(find.text('Security Vault'), findsOneWidget);
+    expect(find.text('Authenticator'), findsOneWidget);
+    expect(find.text('Saved Credentials'), findsOneWidget);
+    expect(find.text('App Security'), findsOneWidget);
+    expect(find.text('Backup & SSH Keys'), findsOneWidget);
+    expect(find.text('Zero-Trust Hardware Enclave'), findsNothing);
+    expect(find.text('RFC 6238 TOTP 2FA Authenticator'), findsNothing);
+    expect(find.text('Screen Capture & Recents Shield (FLAG_SECURE)'), findsNothing);
+
+    // 3. Full-Screen Edge-to-Edge `VaultPinSetupSheet` (zero AlertDialog/Dialog, zero TextField, zero SingleChildScrollView)
+    await tester.ensureVisible(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.tap(find.byKey(const Key('btn_configure_vault_pin')));
+    await tester.pumpAndSettle();
+
+    final setupFinder = find.byType(VaultPinSetupSheet);
+    expect(setupFinder, findsOneWidget);
+    expect(tester.getSize(setupFinder), equals(const Size(412, 915)));
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.descendant(of: setupFinder, matching: find.byType(TextField)), findsNothing);
+    expect(find.descendant(of: setupFinder, matching: find.byType(SingleChildScrollView)), findsNothing);
+
+    // Verify Landscape (`915x412`) layout of `VaultPinSetupSheet` renders edge-to-edge with zero overflow!
+    tester.view.physicalSize = const Size(915, 412);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(setupFinder), equals(const Size(915, 412)));
+    expect(tester.takeException(), isNull);
+
+    for (final d in ['1', '3', '5', '7', '9', '2']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    for (final d in ['1', '3', '5', '7', '9', '2']) {
+      await tester.tap(find.byKey(ValueKey('btn_setup_pin_digit_$d')));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    // 4. Lock Vault & verify `VaultPinLockView` fills Landscape (`915x412`) AND Portrait (`412x915`) edge-to-edge!
+    await tester.ensureVisible(find.byKey(const Key('btn_lock_vault_now')));
+    await tester.tap(find.byKey(const Key('btn_lock_vault_now')));
+    await tester.pumpAndSettle();
+
+    final lockFinder = find.byKey(const ValueKey('vault_pin_lock_screen'));
+    expect(lockFinder, findsOneWidget);
+    expect(tester.getSize(lockFinder), equals(const Size(915, 412)));
+    expect(find.descendant(of: lockFinder, matching: find.byType(TextField)), findsNothing);
+    expect(find.descendant(of: lockFinder, matching: find.byType(SingleChildScrollView)), findsNothing);
+
+    tester.view.physicalSize = const Size(412, 915);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(lockFinder), equals(const Size(412, 915)));
     expect(tester.takeException(), isNull);
   });
 }

@@ -196,13 +196,18 @@ class _DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
     return (minTx, maxTx, minTy, maxTy);
   }
 
-  /// Jump Desktop-style smooth camera follow when desktop overflows viewport (Fill mode, Zoom, or Keyboard open).
+  /// Jump Desktop-style smooth camera follow when desktop overflows viewport (Zoom or Keyboard open).
+  /// Note: At 1.0x unzoomed scale with no manual pan offset, `Fill (Proportional)` (`cropCover`) already
+  /// pans `desktopRect` directly via `_cursorNorm` so `transformationController` stays `Matrix4.identity()`.
   void _autoPanViewportToFollowCursor(Offset norm) {
     if (!_hasPannableOverflow) return;
     final current = widget.transformationController.value;
     final scale = current.storage[0].clamp(1.0, 5.0);
     double tx = current.storage[12];
     double ty = current.storage[13];
+    if (scale <= 1.01 && widget.bottomObstructionPx <= 8.0 && tx.abs() <= 0.5 && ty.abs() <= 0.5) {
+      return;
+    }
 
     final fullW = widget.viewportSize.width + widget.canvasMargin * 2;
     final fullH = widget.viewportSize.height + widget.canvasMargin * 2;

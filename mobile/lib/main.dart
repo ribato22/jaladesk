@@ -530,11 +530,10 @@ enum JumpResolutionPreset {
   const JumpResolutionPreset(this.label, this.shortLabel, this.densityFactor);
 }
 
-/// Jump Desktop-style Canvas Aspect & Scaling Mode
+/// Jump Desktop-style Proportional Canvas Aspect & Scaling Mode (Zero Stretch)
 enum JumpCanvasFitMode {
   aspectFit('Fit (Proportional)', 'Fit'),
-  stretchFill('Fill Screen (Full Viewport)', 'Fill'),
-  cropCover('Smart Pan (1:1 Zoom)', 'Pan'),
+  cropCover('Fill (Proportional)', 'Fill'),
   pixel1to1('1:1 Native Pixel', '1:1');
 
   final String label;
@@ -721,7 +720,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   final ValueNotifier<int> _totpSecondsNotifier = ValueNotifier<int>(30);
   bool _biometricLock = true;
   bool _secureScreenShield = true;
-  bool _lanAutoSync = true;
   bool _clipboardScrubber = true;
   String _vaultPinHash = '';
   int _vaultPinLength = 6;
@@ -857,9 +855,65 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     );
   }
 
+  /// Derives the true live canvas viewport size even before Tab 1 (`RDP / VNC`) has laid out
+  /// or immediately after an orientation flip, preventing stale `1280×800` sizing on `~20:9` phones.
+  Size _effectiveCanvasViewportSize() {
+    final mediaSize = MediaQuery.maybeSizeOf(context);
+    final mediaPadding = MediaQuery.maybePaddingOf(context) ?? EdgeInsets.zero;
+    final hasMeasured = _lastMeasuredCanvasSize != const Size(1280, 800) &&
+        _lastMeasuredCanvasSize.width >= 160 &&
+        _lastMeasuredCanvasSize.height >= 120;
+    if (mediaSize == null || mediaSize.width <= 0 || mediaSize.height <= 0) {
+      return _lastMeasuredCanvasSize;
+    }
+    final mediaIsLandscape = mediaSize.width >= mediaSize.height;
+    final measuredIsLandscape = _lastMeasuredCanvasSize.width >= _lastMeasuredCanvasSize.height;
+    if (hasMeasured && mediaIsLandscape == measuredIsLandscape) {
+      return _lastMeasuredCanvasSize;
+    }
+
+    final isTrueTablet = mediaSize.shortestSide >= 600;
+    final isPhoneLandscape = mediaSize.width >= 600 && !isTrueTablet;
+    if (_isFullScreen) {
+      return Size(
+        mediaSize.width.clamp(160.0, 4096.0),
+        mediaSize.height.clamp(120.0, 4096.0),
+      );
+    }
+    if (isPhoneLandscape) {
+      final availH = (mediaSize.height - mediaPadding.top - mediaPadding.bottom - 68.0).clamp(120.0, 4096.0);
+      return Size(mediaSize.width.clamp(160.0, 4096.0), availH);
+    }
+    if (isTrueTablet) {
+      final availW = (mediaSize.width - 75.0 - mediaPadding.left).clamp(160.0, 4096.0);
+      final availH = (mediaSize.height - mediaPadding.top - 56.0 - 44.0).clamp(120.0, 4096.0);
+      return Size(availW, availH);
+    }
+    // Phone Portrait: subtract SafeArea + AppBar (56) + compact session strip (~68) + BottomNav (~64)
+    final availW = mediaSize.width.clamp(160.0, 4096.0);
+    final availH = (mediaSize.height - mediaPadding.top - mediaPadding.bottom - 56.0 - 68.0 - 64.0)
+        .clamp(120.0, 4096.0);
+    return Size(availW, availH);
+  }
+
+  /// Clears symmetric camera-cutout inset when computing `Auto Match` target dimensions in Landscape / Full-Screen `Fit`
+  /// so an Auto-Matched VNC / RDP desktop fills 100% of the safe area with zero letterboxing and zero stretch.
+  Size _usableAutoMatchViewportSize(Size rawVp) {
+    if (_canvasFitMode != JumpCanvasFitMode.aspectFit) return rawVp;
+    final mediaPadding = MediaQuery.maybePaddingOf(context) ?? EdgeInsets.zero;
+    final mediaSize = MediaQuery.maybeSizeOf(context);
+    final isTrueTablet = mediaSize != null && mediaSize.shortestSide >= 600;
+    final isPhoneLandscape = rawVp.width > rawVp.height && !isTrueTablet;
+    if (!(_isFullScreen || isPhoneLandscape)) return rawVp;
+    final rawSymInset = max(mediaPadding.left, mediaPadding.right);
+    if (rawSymInset <= 0 || rawVp.width - rawSymInset * 2.0 < 200.0) return rawVp;
+    return Size((rawVp.width - rawSymInset * 2.0).clamp(160.0, rawVp.width), rawVp.height);
+  }
+
   /// Resolves the target remote desktop `(width, height)` based on the active Jump preset & viewport
   (int, int) _resolveTargetDesktopDimensions({Size? viewportOverride}) {
-    final vp = viewportOverride ?? _lastMeasuredCanvasSize;
+    final rawVp = viewportOverride ?? _effectiveCanvasViewportSize();
+    final vp = _usableAutoMatchViewportSize(rawVp);
     switch (_resolutionPreset) {
       case JumpResolutionPreset.matchDisplay:
         return RdpFfiClient.computeJumpMatchResolution(vp.width, vp.height, densityMultiplier: 1.0);
@@ -876,7 +930,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
   /// Sends a live MS-RDPEDISP / VNC ExtendedDesktopSize resolution update to the active session
   void _applyTargetResolutionToActiveSession({Size? viewportOverride}) {
-    final effectiveVp = viewportOverride ?? _lastMeasuredCanvasSize;
+    final effectiveVp = viewportOverride ?? _effectiveCanvasViewportSize();
     final (targetW, targetH) = _resolveTargetDesktopDimensions(viewportOverride: effectiveVp);
     if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
       _lastAppliedSessionViewportSize = effectiveVp;
@@ -975,33 +1029,37 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   }
 
   /// Computes the exact destination `Rect` of the remote desktop frame inside the viewport.
-  /// - `aspectFit` (`Fit`): Fits entire desktop inside viewport at 1:1 aspect ratio, with
+  /// - Locks source aspect dimensions to `_remoteDesktopFrame` when present so `RawImage(fit: BoxFit.fill)`
+  ///   NEVER stretches an in-flight frame during dynamic resolution transitions!
+  /// - `aspectFit` (`Fit`): Fits entire desktop inside viewport at exact 1:1 aspect ratio, with
   ///   symmetric horizontal cutout clearance (`symInsetX = max(left, right)`) in Landscape / Full Screen.
-  /// - `cropCover` (`Pan`): Fills 100% of screen at true 1:1 aspect ratio (zero distortion!)
-  ///   and smoothly pans across the full width/height as you move the cursor or drag with 2 fingers.
-  /// - `stretchFill` (`Fill`): Stretches edge-to-edge.
+  /// - `cropCover` (`Fill`): Proportional Full-Screen Fill (`coverScale = max(vpW / frameW, vpH / frameH)`)
+  ///   with zero black bars, zero stretch (`dstW / dstH == frameW / frameH`), and smooth `_cursorNorm` auto-pan.
   Rect _computeRenderedDesktopRect(
     Size viewportSize, {
     EdgeInsets safePadding = EdgeInsets.zero,
     bool applySymmetricCutoutInset = false,
   }) {
-    final srvW = _desktopServerWidth.clamp(64, 8192).toDouble();
-    final srvH = _desktopServerHeight.clamp(64, 8192).toDouble();
-    if (_canvasFitMode == JumpCanvasFitMode.stretchFill) {
-      return Rect.fromLTWH(0, 0, viewportSize.width, viewportSize.height);
-    }
+    final frame = _remoteDesktopFrame;
+    final srvW = (frame != null ? frame.width : _desktopServerWidth).clamp(64, 8192).toDouble();
+    final srvH = (frame != null ? frame.height : _desktopServerHeight).clamp(64, 8192).toDouble();
     if (_canvasFitMode == JumpCanvasFitMode.cropCover) {
       final coverScale = max(viewportSize.width / srvW, viewportSize.height / srvH);
       final dstW = (srvW * coverScale).clamp(1.0, 16384.0);
       final dstH = (srvH * coverScale).clamp(1.0, 16384.0);
-      final dx = (viewportSize.width - dstW) / 2.0;
-      final dy = (viewportSize.height - dstH) / 2.0;
+      final dx = (viewportSize.width - dstW) * _cursorNorm.dx.clamp(0.0, 1.0);
+      final dy = (viewportSize.height - dstH) * _cursorNorm.dy.clamp(0.0, 1.0);
       return Rect.fromLTWH(dx, dy, dstW, dstH);
     }
     if (_canvasFitMode == JumpCanvasFitMode.pixel1to1) {
-      final dx = (viewportSize.width - srvW) / 2.0;
-      final dy = (viewportSize.height - srvH) / 2.0;
-      return Rect.fromLTWH(dx, dy, srvW, srvH);
+      final dx = (viewportSize.width - srvW) * _cursorNorm.dx.clamp(0.0, 1.0);
+      final dy = (viewportSize.height - srvH) * _cursorNorm.dy.clamp(0.0, 1.0);
+      return Rect.fromLTWH(
+        srvW > viewportSize.width ? dx : (viewportSize.width - srvW) / 2.0,
+        srvH > viewportSize.height ? dy : (viewportSize.height - srvH) / 2.0,
+        srvW,
+        srvH,
+      );
     }
     final double rawSymInset =
         applySymmetricCutoutInset ? max(safePadding.left, safePadding.right) : 0.0;
@@ -1080,6 +1138,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     setState(() {
       _desktopServerWidth = width.clamp(64, 8192);
       _desktopServerHeight = height.clamp(64, 8192);
+    });
+  }
+
+  void setCursorNormForVerification(Offset norm) {
+    setState(() {
+      _cursorNorm = Offset(norm.dx.clamp(0.0, 1.0), norm.dy.clamp(0.0, 1.0));
     });
   }
 
@@ -1518,23 +1582,20 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   }
 
   /// Smart Jump Host / Bastion Gateway recognizer:
-  /// Automatically promotes saved SSH Jump Hosts (such as `PLN Public Jump` or `mitra-jump`)
-  /// into first-class Gateways even if saved prior to `v1.11.0+13`!
+  /// Classifies explicit `isJumpHost == true` gateways and hosts actively referenced as a Jump Host
+  /// without hijacking normal SSH connections that route through a Jump Host or mention `jump` in their name.
   bool _isJumpHostGateway(RemoteHostItem host) {
     if (host.protocol != RemoteProtocol.ssh) return false;
     if (host.isJumpHost) return true;
+    final ownJump = host.jumpHostId?.trim();
+    if (ownJump != null && ownJump.isNotEmpty) return false;
     if (_hosts.any((other) => other.id != host.id && other.jumpHostId == host.id)) {
       return true;
     }
     if (_folderConfigs.values.any((fc) => fc.jumpHostId == host.id)) {
       return true;
     }
-    final lowerFolder = host.folder.toLowerCase();
-    if (lowerFolder.contains('jump') || lowerFolder.contains('bastion')) {
-      return true;
-    }
-    final lowerName = host.name.toLowerCase();
-    if (lowerName.contains('jump') || lowerName.contains('bastion')) {
+    if (host.folder.trim().toLowerCase() == 'sample lab / bastions') {
       return true;
     }
     return false;
@@ -2572,6 +2633,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       ),
                       const SizedBox(height: 6),
                       DropdownButtonFormField<String>(
+                        key: ValueKey('jump_cred_dropdown_$selectedCredentialId'),
                         initialValue: selectedCredentialId,
                         isExpanded: true,
                         dropdownColor: JalaPalette.surface,
@@ -2664,6 +2726,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     if (showUpstreamChain) ...[
                       const SizedBox(height: 4),
                       DropdownButtonFormField<String>(
+                        key: ValueKey('jump_upstream_dropdown_$selectedUpstreamJumpId'),
                         initialValue: selectedUpstreamJumpId,
                         isExpanded: true,
                         dropdownColor: JalaPalette.surface,
@@ -3123,57 +3186,60 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       ],
                     ),
                     const SizedBox(height: 6),
-                    DropdownButtonFormField<String>(
+                    KeyedSubtree(
                       key: const Key('folder_settings_jump_dropdown'),
-                      initialValue: selectedJumpHostId,
-                      isExpanded: true,
-                      dropdownColor: JalaPalette.surface,
-                      style: const TextStyle(
-                        fontSize: 12.5,
-                        color: JalaPalette.text,
-                      ),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        filled: true,
-                        fillColor: JalaPalette.header,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 11,
-                          vertical: 10,
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('folder_jump_val_$selectedJumpHostId'),
+                        initialValue: selectedJumpHostId,
+                        isExpanded: true,
+                        dropdownColor: JalaPalette.surface,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          color: JalaPalette.text,
                         ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(
-                            color: JalaPalette.lineInput,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          filled: true,
+                          fillColor: JalaPalette.header,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 11,
+                            vertical: 10,
                           ),
-                        ),
-                      ),
-                      items: [
-                        const DropdownMenuItem<String>(
-                          value: '',
-                          child: Text(
-                            'None (Direct Connection)',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: JalaPalette.text2,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(
+                              color: JalaPalette.lineInput,
                             ),
                           ),
                         ),
-                        for (final jh in sshGateways)
-                          DropdownMenuItem<String>(
-                            value: jh.id,
+                        items: [
+                          const DropdownMenuItem<String>(
+                            value: '',
                             child: Text(
-                              'via ${jh.name} (${jh.address}:${jh.port})',
-                              style: const TextStyle(
+                              'None (Direct Connection)',
+                              style: TextStyle(
                                 fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: JalaPalette.brandGold,
+                                color: JalaPalette.text2,
                               ),
-                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                      ],
-                      onChanged: (val) =>
-                          setModalState(() => selectedJumpHostId = val ?? ''),
+                          for (final jh in sshGateways)
+                            DropdownMenuItem<String>(
+                              value: jh.id,
+                              child: Text(
+                                'via ${jh.name} (${jh.address}:${jh.port})',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: JalaPalette.brandGold,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: (val) =>
+                            setModalState(() => selectedJumpHostId = val ?? ''),
+                      ),
                     ),
                     const SizedBox(height: 12),
                     Row(
@@ -3224,57 +3290,60 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       ],
                     ),
                     const SizedBox(height: 6),
-                    DropdownButtonFormField<String>(
+                    KeyedSubtree(
                       key: const Key('folder_settings_cred_dropdown'),
-                      initialValue: selectedCredentialId,
-                      isExpanded: true,
-                      dropdownColor: JalaPalette.surface,
-                      style: const TextStyle(
-                        fontSize: 12.5,
-                        color: JalaPalette.text,
-                      ),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        filled: true,
-                        fillColor: JalaPalette.header,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 11,
-                          vertical: 10,
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('folder_cred_val_$selectedCredentialId'),
+                        initialValue: selectedCredentialId,
+                        isExpanded: true,
+                        dropdownColor: JalaPalette.surface,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          color: JalaPalette.text,
                         ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(
-                            color: JalaPalette.lineInput,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          filled: true,
+                          fillColor: JalaPalette.header,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 11,
+                            vertical: 10,
                           ),
-                        ),
-                      ),
-                      items: [
-                        const DropdownMenuItem<String>(
-                          value: '',
-                          child: Text(
-                            'None (Host-level credentials)',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: JalaPalette.text2,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(
+                              color: JalaPalette.lineInput,
                             ),
                           ),
                         ),
-                        for (final cred in _credentials)
-                          DropdownMenuItem<String>(
-                            value: cred.id,
+                        items: [
+                          const DropdownMenuItem<String>(
+                            value: '',
                             child: Text(
-                              'Vault: ${cred.label} (${cred.displayPrincipal})',
-                              style: const TextStyle(
+                              'None (Host-level credentials)',
+                              style: TextStyle(
                                 fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: JalaPalette.brandGold,
+                                color: JalaPalette.text2,
                               ),
-                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                      ],
-                      onChanged: (val) =>
-                          setModalState(() => selectedCredentialId = val ?? ''),
+                          for (final cred in _credentials)
+                            DropdownMenuItem<String>(
+                              value: cred.id,
+                              child: Text(
+                                'Vault: ${cred.label} (${cred.displayPrincipal})',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: JalaPalette.brandGold,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: (val) =>
+                            setModalState(() => selectedCredentialId = val ?? ''),
+                      ),
                     ),
                     const SizedBox(height: 10),
                     Container(
@@ -3690,60 +3759,63 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       ],
                     ),
                     const SizedBox(height: 6),
-                    DropdownButtonFormField<String>(
+                    KeyedSubtree(
                       key: const ValueKey('dropdown_jump_host'),
-                      initialValue: selectedJumpHostId,
-                      isExpanded: true,
-                      dropdownColor: JalaPalette.surface,
-                      style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        filled: true,
-                        fillColor: JalaPalette.header,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: JalaPalette.lineInput),
-                        ),
-                      ),
-                      items: [
-                        DropdownMenuItem<String>(
-                          value: '',
-                          child: Text(
-                            folderJumpHost != null
-                                ? 'Inherit from Folder "$currentFolder" (via ${folderJumpHost.name})'
-                                : 'Inherit from Folder (Direct — No Folder Jump Set)',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: folderJumpHost != null
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
-                              color: folderJumpHost != null
-                                  ? JalaPalette.brandGold
-                                  : JalaPalette.text2,
-                            ),
-                            overflow: TextOverflow.ellipsis,
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('host_jump_val_${currentFolder}_$selectedJumpHostId'),
+                        initialValue: selectedJumpHostId,
+                        isExpanded: true,
+                        dropdownColor: JalaPalette.surface,
+                        style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                        decoration: InputDecoration(
+                          isDense: true,
+                          filled: true,
+                          fillColor: JalaPalette.header,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(color: JalaPalette.lineInput),
                           ),
                         ),
-                        const DropdownMenuItem<String>(
-                          value: kDirectNoJumpOverride,
-                          child: Text(
-                            'Direct Connection (Bypass Folder Jump Host)',
-                            style: TextStyle(fontSize: 12, color: JalaPalette.text2),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        for (final jh in validJumpHosts)
+                        items: [
                           DropdownMenuItem<String>(
-                            value: jh.id,
+                            value: '',
                             child: Text(
-                              'via ${jh.name} (${jh.address}:${jh.port})',
-                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: JalaPalette.brandGold),
+                              folderJumpHost != null
+                                  ? 'Inherit from Folder "$currentFolder" (via ${folderJumpHost.name})'
+                                  : 'Inherit from Folder (Direct — No Folder Jump Set)',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: folderJumpHost != null
+                                    ? FontWeight.w600
+                                    : FontWeight.w400,
+                                color: folderJumpHost != null
+                                    ? JalaPalette.brandGold
+                                    : JalaPalette.text2,
+                              ),
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                      ],
-                      onChanged: (val) => setModalState(() => selectedJumpHostId = val ?? ''),
+                          const DropdownMenuItem<String>(
+                            value: kDirectNoJumpOverride,
+                            child: Text(
+                              'Direct Connection (Bypass Folder Jump Host)',
+                              style: TextStyle(fontSize: 12, color: JalaPalette.text2),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          for (final jh in validJumpHosts)
+                            DropdownMenuItem<String>(
+                              value: jh.id,
+                              child: Text(
+                                'via ${jh.name} (${jh.address}:${jh.port})',
+                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: JalaPalette.brandGold),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: (val) => setModalState(() => selectedJumpHostId = val ?? ''),
+                      ),
                     ),
                     if ((selectedJumpHostId.isNotEmpty &&
                             selectedJumpHostId != kDirectNoJumpOverride) ||
@@ -3793,42 +3865,45 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       ],
                     ),
                     const SizedBox(height: 6),
-                    DropdownButtonFormField<String>(
+                    KeyedSubtree(
                       key: const ValueKey('dropdown_vault_credential'),
-                      initialValue: selectedCredentialId,
-                      isExpanded: true,
-                      dropdownColor: JalaPalette.surface,
-                      style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        filled: true,
-                        fillColor: JalaPalette.header,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: JalaPalette.lineInput),
-                        ),
-                      ),
-                      items: [
-                        const DropdownMenuItem<String>(
-                          value: '',
-                          child: Text(
-                            'Custom Inline Credentials (this host only)',
-                            style: TextStyle(fontSize: 12, color: JalaPalette.text2),
-                            overflow: TextOverflow.ellipsis,
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('host_cred_val_$selectedCredentialId'),
+                        initialValue: selectedCredentialId,
+                        isExpanded: true,
+                        dropdownColor: JalaPalette.surface,
+                        style: const TextStyle(fontSize: 12.5, color: JalaPalette.text),
+                        decoration: InputDecoration(
+                          isDense: true,
+                          filled: true,
+                          fillColor: JalaPalette.header,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(color: JalaPalette.lineInput),
                           ),
                         ),
-                        for (final cred in _credentials)
-                          DropdownMenuItem<String>(
-                            value: cred.id,
+                        items: [
+                          const DropdownMenuItem<String>(
+                            value: '',
                             child: Text(
-                              'Vault: ${cred.label} (${cred.displayPrincipal})',
-                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: JalaPalette.brandGold),
+                              'Custom Inline Credentials (this host only)',
+                              style: TextStyle(fontSize: 12, color: JalaPalette.text2),
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                      ],
-                      onChanged: (val) => setModalState(() => selectedCredentialId = val ?? ''),
+                          for (final cred in _credentials)
+                            DropdownMenuItem<String>(
+                              value: cred.id,
+                              child: Text(
+                                'Vault: ${cred.label} (${cred.displayPrincipal})',
+                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: JalaPalette.brandGold),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: (val) => setModalState(() => selectedCredentialId = val ?? ''),
+                      ),
                     ),
                     const SizedBox(height: 10),
 
@@ -4212,7 +4287,13 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 if (rememberInVault) {
                   setState(() {
                     final idx = _hosts.indexWhere((h) => h.id == host.id);
-                    if (idx >= 0) _hosts[idx] = updated;
+                    if (idx >= 0) {
+                      _hosts[idx] = _hosts[idx].copyWith(
+                        domain: updated.domain,
+                        username: updated.username,
+                        password: updated.password,
+                      );
+                    }
                   });
                   _saveVaultToDisk();
                 }
@@ -4548,38 +4629,45 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     bool dialogOpen = true;
     StateSetter? modalSetState;
 
+    bool isNonRetryableBastionError(Object err) {
+      if (err is SSHAuthFailError ||
+          err is SSHAuthAbortError ||
+          err is SSHHostkeyError) {
+        return true;
+      }
+      final msg = err.toString().toLowerCase();
+      return msg.contains('host key') && msg.contains('reject');
+    }
+
     Future<void> performHandshake() async {
       final sw = Stopwatch()..start();
       SshBastionChain? pendingBastionChain;
       ActiveLocalPortForward? pendingLocalTunnel;
 
       try {
-        if (bastionHops.isNotEmpty) {
-          pendingBastionChain = await _bastionPool.acquire(
-            bastionHops,
-            onStage: (s) => modalSetState?.call(() => stageText = s),
-            onVerifyHopHostKey: (hop, keyType, fp) =>
-                _verifySshHostKeyWithTofu(hop.address, hop.port, keyType, fp),
-          );
-        }
-
         // =====================================================================
         // 1. SSHv2 INTERACTIVE PTY SHELL & SFTP ENGINE (dartssh2 + ProxyJump)
         // =====================================================================
         if (host.protocol == RemoteProtocol.ssh || host.protocol == RemoteProtocol.sftp) {
-          modalSetState?.call(() {
-            stageText = pendingBastionChain != null
-                ? 'Opening ProxyJump channel (${pendingBastionChain.routeSummary}) → ${host.address}:${host.port}...'
-                : '1/3 Opening TCP socket to ${host.address}:${host.port}...';
-          });
           SSHSocket sshSocket;
-          if (pendingBastionChain != null) {
+          if (bastionHops.isNotEmpty) {
             try {
+              pendingBastionChain = await _bastionPool.acquire(
+                bastionHops,
+                onStage: (s) => modalSetState?.call(() => stageText = s),
+                onVerifyHopHostKey: (hop, keyType, fp) =>
+                    _verifySshHostKeyWithTofu(hop.address, hop.port, keyType, fp),
+              );
+              modalSetState?.call(() {
+                stageText =
+                    'Opening ProxyJump channel (${pendingBastionChain!.routeSummary}) → ${host.address}:${host.port}...';
+              });
               sshSocket = await pendingBastionChain.openTargetForward(
                 host.address,
                 host.port,
               );
-            } catch (_) {
+            } catch (firstErr) {
+              if (isNonRetryableBastionError(firstErr)) rethrow;
               await _bastionPool.evictByHops(bastionHops);
               pendingBastionChain = await _bastionPool.acquire(
                 bastionHops,
@@ -4587,12 +4675,19 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 onVerifyHopHostKey: (hop, keyType, fp) =>
                     _verifySshHostKeyWithTofu(hop.address, hop.port, keyType, fp),
               );
+              modalSetState?.call(() {
+                stageText =
+                    'Opening ProxyJump channel (${pendingBastionChain!.routeSummary}) → ${host.address}:${host.port}...';
+              });
               sshSocket = await pendingBastionChain.openTargetForward(
                 host.address,
                 host.port,
               );
             }
           } else {
+            modalSetState?.call(() {
+              stageText = '1/3 Opening TCP socket to ${host.address}:${host.port}...';
+            });
             sshSocket = await NoDelaySshSocket.connect(
               host.address,
               host.port,
@@ -4707,21 +4802,29 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         String effectiveTargetHost = host.address;
         int effectiveTargetPort = host.port;
         String activeRouteLabel = '';
-        if (pendingBastionChain != null) {
-          activeRouteLabel = pendingBastionChain.routeSummary;
-          modalSetState?.call(() {
-            stageText =
-                'Binding pre-warmed SSH tunnel ($activeRouteLabel → ${host.address}:${host.port})...';
-          });
+        if (bastionHops.isNotEmpty) {
           try {
+            pendingBastionChain = await _bastionPool.acquire(
+              bastionHops,
+              onStage: (s) => modalSetState?.call(() => stageText = s),
+              onVerifyHopHostKey: (hop, keyType, fp) =>
+                  _verifySshHostKeyWithTofu(hop.address, hop.port, keyType, fp),
+            );
+            activeRouteLabel = pendingBastionChain.routeSummary;
+            modalSetState?.call(() {
+              stageText =
+                  'Binding pre-warmed SSH tunnel ($activeRouteLabel → ${host.address}:${host.port})...';
+            });
             pendingLocalTunnel = await pendingBastionChain.startLocalPortForward(
               remoteHost: host.address,
               remotePort: host.port,
               label: '${host.protocol.name.toUpperCase()} → ${host.name}',
               ownChainLifecycle: false,
               prewarmChannel: true,
+              verifyInitialChannel: true,
             );
-          } catch (_) {
+          } catch (firstErr) {
+            if (isNonRetryableBastionError(firstErr)) rethrow;
             await _bastionPool.evictByHops(bastionHops);
             pendingBastionChain = await _bastionPool.acquire(
               bastionHops,
@@ -4730,12 +4833,17 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   _verifySshHostKeyWithTofu(hop.address, hop.port, keyType, fp),
             );
             activeRouteLabel = pendingBastionChain.routeSummary;
+            modalSetState?.call(() {
+              stageText =
+                  'Binding pre-warmed SSH tunnel ($activeRouteLabel → ${host.address}:${host.port})...';
+            });
             pendingLocalTunnel = await pendingBastionChain.startLocalPortForward(
               remoteHost: host.address,
               remotePort: host.port,
               label: '${host.protocol.name.toUpperCase()} → ${host.name}',
               ownChainLifecycle: false,
               prewarmChannel: true,
+              verifyInitialChannel: true,
             );
           }
           effectiveTargetHost = '127.0.0.1';
@@ -4869,13 +4977,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
               });
               if (flippedDynamic) {
                 _lastAppliedSessionViewportSize = Size.zero;
+                final liveVp = _effectiveCanvasViewportSize();
                 if ((_resolutionPreset == JumpResolutionPreset.matchDisplay ||
                         _resolutionPreset == JumpResolutionPreset.matchHiDpi) &&
-                    _lastMeasuredCanvasSize.width >= 200) {
+                    liveVp.width >= 160) {
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     if (!mounted) return;
                     _applyTargetResolutionToActiveSession(
-                      viewportOverride: _lastMeasuredCanvasSize,
+                      viewportOverride: _effectiveCanvasViewportSize(),
                     );
                   });
                 }
@@ -4936,13 +5045,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 'Live VNC Framebuffer (${vncClient.width}x${vncClient.height}${activeRouteLabel.isNotEmpty ? " • $activeRouteLabel" : ""})';
             _tabIndex = 1;
           });
+          final postConnectVp = _effectiveCanvasViewportSize();
           if (vncClient.supportsExtendedDesktopSize &&
               (_resolutionPreset == JumpResolutionPreset.matchDisplay ||
                   _resolutionPreset == JumpResolutionPreset.matchHiDpi) &&
-              _lastMeasuredCanvasSize.width >= 200) {
+              postConnectVp.width >= 160) {
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
-              _applyTargetResolutionToActiveSession(viewportOverride: _lastMeasuredCanvasSize);
+              _applyTargetResolutionToActiveSession(
+                viewportOverride: _effectiveCanvasViewportSize(),
+              );
             });
           }
           _saveVaultToDisk();
@@ -5710,6 +5822,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       )
                     else ...[
                       DropdownButtonFormField<String>(
+                        key: ValueKey('pf_bastion_dropdown_$selectedBastionId'),
                         initialValue: selectedBastionId,
                         isExpanded: true,
                         dropdownColor: JalaPalette.surface,
@@ -10090,6 +10203,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   void _showDisplaySizingModal() {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: JalaPalette.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
@@ -10098,7 +10212,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         return StatefulBuilder(
           builder: (ctx, setModalState) {
             return SafeArea(
-              child: Padding(
+              child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -10217,13 +10331,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      _canvasFitMode == JumpCanvasFitMode.stretchFill
-                          ? 'Fill Screen (Full Viewport): Adapts remote desktop edge-to-edge across 100% of your 20:9 screen with zero black bars and zero cropped taskbar.'
-                          : _canvasFitMode == JumpCanvasFitMode.aspectFit
-                              ? 'Fit (Proportional): Shows 100% of the remote desktop proportionally inside your screen.'
-                              : _canvasFitMode == JumpCanvasFitMode.cropCover
-                                  ? 'Smart Pan (1:1 Zoom): 1:1 aspect ratio zoom-to-cover with smooth cursor-follow & 2-finger pan.'
-                                  : '1:1 Native Pixel: Renders native 1:1 server pixels.',
+                      _canvasFitMode == JumpCanvasFitMode.aspectFit
+                          ? 'Fit (Proportional): Shows 100% of the remote desktop proportionally inside your screen with zero distortion.'
+                          : _canvasFitMode == JumpCanvasFitMode.cropCover
+                              ? 'Fill (Proportional): Covers 100% of your screen at exact 1:1 aspect ratio (zero black bars, zero stretch) with smooth cursor-follow pan.'
+                              : '1:1 Native Pixel: Renders native 1:1 server pixels.',
                       style: const TextStyle(fontSize: 11, color: JalaPalette.muted),
                     ),
                     const SizedBox(height: 12),
@@ -11514,9 +11626,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    _canvasFitMode == JumpCanvasFitMode.stretchFill
+                    _canvasFitMode == JumpCanvasFitMode.cropCover
                         ? Icons.fullscreen_rounded
-                        : (_canvasFitMode == JumpCanvasFitMode.cropCover
+                        : (_canvasFitMode == JumpCanvasFitMode.pixel1to1
                             ? Icons.crop_free_rounded
                             : Icons.fit_screen_rounded),
                     size: 12,
@@ -12402,7 +12514,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     );
   }
 
-  /// Zero-Trust Vault, App-Lock PIN, SSH TOFU Known-Hosts & Real RFC 6238 HMAC TOTP 2FA Tab
+  /// Minimalist Enterprise Security Vault, App-Lock PIN, Trusted SSH Keys & TOTP 2FA Tab
   Widget _buildSecurityVaultTab() {
     final pinnedHosts = _knownHostsStore.entries;
 
@@ -12417,36 +12529,17 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.key_rounded, size: 17, color: JalaPalette.brandGold),
+                    const Icon(Icons.phonelink_lock_rounded, size: 17, color: JalaPalette.brandGold),
                     const SizedBox(width: 8),
                     const Expanded(
                       child: Text(
-                        'RFC 6238 TOTP 2FA Authenticator',
+                        'Authenticator',
                         style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    const SizedBox(width: 6),
-                    InkWell(
-                      key: const Key('btn_add_totp_2fa'),
-                      borderRadius: BorderRadius.circular(6),
-                      onTap: _showAddTotpDialog,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: JalaPalette.header,
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: JalaPalette.lineInput),
-                        ),
-                        child: const Text(
-                          '+ Add 2FA',
-                          style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
-                        ),
-                      ),
-                    ),
                     if (_totpItems.isNotEmpty) ...[
-                      const SizedBox(width: 6),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                         decoration: BoxDecoration(
@@ -12459,18 +12552,31 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                           style: const TextStyle(fontSize: 11, color: JalaPalette.brandGold, fontWeight: FontWeight.w700),
                         ),
                       ),
+                      const SizedBox(width: 4),
                     ],
+                    KeyedSubtree(
+                      key: const Key('btn_add_totp_2fa'),
+                      child: IconButton(
+                        key: const Key('btn_add_totp_entry'),
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                        padding: EdgeInsets.zero,
+                        tooltip: 'Add 2FA Key',
+                        onPressed: _showAddTotpDialog,
+                        icon: const Icon(Icons.add_rounded, size: 19, color: JalaPalette.brandGold),
+                      ),
+                    ),
                   ],
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 8),
                 if (_totpItems.isEmpty)
                   const Text(
-                    'Add your Base32 TOTP secret keys (SHA-1 / SHA-256 / SHA-512) for Bastion SSH MFA, Active Directory, or Proxmox VE. Tap any code to copy with 30s auto-scrub.',
-                    style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
+                    'No 2FA codes yet — tap + to add.',
+                    style: TextStyle(fontSize: 12, color: JalaPalette.muted),
                   )
                 else
                   for (int i = 0; i < _totpItems.length; i++) ...[
-                    if (i > 0) const Divider(height: 18),
+                    if (i > 0) const Divider(height: 16),
                     _buildTotpRow(
                       _totpItems[i],
                       Rfc6238Totp.generateCode(
@@ -12490,83 +12596,107 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
     final securitySwitchesCard = Card(
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(14, 13, 14, 6),
+            child: Row(
+              children: [
+                Icon(Icons.shield_outlined, size: 17, color: JalaPalette.brandGold),
+                SizedBox(width: 8),
+                Text(
+                  'App Security',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
+                ),
+              ],
+            ),
+          ),
           ValueListenableBuilder<int>(
             valueListenable: _vaultAutoLockNotifier,
             builder: (context, autoLockSec, _) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  ListTile(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                    leading: Icon(
-                      _vaultPinHash.isNotEmpty ? Icons.lock_rounded : Icons.lock_open_rounded,
-                      color: _vaultPinHash.isNotEmpty ? JalaPalette.ok : JalaPalette.brandGold,
-                      size: 20,
-                    ),
-                    title: const Text(
-                      'Vault App-Lock PIN (PBKDF2-SHA256)',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
-                    ),
-                    subtitle: Text(
-                      _vaultPinHash.isNotEmpty
-                          ? 'Active ($_vaultPinLength-digit PIN) • Auto-lock: ${autoLockSec == 0 ? "Immediate" : autoLockSec == 15 ? "15s" : autoLockSec == 60 ? "1m" : "5m"}'
-                          : 'Protect saved servers, keys & 2FA with an App-Lock PIN',
-                      style: const TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-                    ),
-                    trailing: Wrap(
-                      spacing: 6,
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 4, 14, 8),
+                    child: Row(
                       children: [
-                        if (_vaultPinHash.isNotEmpty)
+                        Icon(
+                          _vaultPinHash.isNotEmpty ? Icons.lock_rounded : Icons.lock_open_rounded,
+                          color: _vaultPinHash.isNotEmpty ? JalaPalette.ok : JalaPalette.brandGold,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'App Lock PIN',
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+                              ),
+                              Text(
+                                _vaultPinHash.isNotEmpty ? '$_vaultPinLength-digit active' : 'Off',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: _vaultPinHash.isNotEmpty ? JalaPalette.ok : JalaPalette.muted,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (_vaultPinHash.isNotEmpty) ...[
                           OutlinedButton(
                             key: const Key('btn_lock_vault_now'),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: JalaPalette.brandGold,
                               side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.5)),
                               visualDensity: VisualDensity.compact,
-                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 10),
                             ),
                             onPressed: _lockVaultNow,
-                            child: const Text('Lock', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+                            child: const Text('Lock', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
                           ),
+                          const SizedBox(width: 6),
+                        ],
                         FilledButton.tonal(
                           key: const Key('btn_configure_vault_pin'),
                           style: FilledButton.styleFrom(
                             backgroundColor: JalaPalette.selected,
                             foregroundColor: JalaPalette.brandGold,
                             visualDensity: VisualDensity.compact,
-                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            padding: const EdgeInsets.symmetric(horizontal: 11),
                           ),
                           onPressed: _showConfigureVaultPinDialog,
                           child: Text(
                             _vaultPinHash.isNotEmpty ? 'Manage' : 'Set PIN',
-                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+                            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
                           ),
                         ),
                       ],
                     ),
                   ),
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                    padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
                     child: Row(
                       children: [
-                        const Icon(Icons.timer_outlined, size: 14, color: JalaPalette.brandGold),
-                        const SizedBox(width: 6),
                         const Text(
-                          'Auto-Lock:',
-                          style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: JalaPalette.text2),
+                          'Auto-Lock',
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: JalaPalette.text2),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 10),
                         Expanded(
                           child: Wrap(
                             spacing: 6,
                             runSpacing: 4,
+                            alignment: WrapAlignment.end,
                             children: [
                               for (final (sec, label) in const <(int, String)>[
-                                (0, 'Immediate'),
+                                (0, '0s'),
                                 (15, '15s'),
                                 (60, '1m'),
                                 (300, '5m'),
+                                (900, '15m'),
                               ])
                                 ChoiceChip(
                                   key: ValueKey('chip_autolock_$sec'),
@@ -12604,8 +12734,27 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             },
           ),
           const Divider(height: 1),
-          SwitchListTile(
+          SwitchListTile.adaptive(
+            key: const Key('switch_biometric_lock'),
+            dense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 14),
+            activeThumbColor: JalaPalette.brandGold,
+            activeTrackColor: JalaPalette.selected,
+            value: _biometricLock,
+            onChanged: (v) {
+              setState(() => _biometricLock = v);
+              unawaited(_saveScalarSettingsOnly());
+            },
+            title: const Text(
+              'Biometric Unlock',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+            ),
+          ),
+          const Divider(height: 1),
+          SwitchListTile.adaptive(
             key: const Key('switch_secure_screen'),
+            dense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 14),
             activeThumbColor: JalaPalette.brandGold,
             activeTrackColor: JalaPalette.selected,
             value: _secureScreenShield,
@@ -12615,181 +12764,25 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
               unawaited(_saveScalarSettingsOnly());
             },
             title: const Text(
-              'Screen Capture & Recents Shield (FLAG_SECURE)',
+              'Block Screenshots',
               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
-            ),
-            subtitle: const Text(
-              'Block OS screenshots, screen recorders, and Android Recents previews of live sessions',
-              style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
             ),
           ),
           const Divider(height: 1),
-          SwitchListTile(
+          SwitchListTile.adaptive(
+            key: const Key('switch_clipboard_scrubber'),
+            dense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 14),
             activeThumbColor: JalaPalette.brandGold,
             activeTrackColor: JalaPalette.selected,
             value: _clipboardScrubber,
             onChanged: (v) => setState(() => _clipboardScrubber = v),
             title: const Text(
-              'Automatic Clipboard Secret Scrubber (30s)',
+              'Auto-Clear Clipboard',
               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
-            ),
-            subtitle: const Text(
-              'Purge copied passwords and TOTP tokens from mobile OS clipboard after 30 seconds',
-              style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-            ),
-          ),
-          const Divider(height: 1),
-          SwitchListTile(
-            key: const Key('switch_biometric_lock'),
-            activeThumbColor: JalaPalette.brandGold,
-            activeTrackColor: JalaPalette.selected,
-            value: _biometricLock,
-            onChanged: (v) {
-              setState(() => _biometricLock = v);
-              unawaited(_saveScalarSettingsOnly());
-            },
-            title: const Text(
-              'Biometric Enclave Unlock (BiometricPrompt / FaceID)',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
-            ),
-            subtitle: const Text(
-              'Unlock Vault App-Lock & Android Hardware Keystore with Fingerprint or Face verification',
-              style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-            ),
-          ),
-          const Divider(height: 1),
-          SwitchListTile(
-            activeThumbColor: JalaPalette.brandGold,
-            activeTrackColor: JalaPalette.selected,
-            value: _lanAutoSync,
-            onChanged: (v) => setState(() => _lanAutoSync = v),
-            title: const Text(
-              'Zero-Knowledge LAN mDNS Vault Sync',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
-            ),
-            subtitle: const Text(
-              'Automatically synchronize encrypted connection documents with JalaDesk Desktop on Wi-Fi',
-              style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
             ),
           ),
         ],
-      ),
-    );
-
-    final knownHostsCard = Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.verified_user_outlined, size: 17, color: JalaPalette.ok),
-                const SizedBox(width: 8),
-                const Expanded(
-                  child: Text(
-                    'Trusted SSH Host Keys (TOFU Pinning)',
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: JalaPalette.header,
-                    borderRadius: BorderRadius.circular(99),
-                    border: Border.all(color: JalaPalette.lineInput),
-                  ),
-                  child: Text(
-                    '${pinnedHosts.length} pinned',
-                    style: const TextStyle(fontSize: 10.5, fontFamily: 'monospace', color: JalaPalette.text2),
-                  ),
-                ),
-                if (pinnedHosts.isNotEmpty) ...[
-                  const SizedBox(width: 6),
-                  TextButton(
-                    key: const ValueKey('btn_clear_all_known_hosts'),
-                    style: TextButton.styleFrom(
-                      foregroundColor: JalaPalette.danger,
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      minimumSize: Size.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                    onPressed: () {
-                      setState(() => _knownHostsStore.clearAll());
-                      _saveVaultToDisk();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Cleared all locally pinned SSH host keys.')),
-                      );
-                    },
-                    child: const Text(
-                      'Clear All',
-                      style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 8),
-            if (pinnedHosts.isEmpty)
-              const Text(
-                'No SSH host keys pinned on this phone yet. Fingerprints are automatically pinned on your first live SSH / Jump Host connection.',
-                style: TextStyle(fontSize: 11.5, color: JalaPalette.text2, height: 1.35),
-              )
-            else
-              for (int i = 0; i < pinnedHosts.length; i++) ...[
-                if (i > 0) const Divider(height: 14),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '${pinnedHosts[i].endpoint} • ${pinnedHosts[i].keyType}',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontFamily: 'monospace',
-                              fontWeight: FontWeight.w700,
-                              color: JalaPalette.text,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            pinnedHosts[i].fingerprintDisplay,
-                            style: const TextStyle(
-                              fontSize: 10.5,
-                              fontFamily: 'monospace',
-                              color: JalaPalette.brandGold,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    IconButton(
-                      key: ValueKey('btn_revoke_known_host_${pinnedHosts[i].endpoint}'),
-                      visualDensity: VisualDensity.compact,
-                      tooltip: 'Revoke Pinned Key',
-                      onPressed: () {
-                        final ep = pinnedHosts[i].endpoint;
-                        setState(() => _knownHostsStore.removeEndpoint(ep));
-                        _saveVaultToDisk();
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Revoked pinned SSH host key for $ep')),
-                        );
-                      },
-                      icon: const Icon(Icons.delete_outline_rounded, size: 17, color: JalaPalette.muted),
-                    ),
-                  ],
-                ),
-              ],
-          ],
-        ),
       ),
     );
 
@@ -12801,41 +12794,47 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           children: [
             Row(
               children: [
-                const Icon(Icons.vpn_key_outlined, size: 17, color: JalaPalette.accentLine),
+                const Icon(Icons.key_rounded, size: 17, color: JalaPalette.accentLine),
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
-                    'Reusable Credential Vault',
+                    'Saved Credentials',
                     style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                const SizedBox(width: 6),
-                InkWell(
-                  key: const Key('btn_add_vault_credential'),
-                  borderRadius: BorderRadius.circular(6),
-                  onTap: () => _showVaultCredentialEditorDialog(),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+                if (_credentials.isNotEmpty) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                     decoration: BoxDecoration(
                       color: JalaPalette.header,
-                      borderRadius: BorderRadius.circular(6),
+                      borderRadius: BorderRadius.circular(99),
                       border: Border.all(color: JalaPalette.lineInput),
                     ),
-                    child: const Text(
-                      '+ Add Credential',
-                      style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: JalaPalette.brandGold),
+                    child: Text(
+                      '${_credentials.length}',
+                      style: const TextStyle(fontSize: 10.5, fontFamily: 'monospace', color: JalaPalette.text2),
                     ),
                   ),
+                  const SizedBox(width: 4),
+                ],
+                IconButton(
+                  key: const Key('btn_add_vault_credential'),
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'Add Credential',
+                  onPressed: () => _showVaultCredentialEditorDialog(),
+                  icon: const Icon(Icons.add_rounded, size: 19, color: JalaPalette.brandGold),
                 ),
               ],
             ),
             const SizedBox(height: 8),
             if (_credentials.isEmpty)
               const Text(
-                'Store shared AD Domain accounts, SSH Ed25519/RSA keys, and Bastion logins once — bind them to any host or Jump Host.',
-                style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
+                'Save reusable SSH keys & domain logins.',
+                style: TextStyle(fontSize: 12, color: JalaPalette.muted),
               )
             else
               for (int i = 0; i < _credentials.length; i++) ...[
@@ -12880,7 +12879,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                           if (cred.password.isNotEmpty)
                             IconButton(
                               visualDensity: VisualDensity.compact,
-                              tooltip: 'Copy Password (30s Auto-Scrub)',
+                              tooltip: 'Copy Password',
                               onPressed: () => _copySensitiveSecret(
                                 cred.password,
                                 toastMessage:
@@ -12905,74 +12904,155 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       ),
     );
 
-    final encryptedBackupCard = Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Row(
+    final backupAndSshCard = Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(14, 13, 14, 6),
+            child: Row(
               children: [
-                Icon(Icons.enhanced_encryption_outlined, size: 17, color: JalaPalette.brandGold),
+                Icon(Icons.cloud_sync_outlined, size: 17, color: JalaPalette.brandGold),
                 SizedBox(width: 8),
-                Expanded(
+                Text(
+                  'Backup & SSH Keys',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
+                ),
+              ],
+            ),
+          ),
+          InkWell(
+            key: const Key('row_trusted_ssh_keys'),
+            onTap: _showTrustedSshKeysSheet,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(
+                children: [
+                  const Icon(Icons.verified_user_outlined, size: 17, color: JalaPalette.ok),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Trusted SSH Keys',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: JalaPalette.header,
+                      borderRadius: BorderRadius.circular(99),
+                      border: Border.all(color: JalaPalette.lineInput),
+                    ),
+                    child: Text(
+                      '${pinnedHosts.length} pinned',
+                      style: const TextStyle(fontSize: 10.5, fontFamily: 'monospace', color: JalaPalette.text2),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.chevron_right_rounded, size: 18, color: JalaPalette.muted),
+                ],
+              ),
+            ),
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            child: Row(
+              children: [
+                const Icon(Icons.enhanced_encryption_outlined, size: 17, color: JalaPalette.brandGold),
+                const SizedBox(width: 8),
+                const Expanded(
                   child: Text(
-                    'Encrypted Vault Snapshot (.jvault)',
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5, color: JalaPalette.text),
+                    'Encrypted Backup (.jvault)',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Authenticated AES-256-GCM + PBKDF2-HMAC-SHA256 (100k) portable backup of hosts, Jump Host routes, credentials, 2FA seeds, and snippets.',
-              style: TextStyle(fontSize: 11.5, color: JalaPalette.muted, height: 1.35),
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                OutlinedButton.icon(
+                const SizedBox(width: 6),
+                OutlinedButton(
                   key: const Key('btn_export_encrypted_vault'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: JalaPalette.brandGold,
                     side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
                     visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
                   ),
                   onPressed: _showExportEncryptedVaultDialog,
-                  icon: const Icon(Icons.upload_file_rounded, size: 15),
-                  label: const Text('Export .jvault', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                  child: const Text('Export', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
                 ),
-                OutlinedButton.icon(
+                const SizedBox(width: 6),
+                OutlinedButton(
                   key: const Key('btn_import_encrypted_vault'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: JalaPalette.accentLine,
                     side: BorderSide(color: JalaPalette.accentLine.withValues(alpha: 0.45)),
                     visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
                   ),
                   onPressed: _showImportEncryptedVaultDialog,
-                  icon: const Icon(Icons.download_rounded, size: 15),
-                  label: const Text('Import .jvault', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                  child: const Text('Import', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
                 ),
-                if (_hosts.isNotEmpty || _folderConfigs.isNotEmpty)
-                  OutlinedButton.icon(
-                    key: const Key('btn_vault_clear_all'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: JalaPalette.danger,
-                      side: BorderSide(color: JalaPalette.danger.withValues(alpha: 0.45)),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    onPressed: _confirmClearVaultDialog,
-                    icon: const Icon(Icons.delete_sweep_outlined, size: 15),
-                    label: const Text('Clear Vault', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
-                  ),
               ],
             ),
+          ),
+          const Divider(height: 1),
+          InkWell(
+            onTap: _showQrPairDialog,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(
+                children: [
+                  const Icon(Icons.qr_code_2_rounded, size: 17, color: JalaPalette.accentLine),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Desktop QR Sync',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.text),
+                    ),
+                  ),
+                  if (_pairedDesktopInfo.startsWith('Paired'))
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: JalaPalette.ok.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(99),
+                        border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.4)),
+                      ),
+                      child: const Text(
+                        'Paired',
+                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: JalaPalette.ok),
+                      ),
+                    ),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.chevron_right_rounded, size: 18, color: JalaPalette.muted),
+                ],
+              ),
+            ),
+          ),
+          if (_hosts.isNotEmpty || _folderConfigs.isNotEmpty) ...[
+            const Divider(height: 1),
+            InkWell(
+              key: const Key('btn_vault_clear_all'),
+              onTap: _confirmClearVaultDialog,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                child: Row(
+                  children: [
+                    Icon(Icons.delete_sweep_outlined, size: 17, color: JalaPalette.danger),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Clear Vault',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: JalaPalette.danger),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ],
-        ),
+        ],
       ),
     );
 
@@ -12982,98 +13062,78 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         final symPadX = max(mediaPadding.left, mediaPadding.right) + 14.0;
         final isTwoColumn = constraints.maxWidth >= 720;
         return SingleChildScrollView(
-          padding: EdgeInsets.fromLTRB(symPadX, 14, symPadX, 14 + mediaPadding.bottom),
+          padding: EdgeInsets.fromLTRB(symPadX, 12, symPadX, 14 + mediaPadding.bottom),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Container(
-                padding: const EdgeInsets.all(13),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [JalaPalette.chip, JalaPalette.surface],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
+                  color: JalaPalette.surface,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.35)),
+                  border: Border.all(color: JalaPalette.lineInput),
                 ),
                 child: Row(
                   children: [
-                    _buildJalaBrandLogo(size: 38, radius: 10),
-                    const SizedBox(width: 11),
+                    _buildJalaBrandLogo(size: 32, radius: 8),
+                    const SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Text(
-                            'Zero-Trust Hardware Enclave',
-                            style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                            'Security Vault',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: JalaPalette.text),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          const SizedBox(height: 2),
+                          const SizedBox(height: 1),
                           Text(
-                            _pairedDesktopInfo,
-                            style: const TextStyle(fontSize: 11, color: JalaPalette.brandGold),
+                            'AES-256 • ${_hosts.length} Hosts • ${_credentials.length} Keys',
+                            style: const TextStyle(fontSize: 11, color: JalaPalette.muted),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ],
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: JalaPalette.ok.withValues(alpha: 0.14),
-                        borderRadius: BorderRadius.circular(99),
-                        border: Border.all(color: JalaPalette.ok.withValues(alpha: 0.45)),
-                      ),
-                      child: const Text(
-                        'SEALED',
-                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: JalaPalette.ok),
-                      ),
+                    IconButton(
+                      key: const Key('btn_open_qr_pair'),
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Pair Desktop',
+                      onPressed: _showQrPairDialog,
+                      icon: const Icon(Icons.qr_code_scanner_rounded, size: 19, color: JalaPalette.brandGold),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
               if (isTwoColumn) ...[
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(child: credentialsVaultCard),
-                    const SizedBox(width: 12),
                     Expanded(child: totpCard),
+                    const SizedBox(width: 12),
+                    Expanded(child: credentialsVaultCard),
                   ],
                 ),
                 const SizedBox(height: 12),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: Column(
-                        children: [
-                          knownHostsCard,
-                          const SizedBox(height: 12),
-                          encryptedBackupCard,
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 12),
                     Expanded(child: securitySwitchesCard),
+                    const SizedBox(width: 12),
+                    Expanded(child: backupAndSshCard),
                   ],
                 ),
               ] else ...[
-                credentialsVaultCard,
-                const SizedBox(height: 12),
                 totpCard,
-                const SizedBox(height: 12),
-                knownHostsCard,
-                const SizedBox(height: 12),
-                encryptedBackupCard,
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
+                credentialsVaultCard,
+                const SizedBox(height: 10),
                 securitySwitchesCard,
+                const SizedBox(height: 10),
+                backupAndSshCard,
               ],
             ],
           ),
@@ -13146,7 +13206,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     final titleText = item.issuer.isNotEmpty && !item.label.toLowerCase().contains(item.issuer.toLowerCase())
         ? '${item.issuer} • ${item.label}'
         : item.label;
-    final meta = '${item.algorithm} • ${item.digits} digits • ${itemRem}s/${period}s';
+    final isDefaultSpec =
+        item.algorithm.toUpperCase() == 'SHA1' && item.digits == 6 && period == 30;
+    final nonDefaultMeta = isDefaultSpec ? null : '${item.algorithm} • ${item.digits}d • ${itemRem}s';
     final hasActiveSession = (_desktopLiveConnected && !_viewOnly) || _sshLiveConnected;
 
     return Row(
@@ -13161,7 +13223,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              Text(meta, style: const TextStyle(fontSize: 11, color: JalaPalette.muted)),
+              if (nonDefaultMeta != null)
+                Text(nonDefaultMeta, style: const TextStyle(fontSize: 10.5, color: JalaPalette.muted)),
             ],
           ),
         ),
@@ -13239,32 +13302,168 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   }
 
   Future<void> _showConfigureVaultPinDialog() async {
-    await showDialog<void>(
+    await Navigator.of(context).push<void>(
+      PageRouteBuilder<void>(
+        fullscreenDialog: true,
+        opaque: true,
+        transitionDuration: const Duration(milliseconds: 220),
+        reverseTransitionDuration: const Duration(milliseconds: 180),
+        pageBuilder: (pageCtx, anim1, anim2) => VaultPinSetupSheet(
+          existingPinHash: _vaultPinHash,
+          initialPinLength: _vaultPinLength,
+          onSavePin: (newPinHash, pinLen) {
+            setState(() {
+              _vaultPinHash = newPinHash;
+              _vaultPinLength = pinLen.clamp(4, 12);
+              _isVaultLocked = false;
+            });
+            _resetVaultInactivityTimer();
+            unawaited(_saveScalarSettingsOnly());
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Vault App-Lock $pinLen-Digit PIN enabled.')),
+            );
+          },
+          onRemovePin: () {
+            _vaultInactivityTimer?.cancel();
+            setState(() {
+              _vaultPinHash = '';
+              _isVaultLocked = false;
+            });
+            unawaited(_saveScalarSettingsOnly());
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Vault App-Lock PIN removed.')),
+            );
+          },
+        ),
+        transitionsBuilder: (transCtx, anim, secAnim, child) => FadeTransition(
+          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showTrustedSshKeysSheet() async {
+    await showModalBottomSheet<void>(
       context: context,
-      builder: (_) => VaultPinSetupSheet(
-        existingPinHash: _vaultPinHash,
-        initialPinLength: _vaultPinLength,
-        onSavePin: (newPinHash, pinLen) {
-          setState(() {
-            _vaultPinHash = newPinHash;
-            _vaultPinLength = pinLen.clamp(4, 12);
-            _isVaultLocked = false;
-          });
-          _resetVaultInactivityTimer();
-          unawaited(_saveScalarSettingsOnly());
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Vault App-Lock $pinLen-Digit PIN enabled.')),
-          );
-        },
-        onRemovePin: () {
-          _vaultInactivityTimer?.cancel();
-          setState(() {
-            _vaultPinHash = '';
-            _isVaultLocked = false;
-          });
-          unawaited(_saveScalarSettingsOnly());
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Vault App-Lock PIN removed.')),
+      isScrollControlled: true,
+      backgroundColor: JalaPalette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (sheetCtx, setSheetState) {
+          final entries = _knownHostsStore.entries;
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.verified_user_outlined, size: 18, color: JalaPalette.ok),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Trusted SSH Keys',
+                          style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
+                        ),
+                      ),
+                      if (entries.isNotEmpty)
+                        TextButton(
+                          key: const ValueKey('btn_clear_all_known_hosts'),
+                          style: TextButton.styleFrom(
+                            foregroundColor: JalaPalette.danger,
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          onPressed: () {
+                            setState(() => _knownHostsStore.clearAll());
+                            setSheetState(() {});
+                            _saveVaultToDisk();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Cleared all locally pinned SSH host keys.')),
+                            );
+                          },
+                          child: const Text('Clear All', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  if (entries.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text(
+                        'No SSH host keys pinned yet. Fingerprints pin automatically on first SSH connect.',
+                        style: TextStyle(fontSize: 12, color: JalaPalette.muted),
+                      ),
+                    )
+                  else
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.55,
+                      ),
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: entries.length,
+                        separatorBuilder: (sepCtx, sepIdx) => const Divider(height: 14),
+                        itemBuilder: (_, i) {
+                          final item = entries[i];
+                          return Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '${item.endpoint} • ${item.keyType}',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        fontFamily: 'monospace',
+                                        fontWeight: FontWeight.w700,
+                                        color: JalaPalette.text,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      item.fingerprintDisplay,
+                                      style: const TextStyle(
+                                        fontSize: 10.5,
+                                        fontFamily: 'monospace',
+                                        color: JalaPalette.brandGold,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                key: ValueKey('btn_revoke_known_host_${item.endpoint}'),
+                                visualDensity: VisualDensity.compact,
+                                tooltip: 'Revoke Pinned Key',
+                                onPressed: () {
+                                  final ep = item.endpoint;
+                                  setState(() => _knownHostsStore.removeEndpoint(ep));
+                                  setSheetState(() {});
+                                  _saveVaultToDisk();
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text('Revoked pinned SSH host key for $ep')),
+                                  );
+                                },
+                                icon: const Icon(Icons.delete_outline_rounded, size: 17, color: JalaPalette.muted),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
           );
         },
       ),

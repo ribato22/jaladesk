@@ -314,6 +314,97 @@ class SshBastionRouteResolver {
   }
 }
 
+/// Wraps an opened `SSHForwardChannel` and immediately subscribes to `channel.stream`
+/// so server-speaks-first protocols (VNC `RFB 003.008\n`, SSH `SSH-2.0-...`) NEVER drop
+/// greeting bytes while waiting for the local loopback `clientSocket` to connect.
+class _PreparedForwardChannel {
+  final SSHForwardChannel channel;
+  final List<Uint8List> _earlyChunks = <Uint8List>[];
+  late final StreamSubscription<Uint8List> _sub;
+  void Function(Uint8List chunk)? _onLiveChunk;
+  void Function()? _onClosedOrError;
+  bool _remoteDone = false;
+  Object? _remoteError;
+  bool _destroyed = false;
+
+  _PreparedForwardChannel(this.channel) {
+    _sub = channel.stream.listen(
+      (Uint8List chunk) {
+        if (_destroyed) return;
+        final liveCb = _onLiveChunk;
+        if (liveCb != null) {
+          liveCb(chunk);
+        } else {
+          _earlyChunks.add(Uint8List.fromList(chunk));
+        }
+      },
+      onError: (Object err) {
+        if (_destroyed) return;
+        _remoteError = err;
+        _onClosedOrError?.call();
+      },
+      onDone: () {
+        if (_destroyed) return;
+        _remoteDone = true;
+        _onClosedOrError?.call();
+      },
+      cancelOnError: true,
+    );
+  }
+
+  /// Flushes any buffered server-first greeting chunks to `clientSocket` in exact order
+  /// and switches to zero-copy live forwarding. Returns `false` if writing failed or remote closed.
+  bool attachClientSocket({
+    required Socket clientSocket,
+    required void Function(int byteCount) onBytesDelivered,
+    required void Function() onRemoteClosedOrError,
+  }) {
+    if (_destroyed) return false;
+    for (final chunk in _earlyChunks) {
+      onBytesDelivered(chunk.length);
+      try {
+        clientSocket.add(chunk);
+      } catch (_) {
+        _earlyChunks.clear();
+        return false;
+      }
+    }
+    _earlyChunks.clear();
+
+    if (_remoteError != null || _remoteDone) {
+      return false;
+    }
+
+    _onClosedOrError = onRemoteClosedOrError;
+    _onLiveChunk = (Uint8List chunk) {
+      onBytesDelivered(chunk.length);
+      try {
+        clientSocket.add(chunk);
+      } catch (_) {
+        onRemoteClosedOrError();
+      }
+    };
+    return true;
+  }
+
+  Future<void> dispose() async {
+    if (_destroyed) return;
+    _destroyed = true;
+    _onLiveChunk = null;
+    _onClosedOrError = null;
+    _earlyChunks.clear();
+    try {
+      await _sub.cancel();
+    } catch (_) {}
+    try {
+      await channel.close();
+    } catch (_) {}
+    try {
+      channel.destroy();
+    } catch (_) {}
+  }
+}
+
 /// Active Local TCP Port-Forward (`127.0.0.1:<localPort> ⇄ <remoteHost>:<remotePort>`)
 /// Used both transparently for RDP / VNC / Hypervisor sessions over SSH Jump Hosts
 /// and explicitly in the standalone SSH Port Forwarding Studio (`ssh -L`).
@@ -336,9 +427,9 @@ class ActiveLocalPortForward {
   int totalConnections = 0;
   bool _closed = false;
   bool _usedPrewarmedChannel = false;
-  Future<SSHForwardChannel>? _prewarmedForwardFuture;
+  _PreparedForwardChannel? _initialPreparedChannel;
   final Set<Socket> _openSockets = <Socket>{};
-  final Set<SSHForwardChannel> _openChannels = <SSHForwardChannel>{};
+  final Set<_PreparedForwardChannel> _openPreparedChannels = <_PreparedForwardChannel>{};
   late final StreamSubscription<Socket> _acceptSub;
 
   ActiveLocalPortForward._({
@@ -351,21 +442,14 @@ class ActiveLocalPortForward {
     required SSHClient exitSshClient,
     SshBastionChain? ownedChain,
     VoidCallbackRef? onClosedFromParent,
-    bool prewarmChannel = false,
+    _PreparedForwardChannel? initialPreparedChannel,
     this.onStatsUpdated,
   })  : _server = server,
         _exitSshClient = exitSshClient,
         _ownedChain = ownedChain,
         _onClosedFromParent = onClosedFromParent,
+        _initialPreparedChannel = initialPreparedChannel,
         startedAt = DateTime.now() {
-    if (prewarmChannel) {
-      final Future<SSHForwardChannel> fut = _exitSshClient
-          .forwardLocal(remoteHost, remotePort)
-          .timeout(const Duration(seconds: 10));
-      // Prevent unhandled async error if never consumed before close()
-      unawaited(fut.then((_) {}, onError: (_) {}));
-      _prewarmedForwardFuture = fut;
-    }
     _acceptSub = _server.listen(
       (Socket sock) {
         sock.done.catchError((_) {});
@@ -394,26 +478,24 @@ class ActiveLocalPortForward {
       clientSocket.setOption(SocketOption.tcpNoDelay, true);
     } catch (_) {}
 
-    SSHForwardChannel? forward;
+    _PreparedForwardChannel? prepared;
     bool cleanedUp = false;
     bool forwardReady = false;
     final List<Uint8List> preForwardBuffer = <Uint8List>[];
     StreamSubscription<Uint8List>? tcpToSshSub;
-    StreamSubscription<Uint8List>? sshToTcpSub;
 
     Future<void> tearDownPair() async {
       if (cleanedUp) return;
       cleanedUp = true;
       await tcpToSshSub?.cancel();
-      await sshToTcpSub?.cancel();
       _openSockets.remove(clientSocket);
-      if (forward != null) {
-        _openChannels.remove(forward);
+      if (prepared != null) {
+        _openPreparedChannels.remove(prepared);
       }
       if (activeStreams > 0 && forwardReady) activeStreams--;
-      try {
-        await forward?.close();
-      } catch (_) {}
+      if (prepared != null) {
+        await prepared.dispose();
+      }
       try {
         clientSocket.destroy();
       } catch (_) {}
@@ -432,7 +514,7 @@ class ActiveLocalPortForward {
         }
         bytesSent += chunk.length;
         try {
-          forward!.sink.add(chunk);
+          prepared!.channel.sink.add(chunk);
         } catch (_) {
           unawaited(tearDownPair());
         }
@@ -442,16 +524,17 @@ class ActiveLocalPortForward {
       cancelOnError: true,
     );
 
-    final prewarmed = _prewarmedForwardFuture;
-    _prewarmedForwardFuture = null;
+    final claimedInitial = _initialPreparedChannel;
+    _initialPreparedChannel = null;
     try {
-      if (prewarmed != null) {
-        forward = await prewarmed;
+      if (claimedInitial != null) {
+        prepared = claimedInitial;
         _usedPrewarmedChannel = true;
       } else {
-        forward = await _exitSshClient
+        final rawForward = await _exitSshClient
             .forwardLocal(remoteHost, remotePort)
             .timeout(const Duration(seconds: 10));
+        prepared = _PreparedForwardChannel(rawForward);
       }
     } catch (_) {
       await tearDownPair();
@@ -459,15 +542,13 @@ class ActiveLocalPortForward {
     }
 
     if (_closed || cleanedUp) {
-      try {
-        await forward.close();
-      } catch (_) {}
+      await prepared.dispose();
       await tearDownPair();
       return;
     }
 
     _openSockets.add(clientSocket);
-    _openChannels.add(forward);
+    _openPreparedChannels.add(prepared);
     forwardReady = true;
     activeStreams++;
     totalConnections++;
@@ -477,7 +558,7 @@ class ActiveLocalPortForward {
       if (cleanedUp || _closed) break;
       bytesSent += buffered.length;
       try {
-        forward.sink.add(buffered);
+        prepared.channel.sink.add(buffered);
       } catch (_) {
         await tearDownPair();
         return;
@@ -485,38 +566,25 @@ class ActiveLocalPortForward {
     }
     preForwardBuffer.clear();
 
-    sshToTcpSub = forward.stream.listen(
-      (Uint8List chunk) {
-        if (cleanedUp || _closed) return;
-        bytesReceived += chunk.length;
-        try {
-          clientSocket.add(chunk);
-        } catch (_) {
-          unawaited(tearDownPair());
-        }
+    final attachedAlive = prepared.attachClientSocket(
+      clientSocket: clientSocket,
+      onBytesDelivered: (int count) {
+        bytesReceived += count;
       },
-      onError: (_) => unawaited(tearDownPair()),
-      onDone: () => unawaited(tearDownPair()),
-      cancelOnError: true,
+      onRemoteClosedOrError: () => unawaited(tearDownPair()),
     );
+    if (!attachedAlive) {
+      await tearDownPair();
+    }
   }
 
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
-    final unclaimedPrewarm = _prewarmedForwardFuture;
-    _prewarmedForwardFuture = null;
-    if (unclaimedPrewarm != null) {
-      unawaited(
-        unclaimedPrewarm.then(
-          (ch) {
-            try {
-              ch.destroy();
-            } catch (_) {}
-          },
-          onError: (_) {},
-        ),
-      );
+    final unclaimedInitial = _initialPreparedChannel;
+    _initialPreparedChannel = null;
+    if (unclaimedInitial != null) {
+      await unclaimedInitial.dispose();
     }
     try {
       await _acceptSub.cancel();
@@ -524,12 +592,10 @@ class ActiveLocalPortForward {
     try {
       await _server.close();
     } catch (_) {}
-    for (final ch in _openChannels.toList()) {
-      try {
-        ch.destroy();
-      } catch (_) {}
+    for (final prep in _openPreparedChannels.toList()) {
+      await prep.dispose();
     }
-    _openChannels.clear();
+    _openPreparedChannels.clear();
     for (final sock in _openSockets.toList()) {
       try {
         sock.destroy();
@@ -675,11 +741,20 @@ class SshBastionChain {
     if (_disposed || !isHealthy) {
       throw const BastionRoutingException('Bastion chain has already been closed.');
     }
-    return exitClient.forwardLocal(targetHost, targetPort).timeout(timeout);
+    try {
+      return await exitClient.forwardLocal(targetHost, targetPort).timeout(timeout);
+    } catch (err) {
+      if (err is! SSHChannelOpenError || exitClient.isClosed) {
+        await dispose();
+      }
+      rethrow;
+    }
   }
 
   /// Binds a Zero-Trust loopback-only (`127.0.0.1`) TCP port that tunnels traffic
   /// through the exit Jump Host to `remoteHost:remotePort` (for RDP, VNC, HTTPS, or `ssh -L`).
+  /// When `verifyInitialChannel` is `true` (default), awaits opening and greeting-buffering the
+  /// initial `direct-tcpip` channel so stale pooled SSH transports fail fast and trigger recovery.
   Future<ActiveLocalPortForward> startLocalPortForward({
     required String remoteHost,
     required int remotePort,
@@ -687,16 +762,37 @@ class SshBastionChain {
     String label = '',
     bool ownChainLifecycle = false,
     bool prewarmChannel = false,
+    bool verifyInitialChannel = true,
     VoidCallbackRef? onStatsUpdated,
   }) async {
     if (_disposed || !isHealthy) {
       throw const BastionRoutingException('Bastion chain has already been closed.');
     }
-    final server = await ServerSocket.bind(
-      InternetAddress.loopbackIPv4,
-      localBindPort,
-      shared: false,
-    );
+    _PreparedForwardChannel? initialPrepared;
+    if (verifyInitialChannel || prewarmChannel) {
+      try {
+        final rawCh = await exitClient
+            .forwardLocal(remoteHost, remotePort)
+            .timeout(const Duration(seconds: 10));
+        initialPrepared = _PreparedForwardChannel(rawCh);
+      } catch (err) {
+        if (err is! SSHChannelOpenError || exitClient.isClosed) {
+          await dispose();
+        }
+        rethrow;
+      }
+    }
+    final ServerSocket server;
+    try {
+      server = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        localBindPort,
+        shared: false,
+      );
+    } catch (err) {
+      await initialPrepared?.dispose();
+      rethrow;
+    }
     late final ActiveLocalPortForward tunnel;
     tunnel = ActiveLocalPortForward._(
       id: 'tun-${DateTime.now().microsecondsSinceEpoch}',
@@ -708,7 +804,7 @@ class SshBastionChain {
       exitSshClient: exitClient,
       ownedChain: ownChainLifecycle ? this : null,
       onClosedFromParent: () => _tunnels.remove(tunnel),
-      prewarmChannel: prewarmChannel,
+      initialPreparedChannel: initialPrepared,
       onStatsUpdated: onStatsUpdated,
     );
     _tunnels.add(tunnel);
