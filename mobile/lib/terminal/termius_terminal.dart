@@ -273,6 +273,7 @@ class TerminalSnippetItem {
   final String command;
   final String category;
   final bool runImmediately;
+  final int updatedAtMs;
 
   const TerminalSnippetItem({
     required this.id,
@@ -280,6 +281,7 @@ class TerminalSnippetItem {
     required this.command,
     required this.category,
     this.runImmediately = true,
+    this.updatedAtMs = 0,
   });
 
   Map<String, dynamic> toJson() => {
@@ -288,6 +290,7 @@ class TerminalSnippetItem {
         'command': command,
         'category': category,
         'runImmediately': runImmediately,
+        'updatedAtMs': updatedAtMs,
       };
 
   factory TerminalSnippetItem.fromJson(Map<String, dynamic> json) {
@@ -297,6 +300,7 @@ class TerminalSnippetItem {
       command: (json['command'] as String?) ?? '',
       category: (json['category'] as String?) ?? 'Custom',
       runImmediately: (json['runImmediately'] as bool?) ?? true,
+      updatedAtMs: (json['updatedAtMs'] as num?)?.toInt() ?? 0,
     );
   }
 

@@ -14,6 +14,7 @@ import 'package:jaladesk_mobile/protocols/proxmox_ve_client.dart';
 import 'package:jaladesk_mobile/protocols/rdp_ffi_client.dart';
 import 'package:jaladesk_mobile/protocols/ssh_bastion_tunnel.dart';
 import 'package:jaladesk_mobile/protocols/vnc_rfb_client.dart';
+import 'package:jaladesk_mobile/security/vault_cloud_sync.dart';
 import 'package:jaladesk_mobile/security/vault_passcode_enclave.dart';
 import 'package:jaladesk_mobile/security/vault_security_service.dart';
 import 'package:jaladesk_mobile/terminal/sftp_transfer_service.dart';
@@ -4039,4 +4040,714 @@ void main() {
     expect(tester.getSize(lockFinder), equals(const Size(412, 915)));
     expect(tester.takeException(), isNull);
   });
+
+  test(
+      'v1.14.0+16 Test 1: VaultSyncPayloadMerger & Zero-Knowledge E2EE Multi-Device Sync (Tombstones, Edits & Zero Plaintext Leakage)',
+      () async {
+    const masterSyncPass = 'ZeroTrust-MasterSync#2026!';
+
+    const host1 = RemoteHostItem(
+      id: 'host-rdp-dc01',
+      name: 'Core AD Controller',
+      address: '10.28.44.10',
+      port: 3389,
+      protocol: RemoteProtocol.rdp,
+      folder: 'Core Infrastructure',
+      domain: 'corp',
+      username: 'sysadmin',
+      password: 'Sup3rS3cretRdpPassword#1',
+      jumpHostId: 'gw-edge-01',
+      updatedAtMs: 1000,
+    );
+    const jump1 = RemoteHostItem(
+      id: 'gw-edge-01',
+      name: 'Edge Jump v1',
+      address: '203.0.113.77',
+      port: 2222,
+      protocol: RemoteProtocol.ssh,
+      username: 'bastion_ops',
+      privateKeyPem: '-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET_BASTION_KEY_MATERIAL\n-----END OPENSSH PRIVATE KEY-----',
+      isJumpHost: true,
+      updatedAtMs: 1000,
+    );
+    const folderCfg = FolderGatewayConfig(
+      name: 'Core Infrastructure',
+      jumpHostId: 'gw-edge-01',
+      accentTint: 'gold',
+      updatedAtMs: 1000,
+    );
+
+    // 1. Device A builds initial payload, seals client-side on isolate, and uploads to cloud
+    final deviceAPayload = VaultSyncPayloadMerger.normalizePayload(
+      <String, dynamic>{
+        'hosts': <Map<String, dynamic>>[host1.toJson(), jump1.toJson()],
+        'credentials': const <Map<String, dynamic>>[],
+        'folders': <Map<String, dynamic>>[folderCfg.toJson()],
+        'totp': const <Map<String, dynamic>>[],
+        'snippets': const <Map<String, dynamic>>[],
+        'tombstones': const <String, int>{},
+      },
+      nowMs: 1050,
+    );
+    final cloudBytesV1 = await VaultCloudSyncCrypto.sealAsync(
+      payload: deviceAPayload,
+      passphrase: masterSyncPass,
+    );
+
+    // Verify ZERO plaintext leakage of IPs, usernames, passwords, keys, or folder names in cloud envelope!
+    expect(cloudBytesV1, contains('jaladesk-encrypted-vault-v1'));
+    expect(cloudBytesV1.contains('10.28.44.10'), isFalse);
+    expect(cloudBytesV1.contains('203.0.113.77'), isFalse);
+    expect(cloudBytesV1.contains('sysadmin'), isFalse);
+    expect(cloudBytesV1.contains('Sup3rS3cretRdpPassword#1'), isFalse);
+    expect(cloudBytesV1.contains('SECRET_BASTION_KEY_MATERIAL'), isFalse);
+    expect(cloudBytesV1.contains('Core Infrastructure'), isFalse);
+
+    // 2. Device B pulls cloudBytesV1, adds Host 2 + Credential 1, updates Jump Host 1, and deletes Host 1
+    final pulledOnB = await VaultCloudSyncCrypto.openAsync(
+      rawEnvelopeJson: cloudBytesV1,
+      passphrase: masterSyncPass,
+    );
+    final bHosts = (pulledOnB['hosts'] as List<dynamic>)
+        .map((m) => RemoteHostItem.fromJson(Map<String, dynamic>.from(m as Map)))
+        .toList();
+    expect(bHosts.length, 2);
+
+    // Device B deletes Host 1 (ts=2000), updates Jump Host 1 (ts=2100), adds Host 2 & Credential 1 (ts=2200)
+    bHosts.removeWhere((h) => h.id == 'host-rdp-dc01');
+    final bJumpIdx = bHosts.indexWhere((h) => h.id == 'gw-edge-01');
+    bHosts[bJumpIdx] = bHosts[bJumpIdx].copyWith(
+      name: 'Edge Jump v2 (Hardened)',
+      updatedAtMs: 2100,
+    );
+    const host2 = RemoteHostItem(
+      id: 'host-k8s-master',
+      name: 'K8s Prod API',
+      address: '10.28.44.99',
+      port: 22,
+      protocol: RemoteProtocol.ssh,
+      folder: 'Core Infrastructure',
+      username: 'ubuntu',
+      credentialId: 'cred-ops-01',
+      updatedAtMs: 2200,
+    );
+    bHosts.add(host2);
+    const cred1 = VaultCredentialItem(
+      id: 'cred-ops-01',
+      label: 'Prod Ops Key',
+      username: 'ubuntu',
+      password: 'OpsVaultPassword!99',
+      updatedAtMs: 2200,
+    );
+
+    final deviceBLocal = <String, dynamic>{
+      'hosts': bHosts.map((h) => h.toJson()).toList(),
+      'credentials': <Map<String, dynamic>>[cred1.toJson()],
+      'folders': pulledOnB['folders'],
+      'totp': const <Map<String, dynamic>>[],
+      'snippets': const <Map<String, dynamic>>[],
+      'tombstones': <String, int>{'host:host-rdp-dc01': 2000},
+    };
+    final mergedOnB = VaultSyncPayloadMerger.merge(deviceBLocal, pulledOnB, nowMs: 2300);
+    final cloudBytesV2 = await VaultCloudSyncCrypto.sealAsync(
+      payload: mergedOnB,
+      passphrase: masterSyncPass,
+    );
+    expect(cloudBytesV2.contains('10.28.44.99'), isFalse);
+    expect(cloudBytesV2.contains('OpsVaultPassword!99'), isFalse);
+
+    // 3. Device A (still holding stale Host 1 locally at updatedAtMs=1000!) syncs with cloudBytesV2
+    final remoteLatestForA = await VaultCloudSyncCrypto.openAsync(
+      rawEnvelopeJson: cloudBytesV2,
+      passphrase: masterSyncPass,
+    );
+    final syncedDeviceA = VaultSyncPayloadMerger.merge(
+      deviceAPayload,
+      remoteLatestForA,
+      nowMs: 3000,
+    );
+
+    final finalAHosts = (syncedDeviceA['hosts'] as List<dynamic>)
+        .map((m) => RemoteHostItem.fromJson(Map<String, dynamic>.from(m as Map)))
+        .toList();
+    final finalACreds = (syncedDeviceA['credentials'] as List<dynamic>)
+        .map((m) => VaultCredentialItem.fromJson(Map<String, dynamic>.from(m as Map)))
+        .toList();
+    final finalAFolders = (syncedDeviceA['folders'] as List<dynamic>)
+        .map((m) => FolderGatewayConfig.fromJson(Map<String, dynamic>.from(m as Map)))
+        .toList();
+
+    // Verify Host 1 was NOT resurrected, Host 2 + Credential 1 arrived, Jump Host 1 updated to v2, Folder preserved!
+    expect(finalAHosts.any((h) => h.id == 'host-rdp-dc01'), isFalse);
+    expect(finalAHosts.any((h) => h.id == 'host-k8s-master'), isTrue);
+    final syncedJump = finalAHosts.firstWhere((h) => h.id == 'gw-edge-01');
+    expect(syncedJump.name, equals('Edge Jump v2 (Hardened)'));
+    expect(finalACreds.map((c) => c.id), contains('cred-ops-01'));
+    expect(finalAFolders.map((f) => f.name), contains('Core Infrastructure'));
+
+    // Also verify tombstone capping to 500 most recent entries
+    final hugeTombs = <String, int>{
+      for (int i = 1; i <= 540; i++) 'host:old-$i': i,
+    };
+    final capped = VaultSyncPayloadMerger.capTombstones(hugeTombs);
+    expect(capped.length, equals(500));
+    expect(capped.containsKey('host:old-540'), isTrue);
+    expect(capped.containsKey('host:old-1'), isFalse);
+  });
+
+  test(
+      'v1.14.0+16 Test 2: Live Loopback Transport Adapters for Google Drive AppData (with 401 refresh), WebDAV, GitHub Secret Gist & OpenSSH SFTP',
+      () async {
+    final prevHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = prevHttpOverrides);
+
+    final sealedSampleV1 = EncryptedVaultBackupCodec.sealJson(
+      payload: <String, dynamic>{'syncSchema': 2, 'marker': 'v1'},
+      passphrase: 'LoopbackTransportPass#1',
+    );
+    final sealedSampleV2 = EncryptedVaultBackupCodec.sealJson(
+      payload: <String, dynamic>{'syncSchema': 2, 'marker': 'v2'},
+      passphrase: 'LoopbackTransportPass#1',
+    );
+
+    // --- A. Google Drive v3 appDataFolder REST Transport + 401 Token Refresh ---
+    String? driveStoredContent;
+    String? driveFileId;
+    int driveTokenRefreshCount = 0;
+
+    final driveServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => driveServer.close(force: true));
+    driveServer.listen((HttpRequest req) async {
+      final authHeader = req.headers.value('authorization') ?? '';
+      if (authHeader != 'Bearer valid-google-token-v2') {
+        req.response.statusCode = 401;
+        req.response.write('{"error":{"code":401,"message":"Invalid Credentials"}}');
+        await req.response.close();
+        return;
+      }
+      final path = req.uri.path;
+      final body = await utf8.decoder.bind(req).join();
+      req.response.headers.contentType = ContentType.json;
+
+      if (req.method == 'GET' && path == '/drive/v3/files') {
+        expect(req.uri.queryParameters['spaces'], equals('appDataFolder'));
+        if (driveFileId == null) {
+          req.response.statusCode = 200;
+          req.response.write(jsonEncode(<String, Object>{'files': <Object>[]}));
+        } else {
+          req.response.statusCode = 200;
+          req.response.write(jsonEncode(<String, Object>{
+            'files': <Object>[
+              <String, String>{
+                'id': driveFileId!,
+                'name': 'jaladesk-vault-v1.jvault',
+                'modifiedTime': '2026-11-13T08:00:00Z',
+              },
+            ],
+          }));
+        }
+      } else if (req.method == 'POST' && path == '/upload/drive/v3/files') {
+        expect(req.uri.queryParameters['uploadType'], equals('multipart'));
+        expect(body, contains('"appDataFolder"'));
+        // Extract second JSON part (the encrypted .jvault envelope)
+        final formatIdx = body.indexOf('{\n  "format":');
+        driveStoredContent = formatIdx >= 0
+            ? body.substring(formatIdx, body.lastIndexOf('}') + 1)
+            : body;
+        driveFileId = 'gdrive_appdata_file_001';
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode(<String, String>{'id': driveFileId!}));
+      } else if (req.method == 'PATCH' &&
+          path == '/upload/drive/v3/files/gdrive_appdata_file_001') {
+        expect(req.uri.queryParameters['uploadType'], equals('media'));
+        driveStoredContent = body;
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode(<String, String>{'id': driveFileId!}));
+      } else if (req.method == 'GET' &&
+          path == '/drive/v3/files/gdrive_appdata_file_001') {
+        expect(req.uri.queryParameters['alt'], equals('media'));
+        req.response.statusCode = 200;
+        req.response.write(driveStoredContent ?? '');
+      } else {
+        req.response.statusCode = 404;
+      }
+      await req.response.close();
+    });
+
+    final mockGoogleAuth = _MockGoogleAuthTokenProvider(
+      initialToken: 'stale-expired-token-v1',
+      refreshedToken: 'valid-google-token-v2',
+      onRefreshed: () => driveTokenRefreshCount++,
+    );
+    final gdriveTransport = GoogleDriveAppDataSyncTransport(
+      authProvider: mockGoogleAuth,
+      apiBaseUrl: 'http://127.0.0.1:${driveServer.port}',
+    );
+    expect(await gdriveTransport.downloadEnvelope(), isNull);
+    expect(driveTokenRefreshCount, equals(1)); // Triggered automatic 401 refresh!
+    await gdriveTransport.uploadEnvelope(sealedSampleV1);
+    expect(await gdriveTransport.downloadEnvelope(), equals(sealedSampleV1));
+    await gdriveTransport.uploadEnvelope(sealedSampleV2);
+    expect(await gdriveTransport.downloadEnvelope(), equals(sealedSampleV2));
+
+    // --- B. WebDAV Basic Auth Transport + WAN Plaintext HTTP Guard ---
+    String? webdavStored;
+    final webdavServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => webdavServer.close(force: true));
+    webdavServer.listen((HttpRequest req) async {
+      final expectedAuth = 'Basic ${base64Encode(utf8.encode('nas_user:nas_app_pass'))}';
+      if (req.headers.value('authorization') != expectedAuth) {
+        req.response.statusCode = 401;
+        await req.response.close();
+        return;
+      }
+      if (req.method == 'GET') {
+        if (webdavStored == null) {
+          req.response.statusCode = 404;
+        } else {
+          req.response.statusCode = 200;
+          req.response.write(webdavStored);
+        }
+      } else if (req.method == 'PUT') {
+        webdavStored = await utf8.decoder.bind(req).join();
+        req.response.statusCode = 201;
+      }
+      await req.response.close();
+    });
+
+    final webdavTransport = WebDavVaultSyncTransport(
+      fileUrl: 'http://127.0.0.1:${webdavServer.port}/remote.php/dav/files/nas_user/jaladesk.jvault',
+      username: 'nas_user',
+      password: 'nas_app_pass',
+    );
+    expect(await webdavTransport.downloadEnvelope(), isNull);
+    await webdavTransport.uploadEnvelope(sealedSampleV1);
+    expect(await webdavTransport.downloadEnvelope(), equals(sealedSampleV1));
+
+    const insecureWanWebdav = WebDavVaultSyncTransport(
+      fileUrl: 'http://nextcloud.public-example.org/dav/jaladesk.jvault',
+      username: 'u',
+      password: 'p',
+    );
+    expect(
+      () => insecureWanWebdav.downloadEnvelope(),
+      throwsA(isA<VaultCloudSyncException>()),
+    );
+
+    // --- C. GitHub Secret Gist Transport (Auto-Create, Auto-Discovery & PATCH) ---
+    String? gistStoredContent;
+    String? serverGistId;
+    final gistServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => gistServer.close(force: true));
+    gistServer.listen((HttpRequest req) async {
+      if (req.headers.value('authorization') != 'Bearer ghp_testSecretToken123') {
+        req.response.statusCode = 401;
+        await req.response.close();
+        return;
+      }
+      final path = req.uri.path;
+      final body = await utf8.decoder.bind(req).join();
+      req.response.headers.contentType = ContentType.json;
+
+      if (req.method == 'GET' && path == '/gists') {
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode(serverGistId == null
+            ? <Object>[]
+            : <Object>[
+                <String, Object>{
+                  'id': serverGistId!,
+                  'public': false,
+                  'files': <String, Object>{
+                    'jaladesk-vault.jvault': <String, String>{
+                      'filename': 'jaladesk-vault.jvault',
+                    },
+                  },
+                },
+              ]));
+      } else if (req.method == 'POST' && path == '/gists') {
+        final decoded = jsonDecode(body) as Map<String, dynamic>;
+        expect(decoded['public'], isFalse);
+        final files = decoded['files'] as Map<String, dynamic>;
+        final vaultFile = files['jaladesk-vault.jvault'] as Map<String, dynamic>;
+        gistStoredContent = vaultFile['content'] as String;
+        serverGistId = 'gist_auto_998877';
+        req.response.statusCode = 201;
+        req.response.write(jsonEncode(<String, Object>{'id': serverGistId!}));
+      } else if (req.method == 'GET' && path == '/gists/gist_auto_998877') {
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode(<String, Object>{
+          'id': serverGistId!,
+          'public': false,
+          'files': <String, Object>{
+            'jaladesk-vault.jvault': <String, Object>{
+              'content': gistStoredContent ?? '',
+              'truncated': false,
+            },
+          },
+        }));
+      } else if (req.method == 'PATCH' && path == '/gists/gist_auto_998877') {
+        final decoded = jsonDecode(body) as Map<String, dynamic>;
+        final files = decoded['files'] as Map<String, dynamic>;
+        final vaultFile = files['jaladesk-vault.jvault'] as Map<String, dynamic>;
+        gistStoredContent = vaultFile['content'] as String;
+        req.response.statusCode = 200;
+        req.response.write(jsonEncode(<String, Object>{'id': serverGistId!}));
+      } else {
+        req.response.statusCode = 404;
+      }
+      await req.response.close();
+    });
+
+    String? capturedGistId;
+    final gistCreator = GitHubGistVaultSyncTransport(
+      token: 'ghp_testSecretToken123',
+      apiBaseUrl: 'http://127.0.0.1:${gistServer.port}',
+      onGistIdResolved: (id) => capturedGistId = id,
+    );
+    expect(await gistCreator.downloadEnvelope(), isNull);
+    await gistCreator.uploadEnvelope(sealedSampleV1);
+    expect(capturedGistId, equals('gist_auto_998877'));
+
+    // Second device with blank gistId auto-discovers the secret gist!
+    final gistSecondDevice = GitHubGistVaultSyncTransport(
+      token: 'ghp_testSecretToken123',
+      apiBaseUrl: 'http://127.0.0.1:${gistServer.port}',
+    );
+    expect(await gistSecondDevice.downloadEnvelope(), equals(sealedSampleV1));
+    await gistSecondDevice.uploadEnvelope(sealedSampleV2);
+    expect(await gistCreator.downloadEnvelope(), equals(sealedSampleV2));
+
+    // --- D. SFTP Transport over Live Ephemeral OpenSSH internal-sftp ---
+    final sshdBin = File('/usr/sbin/sshd');
+    final sshKeygenBin = File('/usr/bin/ssh-keygen');
+    if (sshdBin.existsSync() && sshKeygenBin.existsSync()) {
+      final tmpDir = await Directory.systemTemp.createTemp('jaladesk_sync_sftp_');
+      addTearDown(() async {
+        try {
+          if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+        } on FileSystemException catch (_) {}
+      });
+
+      final hostKeyPath = '${tmpDir.path}/ssh_host_ed25519_key';
+      final clientKeyPath = '${tmpDir.path}/id_ed25519';
+      expect((await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', hostKeyPath])).exitCode, 0);
+      expect((await Process.run(sshKeygenBin.path, ['-t', 'ed25519', '-N', '', '-f', clientKeyPath])).exitCode, 0);
+      final clientPem = await File(clientKeyPath).readAsString();
+      final currentUser = Platform.environment['USER'] ??
+          (await Process.run('whoami', [])).stdout.toString().trim();
+
+      final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final sshPort = probe.port;
+      await probe.close();
+
+      final cfgPath = '${tmpDir.path}/sshd_sync.conf';
+      await File(cfgPath).writeAsString([
+        'Port $sshPort',
+        'ListenAddress 127.0.0.1',
+        'HostKey $hostKeyPath',
+        'AuthorizedKeysFile $clientKeyPath.pub',
+        'PasswordAuthentication no',
+        'PubkeyAuthentication yes',
+        'UsePAM no',
+        'StrictModes no',
+        'Subsystem sftp internal-sftp',
+        'PidFile ${tmpDir.path}/sshd_sync.pid',
+      ].join('\n'));
+
+      final sshdProc = await Process.start(sshdBin.path, ['-D', '-e', '-f', cfgPath]);
+      addTearDown(() => sshdProc.kill(ProcessSignal.sigterm));
+
+      for (int i = 0; i < 30; i++) {
+        try {
+          final s = await Socket.connect(
+            '127.0.0.1',
+            sshPort,
+            timeout: const Duration(milliseconds: 150),
+          );
+          s.destroy();
+          break;
+        } catch (_) {
+          await Future<void>.delayed(const Duration(milliseconds: 80));
+        }
+      }
+
+      final remoteVaultPath = '${tmpDir.path}/vault_store/.jaladesk/jaladesk-vault.jvault';
+      final sftpSync = SftpVaultSyncTransport(
+        host: '127.0.0.1',
+        port: sshPort,
+        username: currentUser,
+        privateKeyPem: clientPem,
+        remotePath: remoteVaultPath,
+      );
+      expect(await sftpSync.downloadEnvelope(), isNull);
+      await sftpSync.uploadEnvelope(sealedSampleV1);
+      expect(await File(remoteVaultPath).exists(), isTrue);
+      expect(await sftpSync.downloadEnvelope(), equals(sealedSampleV1));
+      await sftpSync.uploadEnvelope(sealedSampleV2);
+      expect(await sftpSync.downloadEnvelope(), equals(sealedSampleV2));
+    }
+  });
+
+  testWidgets(
+      'v1.14.0+16 Test 3: VaultCloudSyncScreen & Vault & 2FA Integration (Portrait + 915x412 Landscape, OAuth Diagnostic, SFTP Quick-Fill & Live Sync)',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final prevHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = prevHttpOverrides);
+
+    // Pre-seed a remote encrypted .jvault on a real loopback WebDAV server
+    const syncPass = 'MobileVault#Sync99';
+    String? serverVaultEnvelope = EncryptedVaultBackupCodec.sealJson(
+      payload: <String, dynamic>{
+        'syncSchema': 2,
+        'updatedAtMs': 1500,
+        'hosts': <Map<String, dynamic>>[
+          const RemoteHostItem(
+            id: 'remote-synced-rdp-01',
+            name: 'Cloud Synced Workstation',
+            address: '10.77.10.50',
+            port: 3389,
+            protocol: RemoteProtocol.rdp,
+            username: 'cloudadmin',
+            updatedAtMs: 1500,
+          ).toJson(),
+        ],
+        'credentials': const <Map<String, dynamic>>[],
+        'folders': const <Map<String, dynamic>>[],
+        'totp': const <Map<String, dynamic>>[],
+        'snippets': const <Map<String, dynamic>>[],
+        'tombstones': const <String, int>{},
+      },
+      passphrase: syncPass,
+    );
+
+    late HttpServer syncWebDavServer;
+    await tester.runAsync(() async {
+      syncWebDavServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      syncWebDavServer.listen((HttpRequest req) async {
+        if (req.method == 'GET') {
+          if (serverVaultEnvelope == null) {
+            req.response.statusCode = 404;
+          } else {
+            req.response.statusCode = 200;
+            req.response.write(serverVaultEnvelope);
+          }
+        } else if (req.method == 'PUT') {
+          serverVaultEnvelope = await utf8.decoder.bind(req).join();
+          req.response.statusCode = 201;
+        }
+        await req.response.close();
+      });
+    });
+    addTearDown(() async {
+      await tester.runAsync(() => syncWebDavServer.close(force: true));
+    });
+
+    final mockOAuthNeedsSetup = _MockGoogleAuthTokenProvider(
+      throwOAuthSetupOnSignIn: true,
+    );
+
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final shellKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(
+      JalaDeskMobileApp(
+        disableNetworkProbes: true,
+        shellKey: shellKey,
+        googleAuthProviderOverride: mockOAuthNeedsSetup,
+        initialHostsOverride: const <RemoteHostItem>[
+          RemoteHostItem(
+            id: 'local-jump-gw-1',
+            name: 'Saved Bastion Node',
+            address: '192.168.50.10',
+            port: 2222,
+            protocol: RemoteProtocol.ssh,
+            username: 'ops_jump',
+            password: 'JumpSecretPassword',
+            isJumpHost: true,
+            updatedAtMs: 2000,
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final state = shellKey.currentState!;
+
+    // 1. Open `Vault & 2FA` and verify ultra-clean `Cloud Sync` card
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    expect(find.text('Cloud Sync'), findsOneWidget);
+    expect(find.text('Sync encrypted connections across devices'), findsOneWidget);
+    expect(find.byKey(const Key('btn_open_cloud_sync')), findsOneWidget);
+
+    // 2. Open full-screen `VaultCloudSyncScreen` and verify all 4 provider pills in Portrait & 915x412 Landscape
+    await tester.tap(find.byKey(const Key('btn_open_cloud_sync')));
+    await tester.pumpAndSettle();
+    expect(find.byType(VaultCloudSyncScreen), findsOneWidget);
+    expect(find.byKey(const Key('cloud_sync_provider_bar')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sync_provider_googleDrive')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sync_provider_sftp')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sync_provider_webdav')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sync_provider_githubGist')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    // Switch to Oppo Find X9 Pro Landscape (`915x412`) and verify zero overflow!
+    tester.view.physicalSize = const Size(915, 412);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // Test friendly Google OAuth SHA-1 diagnostic box when Android OAuth client isn't registered yet
+    await tester.ensureVisible(find.byKey(const Key('btn_google_sync_signin')));
+    await tester.tap(find.byKey(const Key('btn_google_sync_signin')));
+    await tester.pumpAndSettle();
+    expect(find.text('Google Cloud OAuth Setup Needed'), findsOneWidget);
+    expect(find.text(kAndroidAppPackageName), findsOneWidget);
+    expect(find.text(kAndroidUploadKeySha1), findsOneWidget);
+
+    // Test SFTP Quick-Fill from Saved SSH / Jump Host
+    await tester.ensureVisible(find.byKey(const ValueKey('sync_provider_sftp')));
+    await tester.tap(find.byKey(const ValueKey('sync_provider_sftp')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('dropdown_sftp_sync_preset')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('dropdown_sftp_sync_preset')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('Saved Bastion Node').last);
+    await tester.pumpAndSettle();
+    final sftpHostField =
+        tester.widget<TextField>(find.byKey(const Key('field_sync_sftp_host')));
+    expect(sftpHostField.controller?.text, equals('192.168.50.10'));
+
+    // Switch back to Portrait (`412x915`), bind loopback WebDAV endpoint & tap `Save & Sync Now`
+    tester.view.physicalSize = const Size(412, 915);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const ValueKey('sync_provider_webdav')));
+    await tester.tap(find.byKey(const ValueKey('sync_provider_webdav')));
+    await tester.pumpAndSettle();
+
+    final webdavVaultUrl =
+        'http://127.0.0.1:${syncWebDavServer.port}/dav/jaladesk-vault.jvault';
+    await tester.enterText(find.byKey(const Key('field_sync_webdav_url')), webdavVaultUrl);
+    await tester.enterText(find.byKey(const Key('field_sync_webdav_user')), 'sync_ops');
+    await tester.enterText(find.byKey(const Key('field_sync_webdav_password')), 'AppPass#1');
+    await tester.ensureVisible(find.byKey(const Key('field_cloud_sync_passphrase')));
+    await tester.enterText(find.byKey(const Key('field_cloud_sync_passphrase')), syncPass);
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.byKey(const Key('btn_execute_cloud_sync')));
+    await tester.pumpAndSettle();
+    final executeBtn =
+        tester.widget<ButtonStyleButton>(find.byKey(const Key('btn_execute_cloud_sync')));
+    await tester.runAsync(() async {
+      executeBtn.onPressed!();
+      for (int i = 0; i < 80 && !state.cloudSyncConfig.isBound; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+    });
+    await tester.pumpAndSettle();
+
+    // Verify smart E2EE merge kept local Bastion AND pulled Cloud Synced Workstation!
+    expect(state.cloudSyncConfig.isBound, isTrue);
+    expect(state.hosts.any((h) => h.id == 'local-jump-gw-1'), isTrue);
+    expect(state.hosts.any((h) => h.id == 'remote-synced-rdp-01'), isTrue);
+    expect(find.textContaining('Synced 1 connection & 1 gateway'), findsOneWidget);
+    expect(find.byKey(const Key('switch_cloud_auto_sync')), findsOneWidget);
+    expect(find.byKey(const Key('btn_cloud_pull_only')), findsOneWidget);
+    expect(find.byKey(const Key('btn_cloud_push_force')), findsOneWidget);
+    expect(find.byKey(const Key('btn_cloud_unbind')), findsOneWidget);
+
+    // Close `VaultCloudSyncScreen` and verify active badge + `btn_cloud_sync_now` on `Vault & 2FA`
+    await tester.tap(find.byKey(const Key('btn_close_cloud_sync')));
+    await tester.pumpAndSettle();
+    expect(find.byType(VaultCloudSyncScreen), findsNothing);
+    expect(find.textContaining('WebDAV • 127.0.0.1:${syncWebDavServer.port}'), findsOneWidget);
+    expect(find.byKey(const Key('btn_cloud_sync_now')), findsOneWidget);
+
+    final quickSyncBtn =
+        tester.widget<IconButton>(find.byKey(const Key('btn_cloud_sync_now')));
+    await tester.runAsync(() async {
+      quickSyncBtn.onPressed!();
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      for (int i = 0; i < 80 && state.isCloudSyncBusy; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+    });
+    await tester.pumpAndSettle();
+
+    // Re-open Manage -> Unbind Sync -> verify local hosts remain untouched
+    await tester.tap(find.byKey(const Key('btn_open_cloud_sync')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('btn_cloud_unbind')));
+    final unbindBtn =
+        tester.widget<ButtonStyleButton>(find.byKey(const Key('btn_cloud_unbind')));
+    await tester.runAsync(() async {
+      unbindBtn.onPressed!();
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+    });
+    await tester.pumpAndSettle();
+    expect(state.cloudSyncConfig.isBound, isFalse);
+    expect(state.hosts.length, equals(2));
+    expect(tester.takeException(), isNull);
+  });
+}
+
+class _MockGoogleAuthTokenProvider implements GoogleAuthTokenProvider {
+  final String initialToken;
+  final String refreshedToken;
+  final VoidCallback? onRefreshed;
+  final bool throwOAuthSetupOnSignIn;
+  bool _wasRefreshed = false;
+  GoogleAuthAccountInfo? _account;
+
+  _MockGoogleAuthTokenProvider({
+    this.initialToken = 'mock-token',
+    this.refreshedToken = 'mock-refreshed-token',
+    this.onRefreshed,
+    this.throwOAuthSetupOnSignIn = false,
+  }) : _account = throwOAuthSetupOnSignIn
+            ? null
+            : const GoogleAuthAccountInfo(
+                email: 'ops@jaladesk.io',
+                displayName: 'JalaDesk Ops',
+              );
+
+  @override
+  GoogleAuthAccountInfo? get currentAccount => _account;
+
+  @override
+  Future<GoogleAuthAccountInfo?> signIn() async {
+    if (throwOAuthSetupOnSignIn) {
+      throw const GoogleOAuthConfigurationException(
+        rawDetail: 'PlatformException(sign_in_failed, com.google.android.gms.common.api.ApiException: 10, null, null)',
+      );
+    }
+    _account = const GoogleAuthAccountInfo(
+      email: 'ops@jaladesk.io',
+      displayName: 'JalaDesk Ops',
+    );
+    return _account;
+  }
+
+  @override
+  Future<GoogleAuthAccountInfo?> signInSilently() async => _account;
+
+  @override
+  Future<void> signOut() async {
+    _account = null;
+  }
+
+  @override
+  Future<String> getAccessToken({bool forceRefresh = false}) async {
+    if (forceRefresh) {
+      _wasRefreshed = true;
+      onRefreshed?.call();
+    }
+    return _wasRefreshed ? refreshedToken : initialToken;
+  }
 }

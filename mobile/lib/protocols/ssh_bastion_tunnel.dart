@@ -20,12 +20,14 @@ class FolderGatewayConfig {
   final String? jumpHostId;
   final String? credentialId;
   final String accentTint;
+  final int updatedAtMs;
 
   const FolderGatewayConfig({
     required this.name,
     this.jumpHostId,
     this.credentialId,
     this.accentTint = 'gold',
+    this.updatedAtMs = 0,
   });
 
   bool get hasJumpHost => jumpHostId != null && jumpHostId!.trim().isNotEmpty;
@@ -38,12 +40,14 @@ class FolderGatewayConfig {
     String? credentialId,
     bool clearCredential = false,
     String? accentTint,
+    int? updatedAtMs,
   }) {
     return FolderGatewayConfig(
       name: name ?? this.name,
       jumpHostId: clearJumpHost ? null : (jumpHostId ?? this.jumpHostId),
       credentialId: clearCredential ? null : (credentialId ?? this.credentialId),
       accentTint: accentTint ?? this.accentTint,
+      updatedAtMs: updatedAtMs ?? this.updatedAtMs,
     );
   }
 
@@ -52,6 +56,7 @@ class FolderGatewayConfig {
         'jumpHostId': jumpHostId,
         'credentialId': credentialId,
         'accentTint': accentTint,
+        'updatedAtMs': updatedAtMs,
       };
 
   factory FolderGatewayConfig.fromJson(Map<String, dynamic> json) {
@@ -64,6 +69,7 @@ class FolderGatewayConfig {
       accentTint: (json['accentTint'] as String?)?.trim().isNotEmpty == true
           ? (json['accentTint'] as String).trim()
           : 'gold',
+      updatedAtMs: (json['updatedAtMs'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -126,6 +132,7 @@ class VaultCredentialItem {
   final String password;
   final String privateKeyPem;
   final String notes;
+  final int updatedAtMs;
 
   const VaultCredentialItem({
     required this.id,
@@ -135,6 +142,7 @@ class VaultCredentialItem {
     this.password = '',
     this.privateKeyPem = '',
     this.notes = '',
+    this.updatedAtMs = 0,
   });
 
   bool get hasSshKey => privateKeyPem.trim().isNotEmpty;
@@ -164,6 +172,7 @@ class VaultCredentialItem {
     String? password,
     String? privateKeyPem,
     String? notes,
+    int? updatedAtMs,
   }) {
     return VaultCredentialItem(
       id: id ?? this.id,
@@ -173,6 +182,7 @@ class VaultCredentialItem {
       password: password ?? this.password,
       privateKeyPem: privateKeyPem ?? this.privateKeyPem,
       notes: notes ?? this.notes,
+      updatedAtMs: updatedAtMs ?? this.updatedAtMs,
     );
   }
 
@@ -184,6 +194,7 @@ class VaultCredentialItem {
         'password': password,
         'privateKeyPem': privateKeyPem,
         'notes': notes,
+        'updatedAtMs': updatedAtMs,
       };
 
   factory VaultCredentialItem.fromJson(Map<String, dynamic> json) {
@@ -195,6 +206,7 @@ class VaultCredentialItem {
       password: json['password'] as String? ?? '',
       privateKeyPem: json['privateKeyPem'] as String? ?? '',
       notes: json['notes'] as String? ?? '',
+      updatedAtMs: (json['updatedAtMs'] as num?)?.toInt() ?? 0,
     );
   }
 }

@@ -16,6 +16,7 @@ import 'protocols/proxmox_ve_client.dart';
 import 'protocols/rdp_ffi_client.dart';
 import 'protocols/ssh_bastion_tunnel.dart';
 import 'protocols/vnc_rfb_client.dart';
+import 'security/vault_cloud_sync.dart';
 import 'security/vault_passcode_enclave.dart';
 import 'security/vault_security_service.dart';
 import 'terminal/sftp_explorer_view.dart';
@@ -79,12 +80,14 @@ class JalaDeskMobileApp extends StatelessWidget {
   final List<RemoteHostItem>? initialHostsOverride;
   final bool disableNetworkProbes;
   final GlobalKey<JalaDeskMobileShellState>? shellKey;
+  final GoogleAuthTokenProvider? googleAuthProviderOverride;
 
   const JalaDeskMobileApp({
     super.key,
     this.initialHostsOverride,
     this.disableNetworkProbes = false,
     this.shellKey,
+    this.googleAuthProviderOverride,
   });
 
   @override
@@ -137,6 +140,7 @@ class JalaDeskMobileApp extends StatelessWidget {
         key: shellKey,
         initialHostsOverride: initialHostsOverride,
         disableNetworkProbes: disableNetworkProbes,
+        googleAuthProviderOverride: googleAuthProviderOverride,
       ),
     );
   }
@@ -177,6 +181,7 @@ class RemoteHostItem {
   final int? latencyMs;
   final bool? isOnline;
   final String accentTint;
+  final int updatedAtMs;
 
   const RemoteHostItem({
     required this.id,
@@ -197,6 +202,7 @@ class RemoteHostItem {
     this.latencyMs,
     this.isOnline,
     this.accentTint = 'sapphire',
+    this.updatedAtMs = 0,
   });
 
   bool get isDirectNoJumpOverride => jumpHostId?.trim() == kDirectNoJumpOverride;
@@ -256,6 +262,7 @@ class RemoteHostItem {
     int? latencyMs,
     bool? isOnline,
     String? accentTint,
+    int? updatedAtMs,
   }) {
     return RemoteHostItem(
       id: id ?? this.id,
@@ -276,6 +283,7 @@ class RemoteHostItem {
       latencyMs: latencyMs ?? this.latencyMs,
       isOnline: isOnline ?? this.isOnline,
       accentTint: accentTint ?? this.accentTint,
+      updatedAtMs: updatedAtMs ?? this.updatedAtMs,
     );
   }
 
@@ -298,6 +306,7 @@ class RemoteHostItem {
         'latencyMs': latencyMs,
         'isOnline': isOnline,
         'accentTint': accentTint,
+        'updatedAtMs': updatedAtMs,
       };
 
   factory RemoteHostItem.fromJson(Map<String, dynamic> json) {
@@ -327,6 +336,7 @@ class RemoteHostItem {
       latencyMs: (json['latencyMs'] as num?)?.toInt(),
       isOnline: json['isOnline'] as bool?,
       accentTint: json['accentTint'] as String? ?? 'sapphire',
+      updatedAtMs: (json['updatedAtMs'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -339,6 +349,7 @@ class TotpEntryItem {
   final String algorithm;
   final int digits;
   final int periodSeconds;
+  final int updatedAtMs;
 
   const TotpEntryItem({
     required this.id,
@@ -348,6 +359,7 @@ class TotpEntryItem {
     this.algorithm = 'SHA-1',
     this.digits = 6,
     this.periodSeconds = 30,
+    this.updatedAtMs = 0,
   });
 
   Map<String, dynamic> toJson() => {
@@ -358,6 +370,7 @@ class TotpEntryItem {
         'algorithm': algorithm,
         'digits': digits,
         'periodSeconds': periodSeconds,
+        'updatedAtMs': updatedAtMs,
       };
 
   factory TotpEntryItem.fromJson(Map<String, dynamic> json) {
@@ -369,6 +382,7 @@ class TotpEntryItem {
       algorithm: json['algorithm'] as String? ?? 'SHA-1',
       digits: ((json['digits'] as num?)?.toInt() ?? 6).clamp(6, 8),
       periodSeconds: ((json['periodSeconds'] as num?)?.toInt() ?? 30).clamp(10, 120),
+      updatedAtMs: (json['updatedAtMs'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -544,11 +558,13 @@ enum JumpCanvasFitMode {
 class JalaDeskMobileShell extends StatefulWidget {
   final List<RemoteHostItem>? initialHostsOverride;
   final bool disableNetworkProbes;
+  final GoogleAuthTokenProvider? googleAuthProviderOverride;
 
   const JalaDeskMobileShell({
     super.key,
     this.initialHostsOverride,
     this.disableNetworkProbes = false,
+    this.googleAuthProviderOverride,
   });
 
   @override
@@ -570,6 +586,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   static const String _prefsAutoLockSecKey = 'jaladesk_vault_autolock_sec_v1';
   static const String _prefsSecureScreenKey = 'jaladesk_secure_screen_v1';
   static const String _prefsBiometricKey = 'jaladesk_vault_biometric_v1';
+  static const String _prefsCloudSyncKey = 'jaladesk_vault_cloud_sync_v1';
 
   int _tabIndex = 0;
   String _protocolFilter = 'ALL';
@@ -590,6 +607,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   Map<String, FolderGatewayConfig> get folderConfigs => Map.unmodifiable(_folderConfigs);
   BastionSessionPool get bastionPool => _bastionPool;
   List<ActiveLocalPortForward> get activePortForwards => List.unmodifiable(_activePortForwards);
+  VaultSyncConfig get cloudSyncConfig => _cloudSyncConfig;
+  bool get isCloudSyncBusy => _cloudSyncBusy;
+  Map<String, int> get syncTombstones => Map.unmodifiable(_syncTombstones);
 
   RemoteHostItem? _activeRdpHost;
   RemoteHostItem? _activeSshHost;
@@ -731,6 +751,26 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   SftpTransferProgress? _activeSftpTransfer;
   final SshKnownHostsStore _knownHostsStore = SshKnownHostsStore();
   final ClipboardSecretScrubber _clipboardScrubberEngine = ClipboardSecretScrubber();
+  VaultSyncConfig _cloudSyncConfig = const VaultSyncConfig();
+  final Map<String, int> _syncTombstones = <String, int>{};
+  bool _cloudSyncBusy = false;
+  Timer? _autoSyncDebounceTimer;
+  GoogleAuthTokenProvider? _googleAuthProviderInstance;
+
+  GoogleAuthTokenProvider get _googleAuthProvider =>
+      _googleAuthProviderInstance ??=
+          (widget.googleAuthProviderOverride ?? PluginGoogleAuthTokenProvider());
+
+  void _recordSyncTombstone(String entityKey, [int? timestampMs]) {
+    final ts = timestampMs ?? DateTime.now().millisecondsSinceEpoch;
+    _syncTombstones[entityKey] = ts;
+    if (_syncTombstones.length > VaultSyncPayloadMerger.maxTombstones) {
+      final capped = VaultSyncPayloadMerger.capTombstones(_syncTombstones);
+      _syncTombstones
+        ..clear()
+        ..addAll(capped);
+    }
+  }
 
   String get _offlinePrompt {
     final hostLabel = _activeSshHost?.name.split(' ').first ?? 'ssh-host';
@@ -1202,6 +1242,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       final rawFolders = await VaultAtRestCipher.decryptFromPrefs(prefs, _prefsFoldersKey);
       final rawTotp = await VaultAtRestCipher.decryptFromPrefs(prefs, _prefsTotpKey);
       final rawKnownHosts = await VaultAtRestCipher.decryptFromPrefs(prefs, _prefsKnownHostsKey);
+      final rawCloudSync = await VaultAtRestCipher.decryptFromPrefs(prefs, _prefsCloudSyncKey);
       final savedPair = prefs.getString(_prefsPairKey);
       final savedTheme = prefs.getString(_prefsTermThemeKey);
       final savedFont = prefs.getDouble(_prefsTermFontKey);
@@ -1270,6 +1311,23 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         }
       }
 
+      VaultSyncConfig loadedSyncCfg = const VaultSyncConfig();
+      Map<String, int> loadedTombstones = <String, int>{};
+      if (rawCloudSync != null && rawCloudSync.isNotEmpty) {
+        final decoded = jsonDecode(rawCloudSync);
+        if (decoded is Map<String, dynamic>) {
+          final cfgMap = decoded['config'];
+          if (cfgMap is Map<String, dynamic>) {
+            loadedSyncCfg = VaultSyncConfig.fromJson(cfgMap);
+          } else {
+            loadedSyncCfg = VaultSyncConfig.fromJson(decoded);
+          }
+          loadedTombstones = VaultSyncPayloadMerger.capTombstones(
+            VaultSyncPayloadMerger.parseTombstones(decoded['tombstones']),
+          );
+        }
+      }
+
       if (!mounted) return;
       setState(() {
         _hosts
@@ -1287,6 +1345,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         _customSnippets
           ..clear()
           ..addAll(loadedSnippets);
+        _cloudSyncConfig = loadedSyncCfg;
+        _syncTombstones
+          ..clear()
+          ..addAll(loadedTombstones);
         if (savedPair != null && savedPair.isNotEmpty) {
           _pairedDesktopInfo = savedPair;
         }
@@ -1345,7 +1407,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     } catch (_) {}
   }
 
-  Future<void> _saveVaultToDisk() async {
+  Future<void> _saveVaultToDisk({bool scheduleAutoSync = true}) async {
     try {
       final prefs = _prefsCache ??= await SharedPreferences.getInstance();
       final sealedHosts = await VaultAtRestCipher.encryptForPrefs(
@@ -1368,11 +1430,19 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         prefs,
         jsonEncode(_knownHostsStore.toJsonList()),
       );
+      final sealedCloudSync = await VaultAtRestCipher.encryptForPrefs(
+        prefs,
+        jsonEncode(<String, dynamic>{
+          'config': _cloudSyncConfig.toJson(),
+          'tombstones': _syncTombstones,
+        }),
+      );
       await prefs.setString(_prefsHostsKey, sealedHosts);
       await prefs.setString(_prefsCredentialsKey, sealedCreds);
       await prefs.setString(_prefsFoldersKey, sealedFolders);
       await prefs.setString(_prefsTotpKey, sealedTotp);
       await prefs.setString(_prefsKnownHostsKey, sealedKnownHosts);
+      await prefs.setString(_prefsCloudSyncKey, sealedCloudSync);
       await prefs.setString(_prefsPairKey, _pairedDesktopInfo);
       await prefs.setString(_prefsTermThemeKey, _terminalThemeId);
       await prefs.setDouble(_prefsTermFontKey, _terminalFontSize);
@@ -1385,7 +1455,33 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         _prefsSnippetsKey,
         jsonEncode(_customSnippets.map((s) => s.toJson()).toList()),
       );
+      if (scheduleAutoSync) {
+        _scheduleDebouncedCloudAutoSync();
+      }
     } catch (_) {}
+  }
+
+  void _scheduleDebouncedCloudAutoSync() {
+    if (widget.disableNetworkProbes || _isVaultLocked) return;
+    if (!_cloudSyncConfig.isBound || !_cloudSyncConfig.autoSyncEnabled) return;
+    if (_cloudSyncConfig.syncPassphrase.trim().length < 4) return;
+    _autoSyncDebounceTimer?.cancel();
+    _autoSyncDebounceTimer = Timer(const Duration(milliseconds: 2500), () {
+      if (!mounted || _isVaultLocked || _cloudSyncBusy) return;
+      if (!_cloudSyncConfig.isBound || !_cloudSyncConfig.autoSyncEnabled) return;
+      unawaited(
+        _executeCloudSyncOperation(
+          _cloudSyncConfig,
+          VaultSyncOperationMode.smartMerge,
+          silentBackground: true,
+        ).catchError((_) => VaultSyncRunSummary(
+              updatedConfig: _cloudSyncConfig,
+              message: '',
+              connectionCount: _hosts.length,
+              gatewayCount: 0,
+            )),
+      );
+    });
   }
 
   void _syncActiveHostSelection() {
@@ -1421,6 +1517,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     _totpSecondsNotifier.dispose();
     _vaultAutoLockNotifier.dispose();
     _autoResizeDebounce?.cancel();
+    _autoSyncDebounceTimer?.cancel();
     _fullScreenAutoHideTimer?.cancel();
     _vaultInactivityTimer?.cancel();
     _clipboardScrubberEngine.dispose();
@@ -1874,7 +1971,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     await Future.wait(_hosts.map(_probeSingleHost));
     if (mounted) {
       setState(() => _probingAll = false);
-      _saveVaultToDisk();
+      _saveVaultToDisk(scheduleAutoSync: false);
     }
   }
 
@@ -2053,11 +2150,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             if (existing != null)
               TextButton.icon(
                 onPressed: () {
+                  final nowMs = DateTime.now().millisecondsSinceEpoch;
                   setState(() {
+                    _recordSyncTombstone('cred:${existing.id}', nowMs);
                     _credentials.removeWhere((c) => c.id == existing.id);
                     for (int i = 0; i < _hosts.length; i++) {
                       if (_hosts[i].credentialId == existing.id) {
-                        _hosts[i] = _hosts[i].copyWith(clearCredential: true);
+                        _hosts[i] = _hosts[i].copyWith(
+                          clearCredential: true,
+                          updatedAtMs: nowMs,
+                        );
                       }
                     }
                   });
@@ -2089,6 +2191,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   password: passCtrl.text,
                   privateKeyPem: keyCtrl.text.trim(),
                   notes: notesCtrl.text.trim(),
+                  updatedAtMs: DateTime.now().millisecondsSinceEpoch,
                 );
                 setState(() {
                   if (existing != null) {
@@ -3023,6 +3126,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     isFavorite: existing?.isFavorite ?? false,
                     accentTint: 'gold',
                     isJumpHost: true,
+                    updatedAtMs: DateTime.now().millisecondsSinceEpoch,
                   );
 
                   if (existing != null) {
@@ -3422,6 +3526,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 TextButton(
                   onPressed: () {
                     setState(() {
+                      _recordSyncTombstone('folder:$initialName');
                       _folderConfigs.remove(initialName);
                     });
                     _saveVaultToDisk();
@@ -3455,6 +3560,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     );
                     return;
                   }
+                  final nowMs = DateTime.now().millisecondsSinceEpoch;
                   final updatedCfg = FolderGatewayConfig(
                     name: newName,
                     jumpHostId: selectedJumpHostId.isEmpty
@@ -3464,13 +3570,18 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         ? null
                         : selectedCredentialId,
                     accentTint: selectedAccentTint,
+                    updatedAtMs: nowMs,
                   );
                   setState(() {
                     if (initialName.isNotEmpty && initialName != newName) {
+                      _recordSyncTombstone('folder:$initialName', nowMs);
                       _folderConfigs.remove(initialName);
                       for (int i = 0; i < _hosts.length; i++) {
                         if (_hosts[i].folder == initialName) {
-                          _hosts[i] = _hosts[i].copyWith(folder: newName);
+                          _hosts[i] = _hosts[i].copyWith(
+                            folder: newName,
+                            updatedAtMs: nowMs,
+                          );
                         }
                       }
                     }
@@ -4130,6 +4241,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     isFavorite: isFavorite,
                     accentTint: selectedAccentTint,
                     isJumpHost: existing?.isJumpHost ?? false,
+                    updatedAtMs: DateTime.now().millisecondsSinceEpoch,
                   );
 
                   setState(() {
@@ -4292,6 +4404,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         domain: updated.domain,
                         username: updated.username,
                         password: updated.password,
+                        updatedAtMs: DateTime.now().millisecondsSinceEpoch,
                       );
                     }
                   });
@@ -4342,18 +4455,26 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
   void _deleteHost(RemoteHostItem host) {
     unawaited(_bastionPool.evictHopId(host.id));
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     setState(() {
+      _recordSyncTombstone('host:${host.id}', nowMs);
       _hosts.removeWhere((h) => h.id == host.id);
       for (int i = 0; i < _hosts.length; i++) {
         if (_hosts[i].jumpHostId == host.id) {
-          _hosts[i] = _hosts[i].copyWith(clearJumpHost: true);
+          _hosts[i] = _hosts[i].copyWith(
+            clearJumpHost: true,
+            updatedAtMs: nowMs,
+          );
         }
       }
       final folderKeys = _folderConfigs.keys.toList();
       for (final key in folderKeys) {
         final cfg = _folderConfigs[key];
         if (cfg != null && cfg.jumpHostId == host.id) {
-          _folderConfigs[key] = cfg.copyWith(clearJumpHost: true);
+          _folderConfigs[key] = cfg.copyWith(
+            clearJumpHost: true,
+            updatedAtMs: nowMs,
+          );
         }
       }
       if (_activeRdpHost?.id == host.id) _activeRdpHost = null;
@@ -7177,6 +7298,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                               command: cmdCtrl.text.trim(),
                                               category: 'Custom',
                                               runImmediately: runNow,
+                                              updatedAtMs: DateTime.now().millisecondsSinceEpoch,
                                             ),
                                           );
                                         },
@@ -7285,6 +7407,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                             ),
                                             onPressed: () {
                                               setState(() {
+                                                _recordSyncTombstone('snippet:${snip.id}');
                                                 _customSnippets.removeWhere((c) => c.id == snip.id);
                                               });
                                               setSheetState(() {});
@@ -7904,6 +8027,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       algorithm: selectedAlgo,
                       digits: selectedDigits,
                       periodSeconds: selectedPeriod,
+                      updatedAtMs: DateTime.now().millisecondsSinceEpoch,
                     ),
                   );
                 });
@@ -9969,6 +10093,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     final clone = source.copyWith(
       id: 'host-${DateTime.now().microsecondsSinceEpoch}',
       name: '${source.name} (Copy)',
+      updatedAtMs: DateTime.now().millisecondsSinceEpoch,
     );
     setState(() {
       _hosts.add(clone);
@@ -13056,6 +13181,93 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       ),
     );
 
+    final syncCfg = _cloudSyncConfig;
+    final syncConnected = syncCfg.isBound;
+    final syncLastLabel = formatSyncRelativeTime(syncCfg.lastSyncedAtMs);
+    final cloudSyncCard = Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        child: Row(
+          children: [
+            Icon(
+              syncConnected ? Icons.cloud_done_rounded : Icons.cloud_outlined,
+              size: 19,
+              color: syncConnected ? JalaPalette.ok : JalaPalette.brandGold,
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Cloud Sync',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13.5,
+                      color: JalaPalette.text,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    syncConnected
+                        ? '${syncCfg.provider.label} • ${syncCfg.accountSummary} • $syncLastLabel'
+                        : 'Sync encrypted connections across devices',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: syncConnected ? JalaPalette.ok : JalaPalette.muted,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            if (syncConnected) ...[
+              IconButton(
+                key: const Key('btn_cloud_sync_now'),
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                padding: EdgeInsets.zero,
+                tooltip: 'Sync Now',
+                onPressed: _cloudSyncBusy ? null : _triggerQuickCloudSyncNow,
+                icon: _cloudSyncBusy
+                    ? const SizedBox(
+                        width: 15,
+                        height: 15,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: JalaPalette.brandGold,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.sync_rounded,
+                        size: 18,
+                        color: JalaPalette.brandGold,
+                      ),
+              ),
+              const SizedBox(width: 4),
+            ],
+            FilledButton.tonal(
+              key: const Key('btn_open_cloud_sync'),
+              style: FilledButton.styleFrom(
+                backgroundColor: JalaPalette.selected,
+                foregroundColor: JalaPalette.brandGold,
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 11),
+              ),
+              onPressed: _openVaultCloudSyncScreen,
+              child: Text(
+                syncConnected ? 'Manage' : 'Connect',
+                style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
     return LayoutBuilder(
       builder: (ctx, constraints) {
         final mediaPadding = MediaQuery.paddingOf(ctx);
@@ -13108,25 +13320,38 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 ),
               ),
               const SizedBox(height: 10),
-              if (isTwoColumn) ...[
+              if (isTwoColumn)
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(child: totpCard),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          totpCard,
+                          const SizedBox(height: 12),
+                          securitySwitchesCard,
+                        ],
+                      ),
+                    ),
                     const SizedBox(width: 12),
-                    Expanded(child: credentialsVaultCard),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          cloudSyncCard,
+                          const SizedBox(height: 12),
+                          credentialsVaultCard,
+                          const SizedBox(height: 12),
+                          backupAndSshCard,
+                        ],
+                      ),
+                    ),
                   ],
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(child: securitySwitchesCard),
-                    const SizedBox(width: 12),
-                    Expanded(child: backupAndSshCard),
-                  ],
-                ),
-              ] else ...[
+                )
+              else ...[
+                cloudSyncCard,
+                const SizedBox(height: 10),
                 totpCard,
                 const SizedBox(height: 10),
                 credentialsVaultCard,
@@ -13178,7 +13403,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     );
     if (confirmed != true || !mounted) return;
     unawaited(_bastionPool.disposeAll());
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     setState(() {
+      for (final h in _hosts) {
+        _recordSyncTombstone('host:${h.id}', nowMs);
+      }
+      for (final fName in _folderConfigs.keys) {
+        _recordSyncTombstone('folder:$fName', nowMs);
+      }
       _hosts.clear();
       _folderConfigs.clear();
       _activeRdpHost = null;
@@ -13278,7 +13510,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           visualDensity: VisualDensity.compact,
           tooltip: 'Remove 2FA Entry',
           onPressed: () {
-            setState(() => _totpItems.removeWhere((t) => t.id == item.id));
+            setState(() {
+              _recordSyncTombstone('totp:${item.id}');
+              _totpItems.removeWhere((t) => t.id == item.id);
+            });
             _saveVaultToDisk();
           },
           icon: const Icon(Icons.delete_outline_rounded, size: 16, color: JalaPalette.muted),
@@ -13333,6 +13568,351 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Vault App-Lock PIN removed.')),
             );
+          },
+        ),
+        transitionsBuilder: (transCtx, anim, secAnim, child) => FadeTransition(
+          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  void configureCloudSyncForVerification(VaultSyncConfig config) {
+    setState(() => _cloudSyncConfig = config);
+    unawaited(_saveVaultToDisk(scheduleAutoSync: false));
+  }
+
+  Map<String, dynamic> _buildLocalCloudSyncPayload() {
+    return <String, dynamic>{
+      'syncSchema': VaultSyncPayloadMerger.syncSchemaVersion,
+      'updatedAtMs': DateTime.now().millisecondsSinceEpoch,
+      'hosts': _hosts.map((h) => h.toJson()).toList(),
+      'credentials': _credentials.map((c) => c.toJson()).toList(),
+      'folders': _folderConfigs.values.map((f) => f.toJson()).toList(),
+      'totp': _totpItems.map((t) => t.toJson()).toList(),
+      'snippets': _customSnippets.map((s) => s.toJson()).toList(),
+      'tombstones': Map<String, int>.from(_syncTombstones),
+    };
+  }
+
+  void _applySyncedPayloadToVaultState(Map<String, dynamic> syncedMap) {
+    final nextHosts = (syncedMap['hosts'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((m) => RemoteHostItem.fromJson(Map<String, dynamic>.from(m)))
+        .toList();
+    final nextCreds = (syncedMap['credentials'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((m) => VaultCredentialItem.fromJson(Map<String, dynamic>.from(m)))
+        .toList();
+    final nextFolders = (syncedMap['folders'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((m) => FolderGatewayConfig.fromJson(Map<String, dynamic>.from(m)))
+        .where((f) => f.name.isNotEmpty)
+        .toList();
+    final nextTotp = (syncedMap['totp'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((m) => TotpEntryItem.fromJson(Map<String, dynamic>.from(m)))
+        .toList();
+    final nextSnippets = (syncedMap['snippets'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((m) => TerminalSnippetItem.fromJson(Map<String, dynamic>.from(m)))
+        .toList();
+    final nextTombstones = VaultSyncPayloadMerger.capTombstones(
+      VaultSyncPayloadMerger.parseTombstones(syncedMap['tombstones']),
+    );
+
+    setState(() {
+      _hosts
+        ..clear()
+        ..addAll(nextHosts);
+      _credentials
+        ..clear()
+        ..addAll(nextCreds);
+      _folderConfigs
+        ..clear()
+        ..addEntries(nextFolders.map((f) => MapEntry(f.name, f)));
+      _totpItems
+        ..clear()
+        ..addAll(nextTotp);
+      _customSnippets
+        ..clear()
+        ..addAll(nextSnippets);
+      _syncTombstones
+        ..clear()
+        ..addAll(nextTombstones);
+      _syncActiveHostSelection();
+    });
+  }
+
+  List<SftpSyncHostPreset> _buildSftpPresetsForSync() {
+    final sshHosts = _hosts
+        .where((h) => h.protocol == RemoteProtocol.ssh || h.protocol == RemoteProtocol.sftp)
+        .toList()
+      ..sort((a, b) {
+        if (a.isJumpHost != b.isJumpHost) return a.isJumpHost ? -1 : 1;
+        return a.name.compareTo(b.name);
+      });
+
+    final presets = <SftpSyncHostPreset>[];
+    for (final raw in sshHosts) {
+      final eff = _resolveEffectiveHost(raw);
+      final (_, effUser) = eff.resolvedDomainAndUser;
+      final upstreamItems = _tryResolveHopHosts(raw);
+      final upstreamSpecs = <BastionHopSpec>[
+        for (final hop in upstreamItems) _toBastionHopSpec(_resolveEffectiveHost(hop)),
+      ];
+      presets.add(
+        SftpSyncHostPreset(
+          id: raw.id,
+          name: raw.name,
+          host: eff.address,
+          port: eff.port,
+          username: effUser.isEmpty ? 'root' : effUser,
+          password: eff.password,
+          privateKeyPem: eff.privateKeyPem,
+          isJumpHost: raw.isJumpHost,
+          upstreamHops: upstreamSpecs,
+        ),
+      );
+    }
+    return presets;
+  }
+
+  BastionHopSpec _toBastionHopSpec(RemoteHostItem eff) {
+    final (_, hopUser) = eff.resolvedDomainAndUser;
+    return BastionHopSpec(
+      id: eff.id,
+      name: eff.name,
+      address: eff.address,
+      port: eff.port,
+      username: hopUser.isEmpty ? 'root' : hopUser,
+      password: eff.password,
+      privateKeyPem: eff.privateKeyPem,
+    );
+  }
+
+  VaultCloudSyncTransport _buildCloudSyncTransport(
+    VaultSyncConfig cfg, {
+    void Function(String resolvedGistId)? onGistIdResolved,
+  }) {
+    switch (cfg.provider) {
+      case VaultSyncProviderKind.googleDrive:
+        return GoogleDriveAppDataSyncTransport(
+          authProvider: _googleAuthProvider,
+          apiBaseUrl: cfg.googleApiBaseUrl,
+        );
+      case VaultSyncProviderKind.sftp:
+        List<BastionHopSpec> upstreamHops = const <BastionHopSpec>[];
+        if (cfg.sftpPresetHostId != null && cfg.sftpPresetHostId!.isNotEmpty) {
+          final matchIdx = _hosts.indexWhere((h) => h.id == cfg.sftpPresetHostId);
+          if (matchIdx >= 0) {
+            upstreamHops = <BastionHopSpec>[
+              for (final hop in _tryResolveHopHosts(_hosts[matchIdx]))
+                _toBastionHopSpec(_resolveEffectiveHost(hop)),
+            ];
+          }
+        }
+        return SftpVaultSyncTransport(
+          host: cfg.sftpHost,
+          port: cfg.sftpPort,
+          username: cfg.sftpUsername,
+          password: cfg.sftpPassword,
+          privateKeyPem: cfg.sftpPrivateKeyPem,
+          remotePath: cfg.sftpRemotePath,
+          upstreamHops: upstreamHops,
+        );
+      case VaultSyncProviderKind.webdav:
+        return WebDavVaultSyncTransport(
+          fileUrl: cfg.webdavUrl,
+          username: cfg.webdavUsername,
+          password: cfg.webdavPassword,
+        );
+      case VaultSyncProviderKind.githubGist:
+        return GitHubGistVaultSyncTransport(
+          token: cfg.githubToken,
+          gistId: cfg.githubGistId,
+          apiBaseUrl: cfg.githubApiBaseUrl,
+          onGistIdResolved: onGistIdResolved,
+        );
+    }
+  }
+
+  Future<VaultSyncRunSummary> _executeCloudSyncOperation(
+    VaultSyncConfig draftConfig,
+    VaultSyncOperationMode mode, {
+    bool silentBackground = false,
+  }) async {
+    _autoSyncDebounceTimer?.cancel();
+    if (mounted) {
+      setState(() => _cloudSyncBusy = true);
+    } else {
+      _cloudSyncBusy = true;
+    }
+
+    String resolvedGistId = draftConfig.githubGistId;
+    try {
+      final transport = _buildCloudSyncTransport(
+        draftConfig,
+        onGistIdResolved: (id) => resolvedGistId = id,
+      );
+
+      Map<String, dynamic> resultingPayload;
+      if (mode == VaultSyncOperationMode.pushForce) {
+        resultingPayload = VaultSyncPayloadMerger.normalizePayload(
+          _buildLocalCloudSyncPayload(),
+        );
+        final sealed = await VaultCloudSyncCrypto.sealAsync(
+          payload: resultingPayload,
+          passphrase: draftConfig.syncPassphrase,
+        );
+        await transport.uploadEnvelope(sealed);
+      } else if (mode == VaultSyncOperationMode.pullOnly) {
+        final remoteRaw = await transport.downloadEnvelope();
+        if (remoteRaw == null || remoteRaw.trim().isEmpty) {
+          throw VaultCloudSyncException(
+            'No encrypted vault found on ${draftConfig.provider.label} yet.',
+          );
+        }
+        final opened = await VaultCloudSyncCrypto.openAsync(
+          rawEnvelopeJson: remoteRaw,
+          passphrase: draftConfig.syncPassphrase,
+        );
+        resultingPayload = VaultSyncPayloadMerger.normalizePayload(opened);
+        _applySyncedPayloadToVaultState(resultingPayload);
+      } else {
+        final remoteRaw = await transport.downloadEnvelope();
+        final localPayload = _buildLocalCloudSyncPayload();
+        if (remoteRaw != null && remoteRaw.trim().isNotEmpty) {
+          final remotePayload = await VaultCloudSyncCrypto.openAsync(
+            rawEnvelopeJson: remoteRaw,
+            passphrase: draftConfig.syncPassphrase,
+          );
+          resultingPayload = VaultSyncPayloadMerger.merge(localPayload, remotePayload);
+        } else {
+          resultingPayload = VaultSyncPayloadMerger.normalizePayload(localPayload);
+        }
+        final sealed = await VaultCloudSyncCrypto.sealAsync(
+          payload: resultingPayload,
+          passphrase: draftConfig.syncPassphrase,
+        );
+        await transport.uploadEnvelope(sealed);
+        _applySyncedPayloadToVaultState(resultingPayload);
+      }
+
+      String googleEmail = draftConfig.googleAccountEmail;
+      String googleName = draftConfig.googleDisplayName;
+      if (draftConfig.provider == VaultSyncProviderKind.googleDrive) {
+        final acc = _googleAuthProvider.currentAccount;
+        if (acc != null && acc.email.isNotEmpty) {
+          googleEmail = acc.email;
+          googleName = acc.displayName;
+        }
+      }
+
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final savedCfg = draftConfig.copyWith(
+        isBound: true,
+        lastSyncedAtMs: nowMs,
+        githubGistId: resolvedGistId,
+        googleAccountEmail: googleEmail,
+        googleDisplayName: googleName,
+      );
+
+      if (mounted) {
+        setState(() {
+          _cloudSyncConfig = savedCfg;
+          _cloudSyncBusy = false;
+        });
+      } else {
+        _cloudSyncConfig = savedCfg;
+        _cloudSyncBusy = false;
+      }
+      await _saveVaultToDisk(scheduleAutoSync: false);
+
+      final gateways = _hosts.where(_isJumpHostGateway).length;
+      final connections = _hosts.length - gateways;
+      final summaryText = gateways > 0
+          ? 'Synced $connections connection${connections == 1 ? "" : "s"} & $gateways gateway${gateways == 1 ? "" : "s"}'
+          : 'Synced ${_hosts.length} connection${_hosts.length == 1 ? "" : "s"}';
+
+      if (!silentBackground && mounted && !widget.disableNetworkProbes && _hosts.isNotEmpty) {
+        _probeAllHosts();
+      }
+
+      return VaultSyncRunSummary(
+        updatedConfig: savedCfg,
+        message: summaryText,
+        connectionCount: connections,
+        gatewayCount: gateways,
+      );
+    } finally {
+      if (_cloudSyncBusy) {
+        if (mounted) {
+          setState(() => _cloudSyncBusy = false);
+        } else {
+          _cloudSyncBusy = false;
+        }
+      }
+    }
+  }
+
+  Future<void> _unbindCloudSync() async {
+    _autoSyncDebounceTimer?.cancel();
+    if (_cloudSyncConfig.provider == VaultSyncProviderKind.googleDrive) {
+      await _googleAuthProvider.signOut();
+    }
+    if (mounted) {
+      setState(() {
+        _cloudSyncConfig = const VaultSyncConfig();
+        _cloudSyncBusy = false;
+      });
+    } else {
+      _cloudSyncConfig = const VaultSyncConfig();
+      _cloudSyncBusy = false;
+    }
+    await _saveVaultToDisk(scheduleAutoSync: false);
+  }
+
+  Future<void> _triggerQuickCloudSyncNow() async {
+    if (_cloudSyncBusy || !_cloudSyncConfig.isBound) return;
+    try {
+      final res = await _executeCloudSyncOperation(
+        _cloudSyncConfig,
+        VaultSyncOperationMode.smartMerge,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(res.message)),
+      );
+    } catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Cloud sync failed: ${err.toString().replaceFirst("Exception: ", "")}',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _openVaultCloudSyncScreen() async {
+    await Navigator.of(context).push<void>(
+      PageRouteBuilder<void>(
+        fullscreenDialog: true,
+        opaque: true,
+        transitionDuration: const Duration(milliseconds: 220),
+        reverseTransitionDuration: const Duration(milliseconds: 180),
+        pageBuilder: (pageCtx, anim1, anim2) => VaultCloudSyncScreen(
+          initialConfig: _cloudSyncConfig,
+          sftpPresets: _buildSftpPresetsForSync(),
+          googleAuthProvider: _googleAuthProvider,
+          onExecuteSync: (draft, mode) => _executeCloudSyncOperation(draft, mode),
+          onUnbindSync: _unbindCloudSync,
+          onConfigChanged: (updated) {
+            setState(() => _cloudSyncConfig = updated);
+            unawaited(_saveVaultToDisk(scheduleAutoSync: false));
           },
         ),
         transitionsBuilder: (transCtx, anim, secAnim, child) => FadeTransition(
@@ -13471,11 +14051,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   }
 
   void _deleteVaultCredential(VaultCredentialItem cred) {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     setState(() {
+      _recordSyncTombstone('cred:${cred.id}', nowMs);
       _credentials.removeWhere((c) => c.id == cred.id);
       for (int i = 0; i < _hosts.length; i++) {
         if (_hosts[i].credentialId == cred.id) {
-          _hosts[i] = _hosts[i].copyWith(clearCredential: true);
+          _hosts[i] = _hosts[i].copyWith(
+            clearCredential: true,
+            updatedAtMs: nowMs,
+          );
         }
       }
     });
@@ -13590,13 +14175,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   setModalState(() => errorMsg = 'Passphrase must be at least 4 characters.');
                   return;
                 }
-                final payload = <String, dynamic>{
-                  'hosts': _hosts.map((h) => h.toJson()).toList(),
-                  'credentials': _credentials.map((c) => c.toJson()).toList(),
-                  'folders': _folderConfigs.values.map((f) => f.toJson()).toList(),
-                  'totp': _totpItems.map((t) => t.toJson()).toList(),
-                  'snippets': _customSnippets.map((s) => s.toJson()).toList(),
-                };
+                final payload = _buildLocalCloudSyncPayload();
                 final sealed = EncryptedVaultBackupCodec.sealJson(
                   payload: payload,
                   passphrase: pass,
