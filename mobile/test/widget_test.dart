@@ -693,12 +693,13 @@ void main() {
     await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
     await tester.pumpAndSettle();
 
-    // Load Sample Lab & verify folder grouping + quick SFTP jump on SSH host
+    // Load Sample Lab & verify folder grouping + quick icon-only SFTP jump on SSH host
     await tester.tap(find.text('Load Sample Lab'));
     await tester.pumpAndSettle();
     expect(find.text('SAMPLE LAB / CORE AD'), findsOneWidget);
     expect(find.text('SAMPLE LAB / BASTIONS'), findsOneWidget);
-    expect(find.widgetWithText(OutlinedButton, 'SFTP'), findsOneWidget);
+    expect(find.byKey(const Key('btn_host_sftp_sample-ssh-bastion')), findsOneWidget);
+    expect(find.byTooltip('Open SFTP'), findsWidgets);
 
     // Switch to SSH & SFTP Tab
     await tester.tap(find.text('SSH & SFTP'));
@@ -1067,11 +1068,13 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('PLN Batam AD Admin'), findsOneWidget);
 
-    // 2. Return to Connections -> Open + Add Host -> Create inline + New Jump Host -> Bind both to RDP host
+    // 2. Return to Connections -> Open AppBar + menu -> New Connection -> Create inline + New Jump Host -> Bind both to RDP host
     await tester.tap(find.text('Connections'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Add Host'));
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_connection')));
     await tester.pumpAndSettle();
     expect(find.text('New Remote Connection'), findsOneWidget);
 
@@ -1668,9 +1671,9 @@ void main() {
     await tester.pumpAndSettle();
 
     // 2. Connect to Batam VNC Console (live RFB handshake #1)
-    expect(find.widgetWithText(FilledButton, 'Connect'), findsOneWidget);
+    expect(find.byTooltip('Connect'), findsOneWidget);
     await tester.runAsync(() async {
-      tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Connect')).onPressed!();
+      tester.widget<IconButton>(find.widgetWithIcon(IconButton, Icons.play_arrow_rounded)).onPressed!();
       for (int i = 0; i < 30 && rfbHandshakesCompleted < 1; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 30));
       }
@@ -1702,13 +1705,13 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('btn_exit_fullscreen_pill')));
     await tester.pump();
 
-    // 4. Return to Connections while LIVE -> verify `Resume` button & NO duplicate connection!
+    // 4. Return to Connections while LIVE -> verify icon-only `Resume Session` button & NO duplicate connection!
     await tester.tap(find.text('Connections'));
     await tester.pump();
     expect(find.textContaining('LIVE'), findsWidgets);
-    expect(find.widgetWithText(FilledButton, 'Resume'), findsOneWidget);
+    expect(find.byTooltip('Resume Session'), findsOneWidget);
 
-    await tester.tap(find.widgetWithText(FilledButton, 'Resume'));
+    await tester.tap(find.byTooltip('Resume Session'));
     await tester.pump();
     // Must still be handshake #1 (switched straight back to live tab without reconnecting!)
     expect(rfbHandshakesCompleted, 1);
@@ -2046,7 +2049,7 @@ void main() {
     await tester.pumpAndSettle();
 
     await tester.runAsync(() async {
-      tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Connect')).onPressed!();
+      tester.widget<IconButton>(find.widgetWithIcon(IconButton, Icons.play_arrow_rounded)).onPressed!();
       for (int i = 0; i < 30 && serverSockets.isEmpty; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 30));
       }
@@ -3097,8 +3100,10 @@ void main() {
     await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
     await tester.pumpAndSettle();
 
-    // Open dedicated Jump Host Gateway dialog from header action strip
-    await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+    // Open dedicated Jump Host Gateway dialog from unified AppBar + menu
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_jump_host')));
     await tester.pumpAndSettle();
 
     final dialogFinder = find.byKey(const Key('dialog_jump_host_editor'));
@@ -3181,7 +3186,9 @@ void main() {
     await tester.pumpAndSettle();
 
     // 1. Create `'PLN Public Jump'` gateway
-    await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_jump_host')));
     await tester.pumpAndSettle();
     await tester.enterText(find.byKey(const Key('jump_editor_name')), 'PLN Public Jump');
     await tester.enterText(find.byKey(const Key('jump_editor_host')), '103.172.170.203');
@@ -3192,7 +3199,9 @@ void main() {
     final gateway = shellKey.currentState!.hosts.singleWhere((h) => h.name == 'PLN Public Jump');
 
     // 2. Configure folder `'PLN Internal'` with `'PLN Public Jump'` as Folder Default Jump Host
-    await tester.tap(find.byKey(const Key('btn_add_folder')));
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_folder')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('dialog_folder_settings')), findsOneWidget);
 
@@ -3285,8 +3294,10 @@ void main() {
     await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
     await tester.pumpAndSettle();
 
-    // Create `'PLN Public Jump'` and connect via its Terminal button
-    await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+    // Create `'PLN Public Jump'` and connect via its icon-only Open SSH Terminal button
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_jump_host')));
     await tester.pumpAndSettle();
     await tester.enterText(find.byKey(const Key('jump_editor_name')), 'PLN Public Jump');
     await tester.enterText(find.byKey(const Key('jump_editor_host')), '103.172.170.203');
@@ -3295,7 +3306,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final gatewaySection = find.byKey(const Key('section_jump_gateways'));
-    await tester.tap(find.descendant(of: gatewaySection, matching: find.text('Terminal')));
+    await tester.tap(find.descendant(of: gatewaySection, matching: find.byTooltip('Open SSH Terminal')));
     await tester.pumpAndSettle();
 
     // Confirm Tab 2 (SSH Terminal) is active & live/simulated terminal is shown
@@ -3322,11 +3333,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('ssh_disconnected_empty_state')), findsOneWidget);
-    expect(find.text('No Active SSH / SFTP Session'), findsOneWidget);
+    expect(find.text('No Active SSH Session'), findsOneWidget);
     expect(find.text('Browse Connections'), findsOneWidget);
     expect(find.byKey(const Key('btn_reconnect_last_ssh')), findsOneWidget);
-    expect(find.text('Reconnect PLN Public Jump'), findsOneWidget);
-    expect(find.byKey(const Key('btn_open_offline_scratch_shell')), findsOneWidget);
+    expect(find.text('PLN Public Jump'), findsOneWidget);
+    expect(find.text('Open Offline Scratch Shell'), findsNothing);
     expect(find.byType(TermiusInteractiveTerminal), findsNothing);
 
     // Quick-reconnect action restores the session cleanly
@@ -3532,7 +3543,9 @@ void main() {
     expect(tester.takeException(), isNull);
 
     // Populate Jump Gateway + Routed Folder + Inherited RDP Host + SSH Disconnect state
-    await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_jump_host')));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     await tester.enterText(find.byKey(const Key('jump_editor_name')), 'PLN Public Jump Gateway');
@@ -3542,7 +3555,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
-    await tester.tap(find.byKey(const Key('btn_add_folder')));
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_folder')));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     await tester.enterText(find.byKey(const Key('folder_settings_name')), 'PLN Private Datacenter');
@@ -3586,9 +3601,12 @@ void main() {
       expect(find.byKey(const Key('section_jump_gateways')), findsOneWidget);
       expect(tester.takeException(), isNull);
 
-      // 2. Dedicated Jump Host Gateway Editor Dialog
-      await tester.ensureVisible(find.byKey(const Key('btn_header_add_jump_host')));
-      await tester.tap(find.byKey(const Key('btn_header_add_jump_host')));
+      // 2. Unified AppBar + Create Menu & Jump Host Gateway Editor Dialog
+      await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('sheet_create_menu')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byKey(const Key('menu_add_jump_host')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('dialog_jump_host_editor')), findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -3596,9 +3614,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
 
-      // 3. Folder Settings Dialog
-      await tester.ensureVisible(find.byKey(const Key('btn_add_folder')));
-      await tester.tap(find.byKey(const Key('btn_add_folder')));
+      // 3. Folder Settings Dialog via Unified AppBar + Create Menu
+      await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('menu_add_folder')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('dialog_folder_settings')), findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -3606,7 +3625,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
 
-      // 4. Disconnected SSH Empty State (with Reconnect + Browse Connections + Scratch Shell)
+      // 4. Disconnected SSH Empty State (with Quick-Connect Rows + Browse Connections)
       shellKey.currentState!.switchTabForVerification(2);
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('ssh_disconnected_empty_state')), findsOneWidget);
@@ -3627,5 +3646,136 @@ void main() {
     tester.view.padding = const FakeViewPadding(left: 36, right: 36, top: 0, bottom: 12);
     await tester.pumpAndSettle();
     await verifyAllSurfacesZeroOverflow();
+  });
+
+  testWidgets(
+      'v1.12.0+14 UX Simplification & No-Fake-Root-Shell: Unified + Icon Menu, Zero Duplicate Add Clutter, and Clean Disconnected SSH State',
+      (WidgetTester tester) async {
+    // Pre-populate encrypted/local Vault with saved SSH + Jump Host entries before launch
+    final savedHostsJson = jsonEncode([
+      const RemoteHostItem(
+        id: 'jh-batam-01',
+        name: 'PLN Batam Bastion',
+        address: '103.172.170.203',
+        port: 22022,
+        protocol: RemoteProtocol.ssh,
+        folder: 'Jump Gateways',
+        osLabel: 'SSH Jump Gateway',
+        username: 'ribato',
+        accentTint: 'gold',
+        isJumpHost: true,
+      ).toJson(),
+      const RemoteHostItem(
+        id: 'ssh-prod-01',
+        name: 'Core Linux App01',
+        address: '10.28.37.88',
+        port: 22,
+        protocol: RemoteProtocol.ssh,
+        folder: 'Production',
+        osLabel: 'Ubuntu 24.04 LTS',
+        username: 'ubuntu',
+        accentTint: 'sapphire',
+      ).toJson(),
+    ]);
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'jaladesk_vault_hosts_v2': savedHostsJson,
+    });
+
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final shellKey = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(JalaDeskMobileApp(disableNetworkProbes: true, shellKey: shellKey));
+    await tester.pumpAndSettle();
+
+    // 1. Connections Tab has ZERO duplicate Add buttons or Clear Vault clutter
+    expect(find.text('Add Host'), findsNothing);
+    expect(find.text('+ Jump Host'), findsNothing);
+    expect(find.text('+ Folder'), findsNothing);
+    expect(find.text('Add New Connection'), findsNothing);
+    expect(find.text('Add Jump Host'), findsNothing);
+    expect(find.text('Clear Vault'), findsNothing);
+    expect(find.byKey(const Key('btn_header_add_jump_host')), findsNothing);
+    expect(find.byKey(const Key('btn_add_jump_host_shortcut')), findsNothing);
+    expect(find.byKey(const Key('btn_add_folder')), findsNothing);
+
+    // Only the crisp AppBar `+` icon button (`btn_appbar_create_menu`) & icon-only quick actions appear
+    expect(find.byKey(const Key('btn_appbar_create_menu')), findsOneWidget);
+    expect(find.byKey(const Key('btn_quick_connect')), findsOneWidget);
+    expect(find.byKey(const Key('btn_open_port_forwards')), findsOneWidget);
+    expect(find.byKey(const Key('btn_refresh_latency')), findsOneWidget);
+    expect(find.byKey(const Key('btn_host_sftp_ssh-prod-01')), findsOneWidget);
+    expect(find.byKey(const Key('btn_gateway_terminal_jh-batam-01')), findsOneWidget);
+
+    // 2. Unified AppBar `+` icon opens `sheet_create_menu` and launches all 3 flows cleanly
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('sheet_create_menu')), findsOneWidget);
+    expect(find.byKey(const Key('menu_add_connection')), findsOneWidget);
+    expect(find.byKey(const Key('menu_add_jump_host')), findsOneWidget);
+    expect(find.byKey(const Key('menu_add_folder')), findsOneWidget);
+
+    // Launch New Connection -> verify username field is NOT pre-filled with 'root'
+    await tester.tap(find.byKey(const Key('menu_add_connection')));
+    await tester.pumpAndSettle();
+    expect(find.text('New Remote Connection'), findsOneWidget);
+    final hostUserField = tester.widget<TextField>(find.widgetWithText(TextField, 'Username'));
+    expect(hostUserField.controller?.text, isEmpty);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    // Launch New Jump Host -> verify username field is NOT pre-filled with 'root'
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_jump_host')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('dialog_jump_host_editor')), findsOneWidget);
+    final jumpUserField = tester.widget<TextField>(find.byKey(const Key('jump_editor_user')));
+    expect(jumpUserField.controller?.text, isEmpty);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    // Launch New Folder -> verify Folder Settings dialog opens cleanly
+    await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('menu_add_folder')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('dialog_folder_settings')), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    // 3. Switch to `SSH & SFTP` BEFORE connecting -> MUST show `ssh_disconnected_empty_state`
+    // with 1-tap quick-connect rows and ZERO `root@jaladesk` text anywhere!
+    await tester.tap(find.text('SSH & SFTP'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('ssh_disconnected_empty_state')), findsOneWidget);
+    expect(find.text('No Active SSH Session'), findsOneWidget);
+    expect(find.byKey(const Key('btn_quick_ssh_jh-batam-01')), findsOneWidget);
+    expect(find.byKey(const Key('btn_quick_ssh_ssh-prod-01')), findsOneWidget);
+    expect(find.byType(TermiusInteractiveTerminal), findsNothing);
+    expect(find.textContaining('root@jaladesk'), findsNothing);
+    expect(find.text('Open Offline Scratch Shell'), findsNothing);
+
+    // Tapping a 1-tap quick-connect row inside the empty state starts the session cleanly
+    await tester.tap(find.byKey(const Key('btn_quick_ssh_ssh-prod-01')));
+    await tester.pumpAndSettle();
+    expect(find.byType(TermiusInteractiveTerminal), findsOneWidget);
+    expect(find.textContaining('ubuntu@Core'), findsWidgets);
+    expect(find.textContaining('root@jaladesk'), findsNothing);
+
+    // 4. `Clear Vault` lives safely in `Vault & 2FA` with confirmation dialog
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('btn_vault_clear_all')));
+    await tester.tap(find.byKey(const Key('btn_vault_clear_all')));
+    await tester.pumpAndSettle();
+    expect(find.text('Clear Saved Connections?'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('btn_confirm_clear_vault')));
+    await tester.pumpAndSettle();
+    expect(shellKey.currentState!.hosts, isEmpty);
+    expect(tester.takeException(), isNull);
   });
 }

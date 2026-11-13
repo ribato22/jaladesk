@@ -596,7 +596,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   RemoteHostItem? _activeSshHost;
   RemoteHostItem? _lastDisconnectedDesktopHost;
   RemoteHostItem? _lastDisconnectedSshHost;
-  bool _openLocalScratchShell = false;
   bool _sshOfflineSessionOpen = false;
 
   // Live RDP (FreeRDP 3.x FFI) & VNC (RFB 3.8 / Apple ARD) Framebuffer Engine state
@@ -629,7 +628,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   bool _winLocked = false;
   bool _shiftLocked = false;
   Offset _cursorNorm = const Offset(0.5, 0.5);
-  String _lastRdpAction = 'Select a host in Connections or tap + Add Host to begin.';
+  String _lastRdpAction = 'Select a host in Connections or tap + in the top bar to begin.';
 
   // Jump Desktop-style Display Sizing, Full Screen & Adaptive Tablet/Foldable state
   JumpResolutionPreset _resolutionPreset = JumpResolutionPreset.matchDisplay;
@@ -736,8 +735,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   final ClipboardSecretScrubber _clipboardScrubberEngine = ClipboardSecretScrubber();
 
   String get _offlinePrompt {
-    final hostLabel = _activeSshHost?.name.split(' ').first ?? 'jaladesk';
-    final userLabel = (_activeSshHost?.username.isNotEmpty ?? false) ? _activeSshHost!.username : 'root';
+    final hostLabel = _activeSshHost?.name.split(' ').first ?? 'ssh-host';
+    final userLabel = (_activeSshHost?.username.isNotEmpty ?? false) ? _activeSshHost!.username : 'user';
     return '\x1b[1;32m$userLabel@$hostLabel\x1b[0m:\x1b[1;34m~\x1b[0m\$ ';
   }
 
@@ -752,11 +751,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         setState(() => _desktopImeFocused = _desktopImeFocusNode.hasFocus);
       }
     });
-    _terminalBuffer.write(
-      '\x1b[1;33mJalaDesk Interactive SSHv2 PTY\x1b[0m (xterm-256color)\r\n'
-      'Tap anywhere on the terminal to type directly, or connect to a live SSH server.\r\n'
-      '$_offlinePrompt',
-    );
     _updateTotpCountdown();
     _totpTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) _updateTotpCountdown();
@@ -1342,11 +1336,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           h.protocol == RemoteProtocol.vnc ||
           h.protocol == RemoteProtocol.hypervisor,
     );
-    final sshCandidates = _hosts.where(
-      (h) => h.protocol == RemoteProtocol.ssh || h.protocol == RemoteProtocol.sftp,
-    );
     _activeRdpHost ??= rdpCandidates.isNotEmpty ? rdpCandidates.first : _hosts.first;
-    _activeSshHost ??= sshCandidates.isNotEmpty ? sshCandidates.first : _hosts.first;
+    if (!_sshLiveConnected && !_sshOfflineSessionOpen) {
+      _activeSshHost = null;
+    }
   }
 
   void _updateTotpCountdown() {
@@ -1446,7 +1439,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         _lastDisconnectedSshHost = prevHost;
       }
       _activeSshHost = null;
-      _openLocalScratchShell = false;
       _sshOfflineSessionOpen = false;
       _activeSftpTransfer = null;
       _sftpEntries = [];
@@ -1861,7 +1853,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   Future<VaultCredentialItem?> _showVaultCredentialEditorDialog({VaultCredentialItem? existing}) async {
     final labelCtrl = TextEditingController(text: existing?.label ?? '');
     final domainCtrl = TextEditingController(text: existing?.domain ?? '');
-    final userCtrl = TextEditingController(text: existing?.username ?? 'root');
+    final userCtrl = TextEditingController(text: existing?.username ?? '');
     final passCtrl = TextEditingController(text: existing?.password ?? '');
     final keyCtrl = TextEditingController(text: existing?.privateKeyPem ?? '');
     final notesCtrl = TextEditingController(text: existing?.notes ?? '');
@@ -2084,7 +2076,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       text: (existing?.port ?? 22).toString(),
     );
     final userCtrl = TextEditingController(
-      text: (existing?.username ?? '').isEmpty ? 'root' : existing!.username,
+      text: existing?.username ?? '',
     );
     final passCtrl = TextEditingController(text: existing?.password ?? '');
     final keyCtrl = TextEditingController(text: existing?.privateKeyPem ?? '');
@@ -2297,8 +2289,8 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     _buildModalField(
                       fieldKey: const Key('jump_editor_user'),
                       controller: userCtrl,
-                      label: 'Bastion Username *',
-                      hint: 'root / ubuntu / ec2-user',
+                      label: 'Bastion Username',
+                      hint: 'e.g. ubuntu, admin, root',
                       icon: Icons.person_outline_rounded,
                     ),
                     const SizedBox(height: 12),
@@ -3450,7 +3442,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       text: (existing?.port ?? defaultPortForProtocol(selectedProto)).toString(),
     );
     final domainCtrl = TextEditingController(text: existing?.domain ?? '');
-    final userCtrl = TextEditingController(text: existing?.username ?? 'root');
+    final userCtrl = TextEditingController(text: existing?.username ?? '');
     final passCtrl = TextEditingController(text: existing?.password ?? '');
     final keyCtrl = TextEditingController(text: existing?.privateKeyPem ?? '');
     final folderCtrl = TextEditingController(text: existing?.folder ?? presetFolder ?? 'Production');
@@ -3893,7 +3885,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                               : 'Username',
                           hint: selectedProto == RemoteProtocol.vnc
                               ? 'ribato (optional)'
-                              : 'root / ubuntu',
+                              : 'e.g. ubuntu, admin, root',
                           icon: Icons.person_outline_rounded,
                         ),
                         const SizedBox(height: 10),
@@ -4354,6 +4346,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           _hosts.add(s);
         }
       }
+      if (widget.disableNetworkProbes) {
+        _activeSshHost = samples[1];
+        _sshOfflineSessionOpen = true;
+        if (_terminalBuffer.toPlainText().trim().isEmpty) {
+          _terminalBuffer.write(
+            '\x1b[1;33mSample Lab SSH Session\x1b[0m • ${samples[1].formattedEndpoint}\r\n'
+            '$_offlinePrompt',
+          );
+        }
+      }
       _syncActiveHostSelection();
     });
     _saveVaultToDisk();
@@ -4491,7 +4493,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             resolvedInitial.protocol == RemoteProtocol.sftp) {
           _activeSshHost = resolvedInitial;
           _sshOfflineSessionOpen = true;
-          _openLocalScratchShell = false;
           _sshSubMode = initialSshSubMode ??
               (resolvedInitial.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal');
           _tabIndex = 2;
@@ -4676,7 +4677,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             _sftpClient = sftp;
             _sshLiveConnected = true;
             _sshOfflineSessionOpen = false;
-            _openLocalScratchShell = false;
             _sshSubMode = initialSshSubMode ?? (host.protocol == RemoteProtocol.sftp ? 'sftp' : 'terminal');
             _sftpCurrentPath = resolvedHomePath;
             _sftpEntries = initialSftpEntries;
@@ -6656,7 +6656,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
   Future<void> _executeNonPtyCommand(String rawCmd) async {
     final cmd = rawCmd.trim();
-    final hostLabel = _activeSshHost?.name.split(' ').first ?? 'jaladesk';
+    final hostLabel = _activeSshHost?.name.split(' ').first ?? 'ssh-host';
 
     if (cmd == 'clear') {
       _terminalBuffer.clear();
@@ -8050,8 +8050,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         const SizedBox(width: 6),
                       ],
                       IconButton(
-                        tooltip: 'Add New Connection',
-                        onPressed: () => _showHostEditorDialog(),
+                        key: const Key('btn_appbar_create_menu'),
+                        tooltip: 'Create Connection, Jump Host, or Folder',
+                        onPressed: _showCreateItemSheet,
                         style: IconButton.styleFrom(
                           backgroundColor: JalaPalette.selected,
                           side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.5), width: 0.8),
@@ -8250,7 +8251,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   ),
                 ),
                 InkWell(
-                  onTap: () => _showHostEditorDialog(),
+                  onTap: _showCreateItemSheet,
                   child: const Icon(Icons.add_circle_outline_rounded, size: 16, color: JalaPalette.brandGold),
                 ),
               ],
@@ -8343,6 +8344,157 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     );
   }
 
+  void _showCreateItemSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: JalaPalette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          key: const Key('sheet_create_menu'),
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 34,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: JalaPalette.lineInput,
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  'Create New',
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w800,
+                    color: JalaPalette.text,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              _buildCreateMenuTile(
+                tileKey: const Key('menu_add_connection'),
+                icon: Icons.dns_rounded,
+                iconColor: JalaPalette.accentLine,
+                title: 'New Connection',
+                subtitle: 'RDP, VNC, SSH, SFTP, or Hypervisor',
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _showHostEditorDialog();
+                },
+              ),
+              const SizedBox(height: 6),
+              _buildCreateMenuTile(
+                tileKey: const Key('menu_add_jump_host'),
+                icon: Icons.alt_route_rounded,
+                iconColor: JalaPalette.brandGold,
+                title: 'New Jump Host',
+                subtitle: 'SSH Bastion Gateway for private networks',
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _showJumpHostEditorDialog();
+                },
+              ),
+              const SizedBox(height: 6),
+              _buildCreateMenuTile(
+                tileKey: const Key('menu_add_folder'),
+                icon: Icons.create_new_folder_outlined,
+                iconColor: JalaPalette.ok,
+                title: 'New Folder',
+                subtitle: 'Group connections & set folder-wide Jump Host',
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _showFolderSettingsDialog();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCreateMenuTile({
+    required Key tileKey,
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: JalaPalette.header,
+      borderRadius: BorderRadius.circular(11),
+      child: InkWell(
+        key: tileKey,
+        borderRadius: BorderRadius.circular(11),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(color: JalaPalette.lineInput),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: JalaPalette.surface,
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(color: iconColor.withValues(alpha: 0.45)),
+                ),
+                child: Icon(icon, size: 18, color: iconColor),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: JalaPalette.text,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(
+                        fontSize: 11.2,
+                        color: JalaPalette.muted,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Icon(Icons.chevron_right_rounded, size: 18, color: JalaPalette.muted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildConnectionsTab() {
     final filtered = _hosts.where((h) {
       if (_protocolFilter == 'JUMP') {
@@ -8367,12 +8519,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       }
       return true;
     }).toList();
-
-    final onlineCount = _hosts.where((h) => h.isOnline == true).length;
-    final latencies = _hosts.where((h) => h.latencyMs != null).map((h) => h.latencyMs!).toList();
-    final avgRtt = latencies.isEmpty
-        ? '—'
-        : '${(latencies.reduce((a, b) => a + b) / latencies.length).toStringAsFixed(0)} ms';
 
     final jumpGateways = filtered.where(_isJumpHostGateway).toList();
     final nonGatewayFiltered =
@@ -8420,152 +8566,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             ? (availW - horizontalPad * 2)
             : ((availW - horizontalPad * 2 - spacing * (columns - 1)) / columns);
 
+        final bool appBarVisible = Scaffold.maybeOf(ctx)?.hasAppBar ?? true;
+
         return ListView(
           padding: EdgeInsets.fromLTRB(horizontalPad, 12, horizontalPad, 24 + mediaPadding.bottom),
           children: [
-            // Executive Compact Vault Telemetry Header
-            Container(
-              padding: const EdgeInsets.fromLTRB(13, 12, 13, 11),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [JalaPalette.chip, JalaPalette.surface],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.32)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      _buildJalaBrandLogo(size: 36, radius: 9),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'JalaDesk Enterprise Vault',
-                              style: TextStyle(
-                                fontSize: 13.5,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: -0.2,
-                                color: JalaPalette.text,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 1),
-                            Text(
-                              _pairedDesktopInfo,
-                              style: const TextStyle(fontSize: 11, color: JalaPalette.text2),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton.icon(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: JalaPalette.accent,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-                          minimumSize: const Size(0, 32),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            side: const BorderSide(color: JalaPalette.accentLine, width: 0.8),
-                          ),
-                        ),
-                        onPressed: () => _showHostEditorDialog(),
-                        icon: const Icon(Icons.add_rounded, size: 16),
-                        label: const Text('Add Host', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      _buildTelemetryMetricPill('${_hosts.length} SAVED', '$onlineCount Reachable', JalaPalette.ok),
-                      const SizedBox(width: 7),
-                      _buildTelemetryMetricPill(avgRtt, 'Live TCP RTT', JalaPalette.accentLine),
-                      const SizedBox(width: 7),
-                      _buildTelemetryMetricPill('AES-256', 'Zero-Trust GCM', JalaPalette.brandGold),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 8),
-            // Quick Gateway & Folder Action Strip
-            Wrap(
-              spacing: 7,
-              runSpacing: 6,
-              children: [
-                OutlinedButton.icon(
-                  key: const Key('btn_header_add_jump_host'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: JalaPalette.brandGold,
-                    backgroundColor: JalaPalette.surface,
-                    side: BorderSide(
-                      color: JalaPalette.brandGold.withValues(alpha: 0.45),
-                    ),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 6,
-                    ),
-                    minimumSize: const Size(0, 30),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                  onPressed: () => _showJumpHostEditorDialog(),
-                  icon: const Icon(Icons.alt_route_rounded, size: 14),
-                  label: const Text(
-                    '+ Jump Host',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                OutlinedButton.icon(
-                  key: const Key('btn_add_folder'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: JalaPalette.accentLine,
-                    backgroundColor: JalaPalette.surface,
-                    side: const BorderSide(color: JalaPalette.lineInput),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 6,
-                    ),
-                    minimumSize: const Size(0, 30),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                  onPressed: () => _showFolderSettingsDialog(),
-                  icon: const Icon(
-                    Icons.create_new_folder_outlined,
-                    size: 14,
-                  ),
-                  label: const Text(
-                    '+ Folder',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            // Search + Quick Connect + SSH Port Forwards + Live Latency Probe Row
+            // Search + Icon-Only Quick Actions Row (Termius / Jump Desktop clarity)
             Row(
               children: [
                 Expanded(
@@ -8613,27 +8619,47 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 SizedBox(
                   height: 36,
                   width: 36,
-                  child: IconButton(
-                    key: const Key('btn_open_port_forwards'),
-                    padding: EdgeInsets.zero,
-                    tooltip: 'SSH Port Forwarding Studio (ssh -L)',
-                    onPressed: () => _showPortForwardStudioSheet(),
-                    style: IconButton.styleFrom(
-                      backgroundColor: _activePortForwards.isNotEmpty
-                          ? JalaPalette.ok.withValues(alpha: 0.14)
-                          : JalaPalette.surface,
-                      side: BorderSide(
-                        color: _activePortForwards.isNotEmpty
-                            ? JalaPalette.ok.withValues(alpha: 0.55)
-                            : JalaPalette.lineInput,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Positioned.fill(
+                        child: IconButton(
+                          key: const Key('btn_open_port_forwards'),
+                          padding: EdgeInsets.zero,
+                          tooltip: 'SSH Port Forwarding Studio (ssh -L)',
+                          onPressed: () => _showPortForwardStudioSheet(),
+                          style: IconButton.styleFrom(
+                            backgroundColor: _activePortForwards.isNotEmpty
+                                ? JalaPalette.ok.withValues(alpha: 0.14)
+                                : JalaPalette.surface,
+                            side: BorderSide(
+                              color: _activePortForwards.isNotEmpty
+                                  ? JalaPalette.ok.withValues(alpha: 0.55)
+                                  : JalaPalette.lineInput,
+                            ),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                          ),
+                          icon: Icon(
+                            Icons.swap_horiz_rounded,
+                            size: 18,
+                            color: _activePortForwards.isNotEmpty ? JalaPalette.ok : JalaPalette.accentLine,
+                          ),
+                        ),
                       ),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
-                    ),
-                    icon: Icon(
-                      Icons.swap_calls_rounded,
-                      size: 17,
-                      color: _activePortForwards.isNotEmpty ? JalaPalette.ok : JalaPalette.accentLine,
-                    ),
+                      if (_activePortForwards.isNotEmpty)
+                        Positioned(
+                          right: 4,
+                          top: 4,
+                          child: Container(
+                            width: 7,
+                            height: 7,
+                            decoration: const BoxDecoration(
+                              color: JalaPalette.ok,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
                 if (_hosts.isNotEmpty) ...[
@@ -8642,8 +8668,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     height: 36,
                     width: 36,
                     child: IconButton(
+                      key: const Key('btn_refresh_latency'),
                       padding: EdgeInsets.zero,
-                      tooltip: 'Probe Live TCP Latency',
+                      tooltip: 'Refresh Latency Ping',
                       onPressed: _probingAll ? null : _probeAllHosts,
                       style: IconButton.styleFrom(
                         backgroundColor: JalaPalette.surface,
@@ -8651,10 +8678,29 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
                       ),
                       icon: Icon(
-                        Icons.network_ping_rounded,
-                        size: 16,
+                        Icons.refresh_rounded,
+                        size: 17,
                         color: _probingAll ? JalaPalette.muted : JalaPalette.brandGold,
                       ),
+                    ),
+                  ),
+                ],
+                if (!appBarVisible) ...[
+                  const SizedBox(width: 6),
+                  SizedBox(
+                    height: 36,
+                    width: 36,
+                    child: IconButton(
+                      key: const Key('btn_landscape_create_menu'),
+                      padding: EdgeInsets.zero,
+                      tooltip: 'Create Connection, Jump Host, or Folder',
+                      onPressed: _showCreateItemSheet,
+                      style: IconButton.styleFrom(
+                        backgroundColor: JalaPalette.selected,
+                        side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.5)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                      ),
+                      icon: const Icon(Icons.add_rounded, size: 18, color: JalaPalette.brandGold),
                     ),
                   ),
                 ],
@@ -8905,40 +8951,12 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(color: JalaPalette.line),
                       ),
-                      child: Wrap(
-                        spacing: 8,
-                        runSpacing: 6,
-                        alignment: WrapAlignment.spaceBetween,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          Text(
-                            'Empty folder • New hosts inherit "${folderEntry.key}" routing.',
-                            style: const TextStyle(
-                              fontSize: 11.5,
-                              color: JalaPalette.muted,
-                            ),
-                          ),
-                          OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                              foregroundColor: JalaPalette.brandGold,
-                              side: const BorderSide(
-                                color: JalaPalette.lineInput,
-                              ),
-                            ),
-                            onPressed: () => _showHostEditorDialog(
-                              presetFolder: folderEntry.key,
-                            ),
-                            icon: const Icon(Icons.add_rounded, size: 15),
-                            label: const Text(
-                              'Add Host Here',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                        ],
+                      child: Text(
+                        'Empty folder • New connections inherit "${folderEntry.key}" routing.',
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          color: JalaPalette.muted,
+                        ),
                       ),
                     )
                   else if (columns == 1)
@@ -8961,57 +8979,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 ],
                 const SizedBox(height: 4),
               ],
-              const SizedBox(height: 4),
-              Wrap(
-                alignment: WrapAlignment.spaceBetween,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                spacing: 8,
-                runSpacing: 2,
-                children: [
-                  Wrap(
-                    spacing: 4,
-                    runSpacing: 2,
-                    children: [
-                      TextButton.icon(
-                        onPressed: () => _showHostEditorDialog(),
-                        icon: const Icon(Icons.add_circle_outline_rounded, size: 16, color: JalaPalette.brandGold),
-                        label: const Text(
-                          'Add New Connection',
-                          style: TextStyle(fontSize: 12, color: JalaPalette.brandGold, fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                      TextButton.icon(
-                        key: const Key('btn_add_jump_host_shortcut'),
-                        onPressed: () => _showJumpHostEditorDialog(),
-                        icon: const Icon(Icons.alt_route_rounded, size: 15, color: JalaPalette.accentLine),
-                        label: const Text(
-                          'Add Jump Host',
-                          style: TextStyle(fontSize: 11.5, color: JalaPalette.accentLine, fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                    ],
-                  ),
-                  TextButton.icon(
-                    onPressed: () {
-                      unawaited(_bastionPool.disposeAll());
-                      setState(() {
-                        _hosts.clear();
-                        _folderConfigs.clear();
-                        _activeRdpHost = null;
-                        _activeSshHost = null;
-                        _lastDisconnectedDesktopHost = null;
-                        _lastDisconnectedSshHost = null;
-                      });
-                      _saveVaultToDisk();
-                    },
-                    icon: const Icon(Icons.delete_sweep_outlined, size: 16, color: JalaPalette.muted),
-                    label: const Text(
-                      'Clear Vault',
-                      style: TextStyle(fontSize: 11.5, color: JalaPalette.muted),
-                    ),
-                  ),
-                ],
-              ),
             ],
           ],
         );
@@ -9161,71 +9128,78 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             ),
           ),
           if (configurable) ...[
+            if (folderJumpHost != null) ...[
+              const SizedBox(width: 4),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 118),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: JalaPalette.selected,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: JalaPalette.brandGold.withValues(alpha: 0.45),
+                    ),
+                  ),
+                  child: Text(
+                    'via ${folderJumpHost.name}',
+                    style: const TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w700,
+                      color: JalaPalette.brandGold,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(width: 4),
-            InkWell(
-              key: Key('btn_folder_settings_$folderName'),
-              borderRadius: BorderRadius.circular(7),
-              onTap: () => _showFolderSettingsDialog(folderName: folderName),
-              child: Container(
-                constraints: const BoxConstraints(maxWidth: 132),
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3.5),
-                decoration: BoxDecoration(
-                  color: folderJumpHost != null
+            SizedBox(
+              width: 26,
+              height: 26,
+              child: IconButton(
+                key: Key('btn_folder_settings_$folderName'),
+                padding: EdgeInsets.zero,
+                tooltip: 'Folder Gateway Settings',
+                onPressed: () => _showFolderSettingsDialog(folderName: folderName),
+                style: IconButton.styleFrom(
+                  backgroundColor: folderJumpHost != null
                       ? JalaPalette.selected
                       : JalaPalette.surface,
-                  borderRadius: BorderRadius.circular(7),
-                  border: Border.all(
+                  side: BorderSide(
                     color: folderJumpHost != null
                         ? JalaPalette.brandGold.withValues(alpha: 0.55)
                         : JalaPalette.line,
                   ),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.alt_route_rounded,
-                      size: 11.5,
-                      color: folderJumpHost != null
-                          ? JalaPalette.brandGold
-                          : JalaPalette.muted,
-                    ),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        folderJumpHost != null
-                            ? 'via ${folderJumpHost.name}'
-                            : 'Set Jump',
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                          color: folderJumpHost != null
-                              ? JalaPalette.brandGold
-                              : JalaPalette.text2,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
+                icon: Icon(
+                  Icons.alt_route_rounded,
+                  size: 13.5,
+                  color: folderJumpHost != null
+                      ? JalaPalette.brandGold
+                      : JalaPalette.muted,
                 ),
               ),
             ),
             const SizedBox(width: 4),
-            InkWell(
-              key: Key('btn_folder_add_host_$folderName'),
-              borderRadius: BorderRadius.circular(7),
-              onTap: () => _showHostEditorDialog(presetFolder: folderName),
-              child: Container(
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: JalaPalette.surface,
-                  borderRadius: BorderRadius.circular(7),
-                  border: Border.all(color: JalaPalette.line),
+            SizedBox(
+              width: 26,
+              height: 26,
+              child: IconButton(
+                key: Key('btn_folder_add_host_$folderName'),
+                padding: EdgeInsets.zero,
+                tooltip: 'Add Connection to Folder',
+                onPressed: () => _showHostEditorDialog(presetFolder: folderName),
+                style: IconButton.styleFrom(
+                  backgroundColor: JalaPalette.surface,
+                  side: const BorderSide(color: JalaPalette.line),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
                 ),
-                child: const Icon(
+                icon: const Icon(
                   Icons.add_rounded,
-                  size: 14,
+                  size: 14.5,
                   color: JalaPalette.accentLine,
                 ),
               ),
@@ -9286,295 +9260,217 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           onTap: () => _showJumpHostEditorDialog(existing: gateway),
           onLongPress: () => _showHostActionsSheet(gateway),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(11, 10, 9, 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+            child: Row(
               children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: JalaPalette.selected,
-                        borderRadius: BorderRadius.circular(9),
-                      ),
-                      child: const Icon(
-                        Icons.alt_route_rounded,
-                        size: 18,
-                        color: JalaPalette.brandGold,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: JalaPalette.selected,
+                    borderRadius: BorderRadius.circular(9),
+                    border: Border.all(color: JalaPalette.brandGold.withValues(alpha: 0.42)),
+                  ),
+                  child: const Icon(
+                    Icons.alt_route_rounded,
+                    size: 18,
+                    color: JalaPalette.brandGold,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
                         children: [
-                          Row(
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  gateway.name,
-                                  style: const TextStyle(
-                                    fontSize: 13.5,
-                                    fontWeight: FontWeight.w700,
-                                    color: JalaPalette.text,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
+                          Flexible(
+                            child: Text(
+                              gateway.name,
+                              style: const TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w700,
+                                color: JalaPalette.text,
                               ),
-                              const SizedBox(width: 6),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                  vertical: 1.5,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: statusColor.withValues(alpha: 0.14),
-                                  borderRadius: BorderRadius.circular(99),
-                                ),
-                                child: Text(
-                                  statusText,
-                                  style: TextStyle(
-                                    fontSize: 9.5,
-                                    fontWeight: FontWeight.w800,
-                                    fontFeatures: const [
-                                      FontFeature.tabularFigures(),
-                                    ],
-                                    color: statusColor,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            gateway.formattedEndpoint,
-                            style: const TextStyle(
-                              fontSize: 11.5,
-                              fontFamily: 'monospace',
-                              fontFeatures: [FontFeature.tabularFigures()],
-                              color: JalaPalette.text2,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                            decoration: BoxDecoration(
+                              color: statusColor.withValues(alpha: 0.14),
+                              borderRadius: BorderRadius.circular(99),
+                            ),
+                            child: Text(
+                              statusText,
+                              style: TextStyle(
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w800,
+                                fontFeatures: const [FontFeature.tabularFigures()],
+                                color: statusColor,
+                              ),
+                            ),
                           ),
                         ],
                       ),
-                    ),
-                    SizedBox(
-                      width: 30,
-                      height: 30,
-                      child: IconButton(
-                        padding: EdgeInsets.zero,
-                        tooltip: 'Edit Gateway',
-                        onPressed: () =>
-                            _showJumpHostEditorDialog(existing: gateway),
-                        icon: const Icon(
-                          Icons.tune_rounded,
-                          size: 16,
-                          color: JalaPalette.brandGold,
+                      const SizedBox(height: 2),
+                      Text(
+                        gateway.formattedEndpoint,
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontFamily: 'monospace',
+                          fontFeatures: [FontFeature.tabularFigures()],
+                          color: JalaPalette.text2,
                         ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                    InkWell(
-                      borderRadius: BorderRadius.circular(7),
-                      onTap: () => _showHostActionsSheet(gateway),
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: 4,
-                          vertical: 6,
-                        ),
-                        child: Icon(
-                          Icons.more_vert_rounded,
-                          size: 17,
-                          color: JalaPalette.muted,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  alignment: WrapAlignment.spaceBetween,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Wrap(
-                      spacing: 5,
-                      runSpacing: 4,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 6,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: JalaPalette.brandGold.withValues(alpha: 0.18),
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: const Text(
-                            'GATEWAY',
-                            style: TextStyle(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 0.4,
-                              color: JalaPalette.brandGold,
-                            ),
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 6,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: JalaPalette.header,
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: Text(
-                            authBadge,
-                            style: const TextStyle(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w700,
-                              color: JalaPalette.accentLine,
-                            ),
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 6,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: JalaPalette.header,
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: Text(
-                            '$routedCount routed',
-                            style: const TextStyle(
-                              fontSize: 9.5,
-                              fontWeight: FontWeight.w700,
-                              fontFeatures: [FontFeature.tabularFigures()],
-                              color: JalaPalette.text2,
-                            ),
-                          ),
-                        ),
-                        if (showCustomFolderTag)
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 5,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
                           Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 2,
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                            decoration: BoxDecoration(
+                              color: JalaPalette.brandGold.withValues(alpha: 0.18),
+                              borderRadius: BorderRadius.circular(5),
                             ),
+                            child: const Text(
+                              'GATEWAY',
+                              style: TextStyle(
+                                fontSize: 8.8,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.4,
+                                color: JalaPalette.brandGold,
+                              ),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
                             decoration: BoxDecoration(
                               color: JalaPalette.header,
                               borderRadius: BorderRadius.circular(5),
                             ),
                             child: Text(
-                              trimmedFolder.toUpperCase(),
+                              authBadge,
+                              style: const TextStyle(
+                                fontSize: 8.8,
+                                fontWeight: FontWeight.w700,
+                                color: JalaPalette.accentLine,
+                              ),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                            decoration: BoxDecoration(
+                              color: JalaPalette.header,
+                              borderRadius: BorderRadius.circular(5),
+                            ),
+                            child: Text(
+                              '$routedCount routed',
                               style: const TextStyle(
                                 fontSize: 9,
                                 fontWeight: FontWeight.w700,
-                                color: JalaPalette.muted,
+                                fontFeatures: [FontFeature.tabularFigures()],
+                                color: JalaPalette.text2,
                               ),
                             ),
                           ),
-                      ],
-                    ),
-                    Wrap(
-                      spacing: 5,
-                      runSpacing: 4,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        SizedBox(
-                          height: 28,
-                          child: OutlinedButton(
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: JalaPalette.brandGold,
-                              side: BorderSide(
-                                color: JalaPalette.brandGold.withValues(
-                                  alpha: 0.45,
+                          if (showCustomFolderTag)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                              decoration: BoxDecoration(
+                                color: JalaPalette.header,
+                                borderRadius: BorderRadius.circular(5),
+                              ),
+                              child: Text(
+                                trimmedFolder.toUpperCase(),
+                                style: const TextStyle(
+                                  fontSize: 8.8,
+                                  fontWeight: FontWeight.w700,
+                                  color: JalaPalette.muted,
                                 ),
                               ),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                              ),
-                              minimumSize: Size.zero,
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(7),
-                              ),
                             ),
-                            onPressed: () => _connectToHost(
-                              gateway,
-                              initialSshSubMode: 'sftp',
-                            ),
-                            child: const Text(
-                              'SFTP',
-                              style: TextStyle(
-                                fontSize: 10.5,
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                          ),
-                        ),
-                        SizedBox(
-                          height: 28,
-                          child: FilledButton.icon(
-                            style: FilledButton.styleFrom(
-                              backgroundColor: isLive
-                                  ? JalaPalette.ok.withValues(alpha: 0.2)
-                                  : JalaPalette.accent,
-                              foregroundColor:
-                                  isLive ? JalaPalette.ok : Colors.white,
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                              ),
-                              minimumSize: Size.zero,
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(7),
-                              ),
-                            ),
-                            onPressed: () => _connectToHost(gateway),
-                            icon: const Icon(Icons.terminal_rounded, size: 13),
-                            label: Text(
-                              isLive ? 'Resume' : 'Terminal',
-                              style: const TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                        ),
-                        if (isLive)
-                          SizedBox(
-                            height: 28,
-                            width: 28,
-                            child: IconButton(
-                              padding: EdgeInsets.zero,
-                              tooltip: 'Disconnect ${gateway.name}',
-                              style: IconButton.styleFrom(
-                                backgroundColor:
-                                    JalaPalette.danger.withValues(alpha: 0.14),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(7),
-                                ),
-                              ),
-                              onPressed: _disconnectSshSession,
-                              icon: const Icon(
-                                Icons.power_settings_new_rounded,
-                                size: 14,
-                                color: JalaPalette.danger,
-                              ),
-                            ),
-                          ),
-                      ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 6),
+                SizedBox(
+                  width: 30,
+                  height: 30,
+                  child: IconButton(
+                    key: Key('btn_host_sftp_${gateway.id}'),
+                    padding: EdgeInsets.zero,
+                    tooltip: 'Open SFTP',
+                    onPressed: () => _connectToHost(gateway, initialSshSubMode: 'sftp'),
+                    style: IconButton.styleFrom(
+                      backgroundColor: JalaPalette.header,
+                      side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.4)),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
                     ),
-                  ],
+                    icon: const Icon(Icons.folder_zip_outlined, size: 15, color: JalaPalette.brandGold),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                SizedBox(
+                  width: 30,
+                  height: 30,
+                  child: IconButton(
+                    key: Key('btn_gateway_terminal_${gateway.id}'),
+                    padding: EdgeInsets.zero,
+                    tooltip: isLive ? 'Resume SSH Terminal' : 'Open SSH Terminal',
+                    onPressed: () => _connectToHost(gateway),
+                    style: IconButton.styleFrom(
+                      backgroundColor: isLive ? JalaPalette.ok.withValues(alpha: 0.2) : JalaPalette.accent,
+                      side: BorderSide(
+                        color: isLive ? JalaPalette.ok.withValues(alpha: 0.7) : JalaPalette.accentLine,
+                        width: 0.8,
+                      ),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+                    ),
+                    icon: Icon(
+                      Icons.terminal_rounded,
+                      size: 15,
+                      color: isLive ? JalaPalette.ok : Colors.white,
+                    ),
+                  ),
+                ),
+                if (isLive) ...[
+                  const SizedBox(width: 4),
+                  SizedBox(
+                    width: 30,
+                    height: 30,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      tooltip: 'Disconnect ${gateway.name}',
+                      style: IconButton.styleFrom(
+                        backgroundColor: JalaPalette.danger.withValues(alpha: 0.14),
+                        side: BorderSide(color: JalaPalette.danger.withValues(alpha: 0.55), width: 0.8),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+                      ),
+                      onPressed: _disconnectSshSession,
+                      icon: const Icon(Icons.power_settings_new_rounded, size: 14.5, color: JalaPalette.danger),
+                    ),
+                  ),
+                ],
+                const SizedBox(width: 2),
+                SizedBox(
+                  width: 28,
+                  height: 30,
+                  child: IconButton(
+                    key: Key('btn_gateway_options_${gateway.id}'),
+                    padding: EdgeInsets.zero,
+                    tooltip: 'Gateway Options',
+                    onPressed: () => _showHostActionsSheet(gateway),
+                    icon: const Icon(Icons.more_horiz_rounded, size: 17, color: JalaPalette.muted),
+                  ),
                 ),
               ],
             ),
@@ -9634,16 +9530,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
               ),
               OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: JalaPalette.accentLine,
-                  side: const BorderSide(color: JalaPalette.lineInput),
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                ),
-                onPressed: () => _showJumpHostEditorDialog(),
-                icon: const Icon(Icons.alt_route_rounded, size: 16),
-                label: const Text('New Jump Host', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
-              ),
-              OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
                   foregroundColor: JalaPalette.brandGold,
                   side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.5)),
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -9655,42 +9541,6 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             ],
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildTelemetryMetricPill(String value, String label, Color accentColor) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-        decoration: BoxDecoration(
-          color: JalaPalette.header.withValues(alpha: 0.68),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: JalaPalette.line),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              value,
-              style: TextStyle(
-                fontSize: 11.5,
-                fontWeight: FontWeight.w800,
-                fontFeatures: const [FontFeature.tabularFigures()],
-                color: accentColor,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: 1),
-            Text(
-              label,
-              style: const TextStyle(fontSize: 9.5, color: JalaPalette.muted),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -9914,52 +9764,46 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   ),
                 ),
                 const SizedBox(width: 6),
-                // Quick SFTP Jump on SSH Hosts
+                // Icon-Only Quick Actions (Open SFTP, Connect/Resume, Disconnect, Options)
                 if (host.protocol == RemoteProtocol.ssh) ...[
                   SizedBox(
                     height: 30,
-                    child: OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: JalaPalette.brandGold,
-                        side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.45)),
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    width: 30,
+                    child: IconButton(
+                      key: Key('btn_host_sftp_${host.id}'),
+                      padding: EdgeInsets.zero,
+                      tooltip: 'Open SFTP',
+                      style: IconButton.styleFrom(
+                        backgroundColor: JalaPalette.header,
+                        side: BorderSide(color: JalaPalette.brandGold.withValues(alpha: 0.42)),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
                       ),
                       onPressed: () => _connectToHost(host, initialSshSubMode: 'sftp'),
-                      child: const Text(
-                        'SFTP',
-                        style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800),
-                      ),
+                      icon: const Icon(Icons.folder_zip_outlined, size: 15, color: JalaPalette.brandGold),
                     ),
                   ),
-                  const SizedBox(width: 5),
+                  const SizedBox(width: 4),
                 ],
-                // Primary Connect / Resume Action (never re-handshakes an already-live session!)
                 SizedBox(
                   height: 30,
-                  child: FilledButton(
-                    style: FilledButton.styleFrom(
+                  width: 30,
+                  child: IconButton(
+                    key: Key('btn_host_connect_${host.id}'),
+                    padding: EdgeInsets.zero,
+                    tooltip: isLive ? 'Resume Session' : 'Connect',
+                    style: IconButton.styleFrom(
                       backgroundColor: isLive ? JalaPalette.ok.withValues(alpha: 0.2) : JalaPalette.accent,
-                      foregroundColor: isLive ? JalaPalette.ok : Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 11),
-                      minimumSize: Size.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(7),
-                        side: BorderSide(
-                          color: isLive ? JalaPalette.ok.withValues(alpha: 0.7) : JalaPalette.accentLine,
-                          width: 0.8,
-                        ),
+                      side: BorderSide(
+                        color: isLive ? JalaPalette.ok.withValues(alpha: 0.7) : JalaPalette.accentLine,
+                        width: 0.8,
                       ),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
                     ),
                     onPressed: () => _connectToHost(host),
-                    child: Text(
-                      isLive
-                          ? 'Resume'
-                          : (host.protocol == RemoteProtocol.ssh ? 'SSH' : 'Connect'),
-                      style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
+                    icon: Icon(
+                      isLive ? Icons.open_in_new_rounded : Icons.play_arrow_rounded,
+                      size: 16,
+                      color: isLive ? JalaPalette.ok : Colors.white,
                     ),
                   ),
                 ),
@@ -9989,13 +9833,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   ),
                 ],
                 const SizedBox(width: 2),
-                // Context Menu Trigger (`⋯`)
-                InkWell(
-                  borderRadius: BorderRadius.circular(7),
-                  onTap: () => _showHostActionsSheet(host),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                    child: Icon(Icons.more_vert_rounded, size: 17, color: JalaPalette.muted),
+                SizedBox(
+                  width: 28,
+                  height: 30,
+                  child: IconButton(
+                    key: Key('btn_host_more_${host.id}'),
+                    padding: EdgeInsets.zero,
+                    tooltip: 'Host Options',
+                    onPressed: () => _showHostActionsSheet(host),
+                    icon: const Icon(Icons.more_vert_rounded, size: 17, color: JalaPalette.muted),
                   ),
                 ),
               ],
@@ -11824,13 +11670,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     bool isWideScreen = false,
     bool isPhoneLandscape = false,
   }) {
-    final bool showDisconnectedEmptyState =
-        !_sshLiveConnected && _activeSshHost == null && !_openLocalScratchShell;
-    final hostDesc = _activeSshHost != null
+    final bool hasActiveSession = _sshLiveConnected || _sshOfflineSessionOpen;
+    final bool showDisconnectedEmptyState = !hasActiveSession;
+    final hostDesc = hasActiveSession && _activeSshHost != null
         ? _activeSshHost!.formattedEndpoint
-        : (_openLocalScratchShell ? 'Offline Scratch Shell' : 'No Active Session');
+        : 'No Active Session';
     final activeTheme = TerminalThemePreset.byId(_terminalThemeId);
-    final routeBadge = _activeSshHost != null ? _routeBadgeForHost(_activeSshHost!) : '';
+    final routeBadge = hasActiveSession && _activeSshHost != null
+        ? _routeBadgeForHost(_activeSshHost!)
+        : '';
 
     return LayoutBuilder(
       builder: (ctx, constraints) {
@@ -11957,9 +11805,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         color: _sshLiveConnected ? JalaPalette.ok : JalaPalette.brandGold,
                       ),
                     ),
-                    const SizedBox(width: 7),
+                    const SizedBox(width: 6),
                     Expanded(
-                      flex: 3,
+                      flex: 1,
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
@@ -11989,9 +11837,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         ],
                       ),
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 4),
                     Flexible(
-                      flex: 5,
+                      flex: 4,
                       child: SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
                         child: Row(
@@ -12013,6 +11861,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                     label: 'Terminal',
                                     icon: Icons.terminal_rounded,
                                     selected: _sshSubMode == 'terminal',
+                                    compact: constraints.maxWidth < 380,
                                     onTap: () => selectSshSubMode('terminal'),
                                   ),
                                   _buildSshModeSegment(
@@ -12020,6 +11869,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                                     label: 'SFTP',
                                     icon: Icons.folder_copy_outlined,
                                     selected: _sshSubMode == 'sftp',
+                                    compact: constraints.maxWidth < 380,
                                     onTap: () => selectSshSubMode('sftp'),
                                   ),
                                 ],
@@ -12311,6 +12161,20 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
   Widget _buildSshDisconnectedEmptyState() {
     final lastHost = _lastDisconnectedSshHost;
+    final List<RemoteHostItem> quickHosts = <RemoteHostItem>[];
+    if (lastHost != null &&
+        (lastHost.protocol == RemoteProtocol.ssh || lastHost.protocol == RemoteProtocol.sftp)) {
+      final refreshed = _hosts.where((h) => h.id == lastHost.id).firstOrNull;
+      quickHosts.add(refreshed ?? lastHost);
+    }
+    for (final h in _hosts) {
+      if (quickHosts.length >= 4) break;
+      if ((h.protocol == RemoteProtocol.ssh || h.protocol == RemoteProtocol.sftp) &&
+          !quickHosts.any((q) => q.id == h.id)) {
+        quickHosts.add(h);
+      }
+    }
+
     return Container(
       key: const Key('ssh_disconnected_empty_state'),
       color: JalaPalette.page,
@@ -12344,7 +12208,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 ),
                 const SizedBox(height: 12),
                 const Text(
-                  'No Active SSH / SFTP Session',
+                  'No Active SSH Session',
                   style: TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.w800,
@@ -12354,7 +12218,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'Select a server or Jump Host from Connections to start an encrypted xterm-256color shell or SFTP browser.',
+                  'Tap an SSH host below or open Connections to start a live terminal or SFTP session.',
                   style: TextStyle(
                     fontSize: 12,
                     color: JalaPalette.muted,
@@ -12362,77 +12226,101 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   ),
                   textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 16),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  alignment: WrapAlignment.center,
-                  children: [
-                    FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: JalaPalette.accent,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 10,
-                        ),
-                      ),
-                      onPressed: () => setState(() => _tabIndex = 0),
-                      icon: const Icon(Icons.dns_outlined, size: 16),
-                      label: const Text(
-                        'Browse Connections',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
+                if (quickHosts.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  for (int i = 0; i < quickHosts.length; i++) ...[
+                    if (i > 0) const SizedBox(height: 6),
+                    Builder(
+                      builder: (ctx) {
+                        final h = quickHosts[i];
+                        final isReconnect = lastHost != null && h.id == lastHost.id;
+                        final isGateway = _isJumpHostGateway(h);
+                        return Material(
+                          color: JalaPalette.header,
+                          borderRadius: BorderRadius.circular(10),
+                          child: InkWell(
+                            key: isReconnect
+                                ? const Key('btn_reconnect_last_ssh')
+                                : Key('btn_quick_ssh_${h.id}'),
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: () => _connectToHost(h),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: isReconnect
+                                      ? JalaPalette.brandGold.withValues(alpha: 0.5)
+                                      : JalaPalette.lineInput,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    isGateway ? Icons.alt_route_rounded : _iconForProtocol(h.protocol),
+                                    size: 16,
+                                    color: isGateway ? JalaPalette.brandGold : JalaPalette.accentLine,
+                                  ),
+                                  const SizedBox(width: 9),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          h.name,
+                                          style: const TextStyle(
+                                            fontSize: 12.5,
+                                            fontWeight: FontWeight.w700,
+                                            color: JalaPalette.text,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        Text(
+                                          h.formattedEndpoint,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            fontFamily: 'monospace',
+                                            color: JalaPalette.text2,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Icon(
+                                    isReconnect ? Icons.refresh_rounded : Icons.arrow_forward_rounded,
+                                    size: 16,
+                                    color: JalaPalette.brandGold,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
                     ),
-                    if (lastHost != null)
-                      OutlinedButton.icon(
-                        key: const Key('btn_reconnect_last_ssh'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: JalaPalette.brandGold,
-                          side: BorderSide(
-                            color: JalaPalette.brandGold.withValues(alpha: 0.5),
-                          ),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 10,
-                          ),
-                        ),
-                        onPressed: () => _connectToHost(lastHost),
-                        icon: const Icon(Icons.refresh_rounded, size: 16),
-                        label: Text(
-                          'Reconnect ${lastHost.name}',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
                   ],
-                ),
-                const SizedBox(height: 8),
-                TextButton.icon(
-                  key: const Key('btn_open_offline_scratch_shell'),
-                  onPressed: () {
-                    setState(() {
-                      _openLocalScratchShell = true;
-                      if (_terminalBuffer.toPlainText().trim().isEmpty) {
-                        _terminalBuffer.write(_offlinePrompt);
-                      }
-                    });
-                  },
-                  icon: const Icon(
-                    Icons.code_rounded,
-                    size: 14,
-                    color: JalaPalette.text2,
+                ],
+                const SizedBox(height: 14),
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: JalaPalette.accent,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
                   ),
+                  onPressed: () => setState(() => _tabIndex = 0),
+                  icon: const Icon(Icons.dns_outlined, size: 16),
                   label: const Text(
-                    'Open Offline Scratch Shell',
+                    'Browse Connections',
                     style: TextStyle(
-                      fontSize: 11.5,
-                      color: JalaPalette.text2,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
                 ),
@@ -12450,13 +12338,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     required IconData icon,
     required bool selected,
     required VoidCallback onTap,
+    bool compact = false,
   }) {
     return InkWell(
       key: key,
       borderRadius: BorderRadius.circular(6),
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3.5),
+        padding: EdgeInsets.symmetric(horizontal: compact ? 5.5 : 7, vertical: 3.5),
         decoration: BoxDecoration(
           color: selected ? JalaPalette.selected : Colors.transparent,
           borderRadius: BorderRadius.circular(6),
@@ -12469,14 +12358,14 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           children: [
             Icon(
               icon,
-              size: 12,
+              size: compact ? 11.5 : 12,
               color: selected ? JalaPalette.brandGold : JalaPalette.muted,
             ),
-            const SizedBox(width: 4),
+            SizedBox(width: compact ? 3 : 4),
             Text(
               label,
               style: TextStyle(
-                fontSize: 10.5,
+                fontSize: compact ? 10 : 10.5,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                 color: selected ? JalaPalette.brandGold : JalaPalette.muted,
               ),
@@ -13068,6 +12957,18 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   icon: const Icon(Icons.download_rounded, size: 15),
                   label: const Text('Import .jvault', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
                 ),
+                if (_hosts.isNotEmpty || _folderConfigs.isNotEmpty)
+                  OutlinedButton.icon(
+                    key: const Key('btn_vault_clear_all'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: JalaPalette.danger,
+                      side: BorderSide(color: JalaPalette.danger.withValues(alpha: 0.45)),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    onPressed: _confirmClearVaultDialog,
+                    icon: const Icon(Icons.delete_sweep_outlined, size: 15),
+                    label: const Text('Clear Vault', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700)),
+                  ),
               ],
             ),
           ],
@@ -13100,20 +13001,20 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   children: [
                     _buildJalaBrandLogo(size: 38, radius: 10),
                     const SizedBox(width: 11),
-                    const Expanded(
+                    Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
+                          const Text(
                             'Zero-Trust Hardware Enclave',
                             style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: JalaPalette.text),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          SizedBox(height: 2),
+                          const SizedBox(height: 2),
                           Text(
-                            'AES-256-GCM At-Rest • SSH TOFU • FLAG_SECURE Shield',
-                            style: TextStyle(fontSize: 11, color: JalaPalette.brandGold),
+                            _pairedDesktopInfo,
+                            style: const TextStyle(fontSize: 11, color: JalaPalette.brandGold),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -13178,6 +13079,60 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           ),
         );
       },
+    );
+  }
+
+  Future<void> _confirmClearVaultDialog() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: JalaPalette.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: const BorderSide(color: JalaPalette.lineInput),
+        ),
+        title: const Text(
+          'Clear Saved Connections?',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: JalaPalette.text),
+        ),
+        content: const Text(
+          'This removes all saved connections, Jump Host gateways, and folder routing rules from local Vault storage.',
+          style: TextStyle(fontSize: 12.5, color: JalaPalette.text2, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: JalaPalette.muted)),
+          ),
+          FilledButton(
+            key: const Key('btn_confirm_clear_vault'),
+            style: FilledButton.styleFrom(
+              backgroundColor: JalaPalette.danger,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Clear Vault'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    unawaited(_bastionPool.disposeAll());
+    setState(() {
+      _hosts.clear();
+      _folderConfigs.clear();
+      _activeRdpHost = null;
+      if (!_sshLiveConnected) {
+        _activeSshHost = null;
+        _sshOfflineSessionOpen = false;
+        _terminalBuffer.clear();
+      }
+      _lastDisconnectedDesktopHost = null;
+      _lastDisconnectedSshHost = null;
+    });
+    _saveVaultToDisk();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Vault connections cleared.')),
     );
   }
 
