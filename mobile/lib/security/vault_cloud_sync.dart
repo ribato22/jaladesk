@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 import '../protocols/ssh_bastion_tunnel.dart';
+import '../ui/jala_enterprise_components.dart';
 
 const String kAndroidAppPackageName = 'com.jaladesk.app';
 const String kAndroidUploadKeySha1 =
@@ -23,7 +24,6 @@ const Color _kSyncFieldFill = Color(0xFF0E1622);
 const Color _kSyncBorder = Color(0xFF253549);
 const Color _kSyncInputBorder = Color(0xFF384C65);
 const Color _kSyncSelected = Color(0xFF233B56);
-const Color _kSyncAccent = Color(0xFF2F6F9C);
 const Color _kSyncAccentLine = Color(0xFF5AA2D4);
 const Color _kSyncGold = Color(0xFFEDBA6E);
 const Color _kSyncOk = Color(0xFF80D3A3);
@@ -397,9 +397,22 @@ class PluginGoogleAuthTokenProvider implements GoogleAuthTokenProvider {
 
   final GoogleSignIn _googleSignIn;
   GoogleSignInAccount? _cachedAccount;
+  StreamSubscription<GoogleSignInAccount?>? _userSub;
 
   PluginGoogleAuthTokenProvider({GoogleSignIn? googleSignIn})
-      : _googleSignIn = googleSignIn ?? GoogleSignIn(scopes: driveAppDataScopes);
+      : _googleSignIn = googleSignIn ?? GoogleSignIn(scopes: driveAppDataScopes) {
+    _cachedAccount = _googleSignIn.currentUser;
+    _userSub = _googleSignIn.onCurrentUserChanged.listen((acc) {
+      if (acc != null) {
+        _cachedAccount = acc;
+      }
+    });
+  }
+
+  Future<void> dispose() async {
+    await _userSub?.cancel();
+    _userSub = null;
+  }
 
   @override
   GoogleAuthAccountInfo? get currentAccount {
@@ -446,14 +459,29 @@ class PluginGoogleAuthTokenProvider implements GoogleAuthTokenProvider {
   Future<GoogleAuthAccountInfo?> signInSilently() async {
     try {
       final acc = await _googleSignIn.signInSilently();
-      _cachedAccount = acc;
-      if (acc == null) return null;
+      if (acc != null) {
+        _cachedAccount = acc;
+      }
+      final effective = acc ?? _cachedAccount ?? _googleSignIn.currentUser;
+      if (effective == null) return null;
       return GoogleAuthAccountInfo(
-        email: acc.email,
-        displayName: acc.displayName ?? '',
+        email: effective.email,
+        displayName: effective.displayName ?? '',
       );
-    } on PlatformException catch (err) {
-      _rethrowTranslatedPlatformError(err);
+    } on PlatformException catch (_) {
+      final cached = _cachedAccount ?? _googleSignIn.currentUser;
+      if (cached == null) return null;
+      return GoogleAuthAccountInfo(
+        email: cached.email,
+        displayName: cached.displayName ?? '',
+      );
+    } catch (_) {
+      final cached = _cachedAccount ?? _googleSignIn.currentUser;
+      if (cached == null) return null;
+      return GoogleAuthAccountInfo(
+        email: cached.email,
+        displayName: cached.displayName ?? '',
+      );
     }
   }
 
@@ -1458,6 +1486,7 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
   bool _obscurePassphrase = true;
   bool _obscureProviderSecret = true;
   bool _busy = false;
+  bool _didFlushOnExit = false;
   String? _statusFeedback;
   bool _statusIsError = false;
   GoogleOAuthConfigurationException? _oauthSetupDiagnostic;
@@ -1569,6 +1598,95 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
     });
   }
 
+  void _persistDraftNow() {
+    _didFlushOnExit = false;
+    widget.onConfigChanged?.call(_collectDraftConfig());
+  }
+
+  Future<String?> _promptQuickGooglePassphraseDialog(String email) async {
+    final quickCtrl = TextEditingController(text: _passphraseCtrl.text);
+    bool obscure = true;
+    String? inlineError;
+
+    return showDialog<String>(
+      context: context,
+      builder: (dCtx) => StatefulBuilder(
+        builder: (dCtx, setModalState) => JalaStudioDialog(
+          dialogKey: const Key('dialog_google_passphrase_quick_setup'),
+          title: 'Set Sync Passphrase',
+          subtitle: 'Zero-Knowledge AES-256-GCM Encryption',
+          icon: Icons.enhanced_encryption_rounded,
+          onClose: () => Navigator.of(dCtx).pop(null),
+          body: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Create or enter your Sync Passphrase to encrypt your vault on $email.',
+                style: const TextStyle(
+                  fontSize: 12,
+                  height: 1.4,
+                  color: JalaEnterpriseTokens.textSecondary,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                key: const Key('field_quick_google_passphrase'),
+                controller: quickCtrl,
+                autofocus: true,
+                obscureText: obscure,
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  color: JalaEnterpriseTokens.textPrimary,
+                ),
+                decoration: jalaEnterpriseInputDecoration(
+                  label: 'Sync Passphrase *',
+                  hint: 'Min 4 characters • AES-256-GCM + PBKDF2',
+                  icon: Icons.lock_outline_rounded,
+                  suffixIcon: IconButton(
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => setModalState(() => obscure = !obscure),
+                    icon: Icon(
+                      obscure
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                      size: 17,
+                      color: JalaEnterpriseTokens.textMuted,
+                    ),
+                  ),
+                ),
+              ),
+              if (inlineError != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  inlineError!,
+                  style: const TextStyle(fontSize: 11.5, color: _kSyncDanger),
+                ),
+              ],
+            ],
+          ),
+          footer: JalaDialogFooterBar(
+            cancelLabel: 'Later',
+            onCancel: () => Navigator.of(dCtx).pop(null),
+            primaryKey: const Key('btn_confirm_quick_google_sync'),
+            primaryLabel: 'Bind & Sync Now',
+            primaryIcon: Icons.sync_rounded,
+            onPrimary: () {
+              final entered = quickCtrl.text;
+              if (entered.trim().length < 4) {
+                setModalState(() {
+                  inlineError = 'Passphrase must be at least 4 characters.';
+                });
+                return;
+              }
+              Navigator.of(dCtx).pop(entered);
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _handleGoogleSignIn() async {
     if (_busy) return;
     setState(() {
@@ -1589,11 +1707,26 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
       }
       setState(() {
         _busy = false;
+        _selectedProvider = VaultSyncProviderKind.googleDrive;
         _googleEmail = account.email;
         _googleDisplayName = account.displayName;
         _statusFeedback = 'Connected as ${account.email}';
         _statusIsError = false;
       });
+      // Immediately persist signed-in Google account so navigating away never drops state!
+      _persistDraftNow();
+
+      if (_passphraseCtrl.text.trim().length >= 4) {
+        await _runSyncOperation(VaultSyncOperationMode.smartMerge);
+      } else {
+        final quickPass = await _promptQuickGooglePassphraseDialog(account.email);
+        if (!mounted) return;
+        if (quickPass != null && quickPass.trim().length >= 4) {
+          _passphraseCtrl.text = quickPass;
+          _persistDraftNow();
+          await _runSyncOperation(VaultSyncOperationMode.smartMerge);
+        }
+      }
     } on GoogleOAuthConfigurationException catch (oauthErr) {
       if (!mounted) return;
       setState(() {
@@ -1620,9 +1753,14 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
       _busy = false;
       _googleEmail = '';
       _googleDisplayName = '';
+      if (_selectedProvider == VaultSyncProviderKind.googleDrive) {
+        _isBound = false;
+        _lastSyncedAtMs = 0;
+      }
       _statusFeedback = 'Google account disconnected.';
       _statusIsError = false;
     });
+    _persistDraftNow();
   }
 
   Future<void> _runSyncOperation(VaultSyncOperationMode mode) async {
@@ -1685,6 +1823,11 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
       _busy = false;
       _isBound = false;
       _lastSyncedAtMs = 0;
+      if (_selectedProvider == VaultSyncProviderKind.googleDrive) {
+        _googleEmail = '';
+        _googleDisplayName = '';
+      }
+      _didFlushOnExit = true;
       _statusFeedback = 'Cloud sync unbound. Local vault remains intact.';
       _statusIsError = false;
     });
@@ -1730,77 +1873,29 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
   }
 
   Widget _buildSegmentedProviderBar() {
-    return Container(
+    return JalaSegmentedBar<VaultSyncProviderKind>(
       key: const Key('cloud_sync_provider_bar'),
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: _kSyncFieldFill,
-        borderRadius: BorderRadius.circular(11),
-        border: Border.all(color: _kSyncBorder),
-      ),
-      child: Row(
-        children: [
-          for (final p in VaultSyncProviderKind.values)
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: Material(
-                  color: _selectedProvider == p ? _kSyncSelected : Colors.transparent,
-                  borderRadius: BorderRadius.circular(8),
-                  child: InkWell(
-                    key: ValueKey('sync_provider_${p.name}'),
-                    borderRadius: BorderRadius.circular(8),
-                    onTap: _busy
-                        ? null
-                        : () {
-                            setState(() {
-                              _selectedProvider = p;
-                              _statusFeedback = null;
-                              _oauthSetupDiagnostic = null;
-                            });
-                          },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: _selectedProvider == p
-                              ? _kSyncGold.withValues(alpha: 0.65)
-                              : Colors.transparent,
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            p.icon,
-                            size: 14.5,
-                            color: _selectedProvider == p ? _kSyncGold : _kSyncMuted,
-                          ),
-                          const SizedBox(width: 5),
-                          Flexible(
-                            child: Text(
-                              p.pillLabel,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                fontWeight: _selectedProvider == p
-                                    ? FontWeight.w700
-                                    : FontWeight.w600,
-                                color: _selectedProvider == p ? _kSyncText : _kSyncMuted,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
+      height: 36,
+      selectedValue: _selectedProvider,
+      options: [
+        for (final p in VaultSyncProviderKind.values)
+          JalaSegmentedOption<VaultSyncProviderKind>(
+            value: p,
+            label: p.pillLabel,
+            icon: p.icon,
+            segmentKey: ValueKey('sync_provider_${p.name}'),
+          ),
+      ],
+      onChanged: _busy
+          ? null
+          : (p) {
+              setState(() {
+                _selectedProvider = p;
+                _didFlushOnExit = false;
+                _statusFeedback = null;
+                _oauthSetupDiagnostic = null;
+              });
+            },
     );
   }
 
@@ -2080,41 +2175,39 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
           ],
         ),
         const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                key: const Key('field_sync_sftp_user'),
-                controller: _sftpUserCtrl,
-                style: const TextStyle(fontSize: 12.5, color: _kSyncText),
-                decoration: _fieldDecoration(
-                  label: 'Username',
-                  hint: 'root',
-                  icon: Icons.person_outline_rounded,
-                ),
-              ),
+        TextField(
+          key: const Key('field_sync_sftp_user'),
+          controller: _sftpUserCtrl,
+          style: const TextStyle(fontSize: 12.5, color: _kSyncText),
+          decoration: _fieldDecoration(
+            label: 'Username',
+            hint: 'root',
+            icon: Icons.person_outline_rounded,
+          ),
+        ),
+        const SizedBox(height: 10),
+        JalaSegmentedBar<bool>(
+          key: const Key('toggle_sync_sftp_auth_mode'),
+          height: 33,
+          selectedValue: _sftpUsePrivateKey,
+          options: const <JalaSegmentedOption<bool>>[
+            JalaSegmentedOption<bool>(
+              value: false,
+              label: 'Password',
+              icon: Icons.password_rounded,
             ),
-            const SizedBox(width: 8),
-            OutlinedButton.icon(
-              key: const Key('toggle_sync_sftp_auth_mode'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: _kSyncGold,
-                side: const BorderSide(color: _kSyncInputBorder),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-              ),
-              onPressed: _busy
-                  ? null
-                  : () => setState(() => _sftpUsePrivateKey = !_sftpUsePrivateKey),
-              icon: Icon(
-                _sftpUsePrivateKey ? Icons.vpn_key_rounded : Icons.password_rounded,
-                size: 15,
-              ),
-              label: Text(
-                _sftpUsePrivateKey ? 'SSH Key' : 'Password',
-                style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
-              ),
+            JalaSegmentedOption<bool>(
+              value: true,
+              label: 'Private Key',
+              icon: Icons.vpn_key_outlined,
             ),
           ],
+          onChanged: _busy
+              ? null
+              : (useKey) => setState(() {
+                    _sftpUsePrivateKey = useKey;
+                    _didFlushOnExit = false;
+                  }),
         ),
         const SizedBox(height: 10),
         if (_sftpUsePrivateKey)
@@ -2394,78 +2487,144 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
               ),
             ),
           ],
-          const SizedBox(height: 12),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPinnedFooterBar(double symPadX, double bottomPad) {
+    return Container(
+      key: const Key('cloud_sync_footer_tray'),
+      decoration: const BoxDecoration(
+        color: JalaEnterpriseTokens.footerBg,
+        border: Border(
+          top: BorderSide(
+            color: JalaEnterpriseTokens.footerBorder,
+            width: 1.0,
+          ),
+        ),
+      ),
+      padding: EdgeInsets.fromLTRB(symPadX, 10, symPadX, 10 + bottomPad),
+      child: Row(
+        children: [
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextButton.icon(
+                      key: const Key('btn_cloud_pull_only'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: _kSyncAccentLine,
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                      ),
+                      onPressed: _busy
+                          ? null
+                          : () => _runSyncOperation(
+                                VaultSyncOperationMode.pullOnly,
+                              ),
+                      icon: const Icon(Icons.cloud_download_outlined, size: 15),
+                      label: const Text(
+                        'Pull Only',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    TextButton.icon(
+                      key: const Key('btn_cloud_push_force'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: _kSyncGold,
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                      ),
+                      onPressed: _busy
+                          ? null
+                          : () => _runSyncOperation(
+                                VaultSyncOperationMode.pushForce,
+                              ),
+                      icon: const Icon(Icons.cloud_upload_outlined, size: 15),
+                      label: const Text(
+                        'Push Overwrite',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (_isBound) ...[
+                      const SizedBox(width: 4),
+                      TextButton.icon(
+                        key: const Key('btn_cloud_unbind'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: _kSyncDanger,
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                        ),
+                        onPressed: _busy ? null : _handleUnbind,
+                        icon: const Icon(Icons.link_off_rounded, size: 15),
+                        label: const Text(
+                          'Unbind Sync',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
           FilledButton.icon(
             key: const Key('btn_execute_cloud_sync'),
             style: FilledButton.styleFrom(
-              backgroundColor: _kSyncAccent,
+              backgroundColor: JalaEnterpriseTokens.primaryButtonBg,
               foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+              minimumSize: const Size(0, 38),
+              padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(9),
+              ),
             ),
-            onPressed: _busy ? null : () => _runSyncOperation(VaultSyncOperationMode.smartMerge),
+            onPressed: _busy
+                ? null
+                : () => _runSyncOperation(VaultSyncOperationMode.smartMerge),
             icon: _busy
                 ? const SizedBox(
-                    width: 15,
-                    height: 15,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
                   )
-                : const Icon(Icons.sync_rounded, size: 18),
+                : const Icon(Icons.sync_rounded, size: 17),
             label: Text(
-              _busy ? 'Syncing Encrypted Vault...' : 'Save & Sync Now',
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+              _busy ? 'Syncing...' : 'Save & Sync Now',
+              style: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            alignment: WrapAlignment.center,
-            spacing: 6,
-            runSpacing: 4,
-            children: [
-              TextButton.icon(
-                key: const Key('btn_cloud_pull_only'),
-                style: TextButton.styleFrom(
-                  foregroundColor: _kSyncAccentLine,
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                ),
-                onPressed: _busy ? null : () => _runSyncOperation(VaultSyncOperationMode.pullOnly),
-                icon: const Icon(Icons.cloud_download_outlined, size: 15),
-                label: const Text(
-                  'Pull Only',
-                  style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
-                ),
-              ),
-              TextButton.icon(
-                key: const Key('btn_cloud_push_force'),
-                style: TextButton.styleFrom(
-                  foregroundColor: _kSyncGold,
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                ),
-                onPressed: _busy ? null : () => _runSyncOperation(VaultSyncOperationMode.pushForce),
-                icon: const Icon(Icons.cloud_upload_outlined, size: 15),
-                label: const Text(
-                  'Push Overwrite',
-                  style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
-                ),
-              ),
-              if (_isBound)
-                TextButton.icon(
-                  key: const Key('btn_cloud_unbind'),
-                  style: TextButton.styleFrom(
-                    foregroundColor: _kSyncDanger,
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  ),
-                  onPressed: _busy ? null : _handleUnbind,
-                  icon: const Icon(Icons.link_off_rounded, size: 15),
-                  label: const Text(
-                    'Unbind Sync',
-                    style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
-                  ),
-                ),
-            ],
           ),
         ],
       ),
@@ -2478,112 +2637,137 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
     final viewInsets = MediaQuery.viewInsetsOf(context);
     final symPadX = math.max(mediaPadding.left, mediaPadding.right) + 14.0;
 
-    return Scaffold(
-      backgroundColor: _kSyncCanvasTop,
-      appBar: AppBar(
+    return PopScope(
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop && !_didFlushOnExit) {
+          _didFlushOnExit = true;
+          widget.onConfigChanged?.call(_collectDraftConfig());
+        }
+      },
+      child: Scaffold(
         backgroundColor: _kSyncCanvasTop,
-        elevation: 0,
-        automaticallyImplyLeading: false,
-        titleSpacing: symPadX,
-        title: Row(
-          children: [
-            Icon(
-              _isBound ? Icons.cloud_done_rounded : Icons.cloud_outlined,
-              size: 19,
-              color: _isBound ? _kSyncOk : _kSyncGold,
-            ),
-            const SizedBox(width: 8),
-            const Flexible(
-              child: Text(
-                'Cloud Sync',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: _kSyncText,
+        appBar: AppBar(
+          backgroundColor: _kSyncCanvasTop,
+          elevation: 0,
+          automaticallyImplyLeading: false,
+          titleSpacing: symPadX,
+          title: Row(
+            children: [
+              Icon(
+                _isBound ? Icons.cloud_done_rounded : Icons.cloud_outlined,
+                size: 19,
+                color: _isBound ? _kSyncOk : _kSyncGold,
+              ),
+              const SizedBox(width: 8),
+              const Flexible(
+                child: Text(
+                  'Cloud Sync',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: _kSyncText,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: (_isBound ? _kSyncOk : _kSyncGold).withValues(alpha: 0.14),
-                borderRadius: BorderRadius.circular(99),
-                border: Border.all(
-                  color: (_isBound ? _kSyncOk : _kSyncGold).withValues(alpha: 0.48),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: (_isBound ? _kSyncOk : _kSyncGold).withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(99),
+                  border: Border.all(
+                    color: (_isBound ? _kSyncOk : _kSyncGold).withValues(alpha: 0.48),
+                  ),
+                ),
+                child: Text(
+                  'E2EE',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    color: _isBound ? _kSyncOk : _kSyncGold,
+                  ),
                 ),
               ),
-              child: Text(
-                'E2EE',
-                style: TextStyle(
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w700,
-                  color: _isBound ? _kSyncOk : _kSyncGold,
-                ),
+            ],
+          ),
+          actions: [
+            Padding(
+              padding: EdgeInsets.only(right: math.max(mediaPadding.right, 8)),
+              child: IconButton(
+                key: const Key('btn_close_cloud_sync'),
+                tooltip: 'Close',
+                onPressed: () {
+                  if (!_didFlushOnExit) {
+                    _didFlushOnExit = true;
+                    widget.onConfigChanged?.call(_collectDraftConfig());
+                  }
+                  Navigator.of(context).pop();
+                },
+                icon: const Icon(Icons.close_rounded, color: _kSyncText2),
               ),
             ),
           ],
         ),
-        actions: [
-          Padding(
-            padding: EdgeInsets.only(right: math.max(mediaPadding.right, 8)),
-            child: IconButton(
-              key: const Key('btn_close_cloud_sync'),
-              tooltip: 'Close',
-              onPressed: () => Navigator.of(context).pop(),
-              icon: const Icon(Icons.close_rounded, color: _kSyncText2),
+        body: DecoratedBox(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: <Color>[_kSyncCanvasTop, _kSyncCanvasBottom],
             ),
           ),
-        ],
-      ),
-      body: DecoratedBox(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: <Color>[_kSyncCanvasTop, _kSyncCanvasBottom],
-          ),
-        ),
-        child: LayoutBuilder(
-          builder: (ctx, constraints) {
-            final isLandscapeTwoPane = constraints.maxWidth >= 700;
-            return SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(
-                symPadX,
-                6,
-                symPadX,
-                16 + mediaPadding.bottom + viewInsets.bottom,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (ctx, constraints) {
+                    final isLandscapeTwoPane = constraints.maxWidth >= 700;
+                    return SingleChildScrollView(
+                      padding: EdgeInsets.fromLTRB(
+                        symPadX,
+                        6,
+                        symPadX,
+                        16 + viewInsets.bottom,
+                      ),
+                      child: isLandscapeTwoPane
+                          ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _buildSegmentedProviderBar(),
+                                const SizedBox(height: 12),
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(flex: 11, child: _buildProviderPanel()),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      flex: 10,
+                                      child: _buildEncryptionAndActionsPanel(),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            )
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _buildSegmentedProviderBar(),
+                                const SizedBox(height: 12),
+                                _buildProviderPanel(),
+                                const SizedBox(height: 12),
+                                _buildEncryptionAndActionsPanel(),
+                              ],
+                            ),
+                    );
+                  },
+                ),
               ),
-              child: isLandscapeTwoPane
-                  ? Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _buildSegmentedProviderBar(),
-                        const SizedBox(height: 12),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(flex: 11, child: _buildProviderPanel()),
-                            const SizedBox(width: 12),
-                            Expanded(flex: 10, child: _buildEncryptionAndActionsPanel()),
-                          ],
-                        ),
-                      ],
-                    )
-                  : Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _buildSegmentedProviderBar(),
-                        const SizedBox(height: 12),
-                        _buildProviderPanel(),
-                        const SizedBox(height: 12),
-                        _buildEncryptionAndActionsPanel(),
-                      ],
-                    ),
-            );
-          },
+              _buildPinnedFooterBar(symPadX, mediaPadding.bottom),
+            ],
+          ),
         ),
       ),
     );

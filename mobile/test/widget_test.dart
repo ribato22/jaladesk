@@ -19,6 +19,8 @@ import 'package:jaladesk_mobile/security/vault_passcode_enclave.dart';
 import 'package:jaladesk_mobile/security/vault_security_service.dart';
 import 'package:jaladesk_mobile/terminal/sftp_transfer_service.dart';
 import 'package:jaladesk_mobile/terminal/termius_terminal.dart';
+import 'package:jaladesk_mobile/ui/jala_enterprise_components.dart';
+import 'package:jaladesk_mobile/ui/jala_user_guide_screen.dart';
 import 'package:pointycastle/export.dart' as pc;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -2885,12 +2887,12 @@ void main() {
     expect(find.byType(NavigationRail), findsNothing);
     expect(find.text('LOCAL DEVICE ONLY • NOT GLOBAL'), findsNothing);
 
-    // 2. Instant Auto-Lock ChoiceChip switching via ValueNotifier + scalar SharedPreferences persistence
+    // 2. Instant Auto-Lock JalaSegmentedBar switching via ValueNotifier + scalar SharedPreferences persistence
     await tester.ensureVisible(find.byKey(const ValueKey('chip_autolock_60')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('chip_autolock_60')));
     await tester.pump();
-    ChoiceChip chip60 = tester.widget<ChoiceChip>(find.byKey(const ValueKey('chip_autolock_60')));
+    final JalaSegmentPill chip60 = tester.widget<JalaSegmentPill>(find.byKey(const ValueKey('chip_autolock_60')));
     expect(chip60.selected, isTrue);
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getInt('jaladesk_vault_autolock_sec_v1'), 60);
@@ -4695,6 +4697,358 @@ void main() {
     expect(state.hosts.length, equals(2));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+      'v1.15.0+17 Test 1: Guaranteed 1-Row Segmented Bars (Protocol, Bastion Auth, 2FA Algo/Digits/Period) & Separated #0A1018 Footer Tray across 320x640, 412x915 & 915x412',
+      (WidgetTester tester) async {
+    const viewports = <Size>[
+      Size(320, 640),
+      Size(412, 915),
+      Size(915, 412),
+    ];
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    tester.view.devicePixelRatio = 1.0;
+
+    tester.view.physicalSize = const Size(412, 915);
+    await tester.pumpWidget(
+      const JalaDeskMobileApp(disableNetworkProbes: true),
+    );
+    await tester.pumpAndSettle();
+
+    void expectSeparatedFooterTray() {
+      final footerFinder = find.byKey(const Key('jala_dialog_footer_tray'));
+      expect(footerFinder, findsOneWidget);
+      final footerContainer = tester.widget<Container>(footerFinder);
+      final boxDeco = footerContainer.decoration as BoxDecoration;
+      expect(boxDeco.color, equals(const Color(0xFF0A1018)));
+      final topBorder = (boxDeco.border as Border).top;
+      expect(topBorder.color, equals(const Color(0xFF26364A)));
+      expect(topBorder.width, equals(1.0));
+    }
+
+    for (final vp in viewports) {
+      tester.view.physicalSize = vp;
+      await tester.pumpAndSettle();
+
+      // 1. New Remote Connection -> 5 Protocol options strictly on 1 single row
+      await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('menu_add_connection')));
+      await tester.pumpAndSettle();
+
+      final protoBar = find.byKey(const Key('host_editor_protocol_bar'));
+      expect(protoBar, findsOneWidget);
+      final rdpDy = tester.getCenter(find.descendant(of: protoBar, matching: find.text('RDP'))).dy;
+      for (final label in const ['SSH', 'VNC', 'SFTP', 'Hypervisor']) {
+        final dy = tester.getCenter(find.descendant(of: protoBar, matching: find.text(label))).dy;
+        expect(dy, closeTo(rdpDy, 0.01), reason: '$label wrapped on viewport $vp');
+      }
+      expectSeparatedFooterTray();
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      // 2. New Jump Host Gateway -> 3 Bastion Auth options strictly on 1 single row
+      await tester.tap(find.byKey(const Key('btn_appbar_create_menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('menu_add_jump_host')));
+      await tester.pumpAndSettle();
+
+      final authBar = find.byKey(const Key('jump_editor_auth_bar'));
+      expect(authBar, findsOneWidget);
+      final keyDy = tester.getCenter(find.descendant(of: authBar, matching: find.text('SSH Key'))).dy;
+      for (final label in const ['Password', 'Vault Key']) {
+        final dy = tester.getCenter(find.descendant(of: authBar, matching: find.text(label))).dy;
+        expect(dy, closeTo(keyDy, 0.01), reason: '$label wrapped on viewport $vp');
+      }
+      expectSeparatedFooterTray();
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      // 3. Add 2FA Key -> Algorithm, Digits, and Period strictly on 1 single row
+      if (vp.width >= 600) {
+        await tester.tap(find.byKey(const ValueKey('landscape_nav_tab_3')));
+      } else {
+        await tester.tap(find.text('Vault & 2FA'));
+      }
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(const Key('btn_add_totp_entry')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('btn_add_totp_entry')));
+      await tester.pumpAndSettle();
+
+      final algoBar = find.byKey(const Key('totp_algo_bar'));
+      await tester.ensureVisible(algoBar);
+      await tester.pumpAndSettle();
+      final sha1Dy = tester.getCenter(find.descendant(of: algoBar, matching: find.text('SHA-1'))).dy;
+      for (final algo in const ['SHA-256', 'SHA-512']) {
+        final dy = tester.getCenter(find.descendant(of: algoBar, matching: find.text(algo))).dy;
+        expect(dy, closeTo(sha1Dy, 0.01), reason: '$algo wrapped on viewport $vp');
+      }
+
+      final digitsBar = find.byKey(const Key('totp_digits_bar'));
+      final periodBar = find.byKey(const Key('totp_period_bar'));
+      await tester.ensureVisible(digitsBar);
+      await tester.pumpAndSettle();
+      final d6Dy = tester.getCenter(find.descendant(of: digitsBar, matching: find.text('6 Digits'))).dy;
+      final d8Dy = tester.getCenter(find.descendant(of: digitsBar, matching: find.text('8 Digits'))).dy;
+      expect(d8Dy, closeTo(d6Dy, 0.01));
+      final p15Dy = tester.getCenter(find.descendant(of: periodBar, matching: find.text('15s'))).dy;
+      for (final per in const ['30s', '60s']) {
+        final dy = tester.getCenter(find.descendant(of: periodBar, matching: find.text(per))).dy;
+        expect(dy, closeTo(p15Dy, 0.01), reason: '$per wrapped on viewport $vp');
+      }
+      expect(p15Dy, closeTo(d6Dy, 0.01));
+      expectSeparatedFooterTray();
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    }
+  });
+
+  testWidgets(
+      'v1.15.0+17 Test 2: Google Sign-In Persistence Across Navigation, Cold Remount & Quick Passphrase Bind + Live Loopback Drive Sync',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final prevHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = prevHttpOverrides);
+
+    String? driveStoredContent;
+    String? driveFileId;
+    late HttpServer driveServer;
+    await tester.runAsync(() async {
+      driveServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      driveServer.listen((HttpRequest req) async {
+        final body = await utf8.decoder.bind(req).join();
+        final path = req.uri.path;
+        if (req.method == 'GET' && path == '/drive/v3/files') {
+          req.response.statusCode = 200;
+          req.response.write(jsonEncode(<String, Object>{
+            'files': driveFileId == null
+                ? <Object>[]
+                : <Object>[
+                    <String, String>{
+                      'id': driveFileId!,
+                      'name': 'jaladesk-vault-v1.jvault',
+                      'modifiedTime': '2026-11-15T08:00:00Z',
+                    },
+                  ],
+          }));
+        } else if (req.method == 'POST' && path == '/upload/drive/v3/files') {
+          final formatIdx = body.indexOf('{\n  "format":');
+          driveStoredContent = formatIdx >= 0
+              ? body.substring(formatIdx, body.lastIndexOf('}') + 1)
+              : body;
+          driveFileId = 'gdrive_live_bind_01';
+          req.response.statusCode = 200;
+          req.response.write(jsonEncode(<String, String>{'id': driveFileId!}));
+        } else if (req.method == 'PATCH' &&
+            path == '/upload/drive/v3/files/gdrive_live_bind_01') {
+          driveStoredContent = body;
+          req.response.statusCode = 200;
+          req.response.write(jsonEncode(<String, String>{'id': driveFileId!}));
+        } else if (req.method == 'GET' &&
+            path == '/drive/v3/files/gdrive_live_bind_01') {
+          req.response.statusCode = 200;
+          req.response.write(driveStoredContent ?? '');
+        } else {
+          req.response.statusCode = 404;
+        }
+        await req.response.close();
+      });
+    });
+    addTearDown(() async {
+      await tester.runAsync(() => driveServer.close(force: true));
+    });
+
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final mockAuth = _MockGoogleAuthTokenProvider(
+      initiallySignedOut: true,
+      signInEmail: 'ribato@gmail.com',
+      signInDisplayName: 'Ribato',
+    );
+    final shellKey1 = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(
+      JalaDeskMobileApp(
+        disableNetworkProbes: true,
+        shellKey: shellKey1,
+        googleAuthProviderOverride: mockAuth,
+      ),
+    );
+    await tester.pumpAndSettle();
+    final state1 = shellKey1.currentState!;
+    state1.configureCloudSyncForVerification(
+      VaultSyncConfig(googleApiBaseUrl: 'http://127.0.0.1:${driveServer.port}'),
+    );
+    await tester.pumpAndSettle();
+
+    // Sub-flow A: Sign in -> tap Later -> leave Cloud Sync -> switch tabs -> cold remount
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('btn_open_cloud_sync')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('btn_google_sync_signin')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('btn_google_sync_signin')));
+    await tester.pumpAndSettle();
+
+    // Quick setup dialog opens & email is ALREADY persisted in shell state!
+    expect(find.byKey(const Key('dialog_google_passphrase_quick_setup')), findsOneWidget);
+    expect(state1.cloudSyncConfig.googleAccountEmail, equals('ribato@gmail.com'));
+    await tester.tap(find.text('Later'));
+    await tester.pumpAndSettle();
+
+    // Close Cloud Sync -> verify Vault & 2FA shows signed-in unbound state ('Finish', NOT 'Connect')
+    await tester.tap(find.byKey(const Key('btn_close_cloud_sync')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Google • ribato@gmail.com • Set passphrase to sync'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('btn_open_cloud_sync')),
+        matching: find.text('Finish'),
+      ),
+      findsOneWidget,
+    );
+
+    // Navigate to Connections tab, then back to Vault & 2FA, then re-open Cloud Sync
+    await tester.tap(find.text('Connections'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('btn_open_cloud_sync')));
+    await tester.pumpAndSettle();
+    expect(find.text('ribato@gmail.com'), findsOneWidget);
+    expect(find.byKey(const Key('btn_google_sync_signin')), findsNothing);
+    await tester.tap(find.byKey(const Key('btn_close_cloud_sync')));
+    await tester.pumpAndSettle();
+
+    // Cold remount from SharedPreferences -> Google account MUST still be retained!
+    final shellKey2 = GlobalKey<JalaDeskMobileShellState>();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(
+      JalaDeskMobileApp(
+        key: const ValueKey('cold_remount_app'),
+        disableNetworkProbes: true,
+        shellKey: shellKey2,
+        googleAuthProviderOverride: mockAuth,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(shellKey2.currentState!.cloudSyncConfig.googleAccountEmail, equals('ribato@gmail.com'));
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Google • ribato@gmail.com • Set passphrase to sync'), findsOneWidget);
+
+    // Sub-flow B: Sign out -> Sign in -> Quick Passphrase -> Bind & Sync Now against live loopback Drive!
+    await tester.tap(find.byKey(const Key('btn_open_cloud_sync')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('btn_google_sync_signout')));
+    await tester.pumpAndSettle();
+    expect(shellKey2.currentState!.cloudSyncConfig.googleAccountEmail, isEmpty);
+
+    await tester.tap(find.byKey(const Key('btn_google_sync_signin')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('dialog_google_passphrase_quick_setup')), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const Key('field_quick_google_passphrase')),
+      'ZeroKnowledge#2026',
+    );
+    await tester.tap(find.byKey(const Key('btn_confirm_quick_google_sync')));
+    await tester.pump();
+    for (int i = 0;
+        i < 60 && !shellKey2.currentState!.cloudSyncConfig.isBound;
+        i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 30)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(shellKey2.currentState!.cloudSyncConfig.isBound, isTrue);
+    expect(driveStoredContent, isNotNull);
+
+    await tester.tap(find.byKey(const Key('btn_close_cloud_sync')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Google Drive • ribato@gmail.com'), findsOneWidget);
+    expect(find.byKey(const Key('btn_cloud_sync_now')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'v1.15.0+17 Test 3: Interactive Bilingual (ID | EN) In-App User Guide via AppBar & Vault & 2FA (Search, Portrait & 915x412 Landscape)',
+      (WidgetTester tester) async {
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      const JalaDeskMobileApp(disableNetworkProbes: true),
+    );
+    await tester.pumpAndSettle();
+
+    // 1. Open User Guide from main AppBar (`btn_appbar_user_guide`)
+    expect(find.byKey(const Key('btn_appbar_user_guide')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('btn_appbar_user_guide')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('jala_user_guide_screen')), findsOneWidget);
+    expect(find.byType(JalaUserGuideScreen), findsOneWidget);
+    expect(find.text('Panduan JalaDesk'), findsOneWidget);
+
+    // Language bar is strictly 1 row (`ID` & `EN` same dy)
+    final langBar = find.byKey(const Key('guide_lang_bar'));
+    expect(langBar, findsOneWidget);
+    final idDy = tester.getCenter(find.descendant(of: langBar, matching: find.text('ID'))).dy;
+    final enDy = tester.getCenter(find.descendant(of: langBar, matching: find.text('EN'))).dy;
+    expect(enDy, closeTo(idDy, 0.01));
+
+    // 2. Toggle to English (`EN`) instantaneously
+    await tester.tap(find.descendant(of: langBar, matching: find.text('EN')));
+    await tester.pumpAndSettle();
+    expect(find.text('JalaDesk Guide'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    // 3. Live search filtering (`otpauth`)
+    await tester.enterText(find.byKey(const Key('field_guide_search')), 'otpauth');
+    await tester.pumpAndSettle();
+    expect(find.textContaining('2FA'), findsWidgets);
+    await tester.enterText(find.byKey(const Key('field_guide_search')), '');
+    await tester.pumpAndSettle();
+
+    // 4. Oppo Find X9 Pro Landscape (`915x412`) 2-column responsive layout with zero overflow
+    tester.view.physicalSize = const Size(915, 412);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // Restore Portrait (`412x915`) and close cleanly (`btn_close_user_guide`)
+    tester.view.physicalSize = const Size(412, 915);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('btn_close_user_guide')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('jala_user_guide_screen')), findsNothing);
+
+    // 5. Open User Guide from `Vault & 2FA` (`btn_vault_open_user_guide`)
+    await tester.tap(find.text('Vault & 2FA'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('btn_vault_open_user_guide')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('btn_vault_open_user_guide')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('jala_user_guide_screen')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('btn_close_user_guide')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('jala_user_guide_screen')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _MockGoogleAuthTokenProvider implements GoogleAuthTokenProvider {
@@ -4702,6 +5056,8 @@ class _MockGoogleAuthTokenProvider implements GoogleAuthTokenProvider {
   final String refreshedToken;
   final VoidCallback? onRefreshed;
   final bool throwOAuthSetupOnSignIn;
+  final String signInEmail;
+  final String signInDisplayName;
   bool _wasRefreshed = false;
   GoogleAuthAccountInfo? _account;
 
@@ -4710,11 +5066,14 @@ class _MockGoogleAuthTokenProvider implements GoogleAuthTokenProvider {
     this.refreshedToken = 'mock-refreshed-token',
     this.onRefreshed,
     this.throwOAuthSetupOnSignIn = false,
-  }) : _account = throwOAuthSetupOnSignIn
+    bool initiallySignedOut = false,
+    this.signInEmail = 'ops@jaladesk.io',
+    this.signInDisplayName = 'JalaDesk Ops',
+  }) : _account = (throwOAuthSetupOnSignIn || initiallySignedOut)
             ? null
-            : const GoogleAuthAccountInfo(
-                email: 'ops@jaladesk.io',
-                displayName: 'JalaDesk Ops',
+            : GoogleAuthAccountInfo(
+                email: signInEmail,
+                displayName: signInDisplayName,
               );
 
   @override
@@ -4727,9 +5086,9 @@ class _MockGoogleAuthTokenProvider implements GoogleAuthTokenProvider {
         rawDetail: 'PlatformException(sign_in_failed, com.google.android.gms.common.api.ApiException: 10, null, null)',
       );
     }
-    _account = const GoogleAuthAccountInfo(
-      email: 'ops@jaladesk.io',
-      displayName: 'JalaDesk Ops',
+    _account = GoogleAuthAccountInfo(
+      email: signInEmail,
+      displayName: signInDisplayName,
     );
     return _account;
   }

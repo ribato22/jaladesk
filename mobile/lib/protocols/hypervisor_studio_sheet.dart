@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../ui/jala_enterprise_components.dart';
 import 'proxmox_ve_client.dart';
 
 class HypervisorStudioSheet extends StatefulWidget {
@@ -135,35 +136,24 @@ class _HypervisorStudioSheetState extends State<HypervisorStudioSheet> {
       final label = action[0].toUpperCase() + action.substring(1);
       final confirmed = await showDialog<bool>(
         context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: _cardSurface,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-            side: const BorderSide(color: _lineInput),
-          ),
-          title: Text(
-            '$label ${item.type.toUpperCase()} ${item.vmid} (${item.name})?',
-            style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: _text),
-          ),
-          content: Text(
+        builder: (ctx) => JalaStudioDialog(
+          title: '$label ${item.type.toUpperCase()} ${item.vmid} (${item.name})?',
+          subtitle: 'Proxmox VE node "${item.node}"',
+          icon: action == 'reboot' ? Icons.restart_alt_rounded : Icons.power_settings_new_rounded,
+          iconColor: action == 'reboot' ? _amber : _danger,
+          borderColor: action == 'reboot' ? _amber : _danger,
+          onClose: () => Navigator.of(ctx).pop(false),
+          body: Text(
             'Dispatch live Proxmox VE "$action" command to ${item.name} on node "${item.node}"?',
-            style: const TextStyle(fontSize: 12, color: _text2),
+            style: const TextStyle(fontSize: 12.5, color: _text2, height: 1.4),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Cancel', style: TextStyle(color: _muted)),
-            ),
-            FilledButton(
-              key: ValueKey('btn_confirm_hv_${action}_${item.vmid}'),
-              style: FilledButton.styleFrom(
-                backgroundColor: action == 'reboot' ? _amber : _danger,
-                foregroundColor: Colors.white,
-              ),
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: Text(label),
-            ),
-          ],
+          footer: JalaDialogFooterBar(
+            onCancel: () => Navigator.of(ctx).pop(false),
+            isDestructive: action != 'reboot',
+            primaryKey: ValueKey('btn_confirm_hv_${action}_${item.vmid}'),
+            primaryLabel: label,
+            onPrimary: () => Navigator.of(ctx).pop(true),
+          ),
         ),
       );
       if (confirmed != true || !mounted) return;

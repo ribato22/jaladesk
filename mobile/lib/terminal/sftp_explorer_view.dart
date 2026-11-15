@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../ui/jala_enterprise_components.dart';
 import 'sftp_transfer_service.dart';
 
 class SftpFileEntry {
@@ -129,26 +130,28 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
     final ctrl = TextEditingController(text: widget.currentPath);
     final nextPath = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF121A28),
-        title: const Text('Go to Remote Path'),
-        content: TextField(
+      builder: (ctx) => JalaStudioDialog(
+        title: 'Go to Remote Path',
+        subtitle: 'Navigate directly to an absolute POSIX directory',
+        icon: Icons.folder_open_rounded,
+        onClose: () => Navigator.pop(ctx),
+        body: TextField(
           controller: ctrl,
           autofocus: true,
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-          decoration: const InputDecoration(
-            labelText: 'Remote directory path',
-            hintText: '/etc/nginx or /var/log',
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Color(0xFFE6EEF7)),
+          decoration: jalaEnterpriseInputDecoration(
+            label: 'Remote directory path',
+            hint: '/etc/nginx or /var/log',
+            icon: Icons.route_outlined,
           ),
           onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: const Text('Open'),
-          ),
-        ],
+        footer: JalaDialogFooterBar(
+          onCancel: () => Navigator.pop(ctx),
+          primaryIcon: Icons.arrow_forward_rounded,
+          primaryLabel: 'Open',
+          onPrimary: () => Navigator.pop(ctx, ctrl.text.trim()),
+        ),
       ),
     );
     if (nextPath != null && nextPath.isNotEmpty) {
@@ -203,24 +206,28 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
     final ctrl = TextEditingController();
     final created = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF121A28),
-        title: const Text('Create Remote Directory'),
-        content: TextField(
+      builder: (ctx) => JalaStudioDialog(
+        title: 'Create Remote Directory',
+        subtitle: 'Creates a POSIX directory inside ${widget.currentPath}',
+        icon: Icons.create_new_folder_outlined,
+        onClose: () => Navigator.pop(ctx),
+        body: TextField(
           controller: ctrl,
           autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Folder name',
-            hintText: 'e.g. releases',
+          style: const TextStyle(fontSize: 13, color: Color(0xFFE6EEF7)),
+          decoration: jalaEnterpriseInputDecoration(
+            label: 'Folder name',
+            hint: 'e.g. releases',
+            icon: Icons.folder_outlined,
           ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: const Text('Create'),
-          ),
-        ],
+        footer: JalaDialogFooterBar(
+          onCancel: () => Navigator.pop(ctx),
+          primaryIcon: Icons.check_rounded,
+          primaryLabel: 'Create',
+          onPrimary: () => Navigator.pop(ctx, ctrl.text.trim()),
+        ),
       ),
     );
     if (created != null && created.isNotEmpty) {
@@ -437,24 +444,27 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                       final renameCtrl = TextEditingController(text: entry.name);
                       final nextName = await showDialog<String>(
                         context: context,
-                        builder: (dCtx) => AlertDialog(
-                          backgroundColor: const Color(0xFF121A28),
-                          title: const Text('Rename Remote Item'),
-                          content: TextField(
+                        builder: (dCtx) => JalaStudioDialog(
+                          title: 'Rename Remote Item',
+                          subtitle: entry.name,
+                          icon: Icons.drive_file_rename_outline_rounded,
+                          onClose: () => Navigator.pop(dCtx),
+                          body: TextField(
                             controller: renameCtrl,
                             autofocus: true,
-                            decoration: const InputDecoration(labelText: 'New name'),
+                            style: const TextStyle(fontSize: 13, color: Color(0xFFE6EEF7)),
+                            decoration: jalaEnterpriseInputDecoration(
+                              label: 'New name',
+                              icon: Icons.edit_outlined,
+                            ),
+                            onSubmitted: (v) => Navigator.pop(dCtx, v.trim()),
                           ),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(dCtx),
-                              child: const Text('Cancel'),
-                            ),
-                            FilledButton(
-                              onPressed: () => Navigator.pop(dCtx, renameCtrl.text.trim()),
-                              child: const Text('Rename'),
-                            ),
-                          ],
+                          footer: JalaDialogFooterBar(
+                            onCancel: () => Navigator.pop(dCtx),
+                            primaryIcon: Icons.check_rounded,
+                            primaryLabel: 'Rename',
+                            onPrimary: () => Navigator.pop(dCtx, renameCtrl.text.trim()),
+                          ),
                         ),
                       );
                       if (nextName != null && nextName.isNotEmpty && nextName != entry.name) {
@@ -470,23 +480,24 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                       Navigator.pop(ctx);
                       final confirmed = await showDialog<bool>(
                         context: context,
-                        builder: (dCtx) => AlertDialog(
-                          backgroundColor: const Color(0xFF121A28),
-                          title: const Text('Delete Remote Item?'),
-                          content: Text('Permanently delete "${entry.name}" from remote server?'),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(dCtx, false),
-                              child: const Text('Cancel'),
-                            ),
-                            FilledButton(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: const Color(0xFFD64545),
-                              ),
-                              onPressed: () => Navigator.pop(dCtx, true),
-                              child: const Text('Delete'),
-                            ),
-                          ],
+                        builder: (dCtx) => JalaStudioDialog(
+                          title: 'Delete Remote Item?',
+                          subtitle: 'Permanent SFTP file removal',
+                          icon: Icons.delete_outline_rounded,
+                          iconColor: const Color(0xFFF06A6A),
+                          borderColor: const Color(0xFFF06A6A),
+                          onClose: () => Navigator.pop(dCtx, false),
+                          body: Text(
+                            'Permanently delete "${entry.name}" from remote server?',
+                            style: const TextStyle(fontSize: 12.5, color: Color(0xFFB4C3D4), height: 1.4),
+                          ),
+                          footer: JalaDialogFooterBar(
+                            onCancel: () => Navigator.pop(dCtx, false),
+                            isDestructive: true,
+                            primaryIcon: Icons.delete_forever_rounded,
+                            primaryLabel: 'Delete',
+                            onPrimary: () => Navigator.pop(dCtx, true),
+                          ),
                         ),
                       );
                       if (confirmed == true) {
