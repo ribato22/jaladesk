@@ -540,16 +540,16 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
     final symInsetX = math.max(mediaPadding.left, mediaPadding.right);
 
     return Container(
-      color: const Color(0xFF0A0F19),
+      color: const Color(0xFF080C12),
       child: Column(
         children: [
           // Top Path Breadcrumb & SFTP Control Bar
           Container(
             padding: EdgeInsets.fromLTRB(symInsetX + 10, 8, symInsetX + 10, 8),
             decoration: const BoxDecoration(
-              color: Color(0xFF0F1724),
+              color: Color(0xFF0D141F),
               border: Border(
-                bottom: BorderSide(color: Color(0xFF1E2B40), width: 1),
+                bottom: BorderSide(color: Color(0xFF223247), width: 1),
               ),
             ),
             child: Column(
@@ -559,19 +559,19 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                   children: [
                     // Up button
                     InkWell(
-                      borderRadius: BorderRadius.circular(6),
+                      borderRadius: BorderRadius.circular(7),
                       onTap: widget.onNavigateUp,
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF162133),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: const Color(0xFF263852)),
+                          color: const Color(0xFF141E2C),
+                          borderRadius: BorderRadius.circular(7),
+                          border: Border.all(color: const Color(0xFF263649)),
                         ),
                         child: const Icon(
                           Icons.arrow_upward_rounded,
                           size: 15,
-                          color: Color(0xFFE0B454),
+                          color: Color(0xFF63A8FF),
                           semanticLabel: 'Parent Directory',
                         ),
                       ),
@@ -590,7 +590,7 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                                   child: Icon(
                                     Icons.chevron_right_rounded,
                                     size: 15,
-                                    color: Color(0xFF617591),
+                                    color: Color(0xFF9FB2C8),
                                   ),
                                 ),
                               InkWell(
@@ -607,8 +607,8 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                                           ? FontWeight.w700
                                           : FontWeight.w500,
                                       color: i == crumbs.length - 1
-                                          ? const Color(0xFFE6EDF7)
-                                          : const Color(0xFF8CA2C0),
+                                          ? const Color(0xFFEBF2FA)
+                                          : const Color(0xFFA3B4C9),
                                     ),
                                   ),
                                 ),
@@ -621,7 +621,7 @@ class _SftpExplorerViewState extends State<SftpExplorerView> {
                                 style: const TextStyle(
                                   fontFamily: 'monospace',
                                   fontSize: 10.5,
-                                  color: Color(0xFF5D728F),
+                                  color: Color(0xFF9FB2C8),
                                 ),
                               ),
                             ],

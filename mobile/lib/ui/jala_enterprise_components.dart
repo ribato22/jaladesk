@@ -23,6 +23,12 @@ class JalaEnterpriseTokens {
   static const Color primaryButtonBg = Color(0xFF1F6FEB);
   static const Color dangerButtonBg = Color(0xFFD64545);
 
+  static const Color bgCanvas = Color(0xFF080C12);
+  static const Color accentPrimary = Color(0xFF63A8FF);
+  static const Color statusOk = Color(0xFF3FB97C);
+  static const Color statusWarn = Color(0xFFF3C66F);
+  static const Color statusDanger = Color(0xFFF06A6A);
+
   static const Color textPrimary = Color(0xFFE6EEF7);
   static const Color textSecondary = Color(0xFFB4C3D4);
   static const Color textMuted = Color(0xFF8C9AA8);
@@ -640,6 +646,285 @@ class JalaStudioDialog extends StatelessWidget {
               child: footer,
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Precision Enterprise Studio Panel (`#141D29` surface, `14px` radius, `1px` `#263649` border,
+/// optional `#0D141F` header bar with `1px` `#223144` bottom divider).
+class JalaStudioPanel extends StatelessWidget {
+  final Key? panelKey;
+  final String? title;
+  final IconData? icon;
+  final Color? iconColor;
+  final Widget? headerTrailing;
+  final Widget child;
+  final EdgeInsetsGeometry bodyPadding;
+  final Color? surfaceColor;
+  final Color? borderColor;
+
+  const JalaStudioPanel({
+    super.key,
+    this.panelKey,
+    this.title,
+    this.icon,
+    this.iconColor,
+    this.headerTrailing,
+    required this.child,
+    this.bodyPadding = const EdgeInsets.all(14),
+    this.surfaceColor,
+    this.borderColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final Color accent = iconColor ?? JalaEnterpriseTokens.segmentGold;
+    return Container(
+      key: panelKey,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: surfaceColor ?? JalaEnterpriseTokens.dialogSurface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: borderColor ?? JalaEnterpriseTokens.trackBorder,
+          width: 1.0,
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (title != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: const BoxDecoration(
+                color: JalaEnterpriseTokens.headerBg,
+                border: Border(
+                  bottom: BorderSide(
+                    color: Color(0xFF223144),
+                    width: 1.0,
+                  ),
+                ),
+              ),
+              child: Row(
+                children: [
+                  if (icon != null) ...[
+                    Icon(icon, size: 17, color: accent),
+                    const SizedBox(width: 8),
+                  ],
+                  Expanded(
+                    child: Text(
+                      title!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.1,
+                        color: JalaEnterpriseTokens.textPrimary,
+                      ),
+                    ),
+                  ),
+                  if (headerTrailing != null) ...[
+                    const SizedBox(width: 8),
+                    headerTrailing!,
+                  ],
+                ],
+              ),
+            ),
+          Padding(
+            padding: bodyPadding,
+            child: child,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Cohesive `30×30` or labeled toolbar button (`#141E2C` fill, `1px` `#263649` border).
+class JalaToolbarIconBtn extends StatelessWidget {
+  final Key? btnKey;
+  final IconData icon;
+  final String? label;
+  final String? tooltip;
+  final bool active;
+  final Color? iconColor;
+  final Color? activeBorderColor;
+  final Color? activeBgColor;
+  final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+  final double height;
+
+  const JalaToolbarIconBtn({
+    super.key,
+    this.btnKey,
+    required this.icon,
+    this.label,
+    this.tooltip,
+    this.active = false,
+    this.iconColor,
+    this.activeBorderColor,
+    this.activeBgColor,
+    this.onTap,
+    this.onLongPress,
+    this.height = 28.0,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final Color effectiveIcon = iconColor ??
+        (active
+            ? JalaEnterpriseTokens.segmentGold
+            : JalaEnterpriseTokens.textSecondary);
+    final Color bg = active
+        ? (activeBgColor ?? JalaEnterpriseTokens.segmentSelectedBg)
+        : const Color(0xFF141E2C);
+    final Color border = active
+        ? (activeBorderColor ??
+            JalaEnterpriseTokens.segmentGold.withValues(alpha: 0.72))
+        : JalaEnterpriseTokens.trackBorder;
+
+    final Widget button = Material(
+      color: Colors.transparent,
+      child: InkWell(
+        key: btnKey,
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: Container(
+          height: height,
+          constraints: BoxConstraints(minWidth: label == null ? height : 0),
+          padding: EdgeInsets.symmetric(horizontal: label == null ? 0 : 8),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: border, width: 1.0),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14.5, color: effectiveIcon),
+              if (label != null) ...[
+                const SizedBox(width: 4.5),
+                Text(
+                  label!,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    color: active
+                        ? JalaEnterpriseTokens.textPrimary
+                        : JalaEnterpriseTokens.textSecondary,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (tooltip != null && tooltip!.isNotEmpty) {
+      return Tooltip(message: tooltip!, child: button);
+    }
+    return button;
+  }
+}
+
+/// Tactile enterprise action row used inside bottom sheets and grouped menus.
+class JalaActionRow extends StatelessWidget {
+  final Key? rowKey;
+  final IconData icon;
+  final Color iconColor;
+  final String title;
+  final String? subtitle;
+  final Color? titleColor;
+  final Color? highlightBg;
+  final Widget? trailing;
+  final VoidCallback onTap;
+
+  const JalaActionRow({
+    super.key,
+    this.rowKey,
+    required this.icon,
+    required this.iconColor,
+    required this.title,
+    this.subtitle,
+    this.titleColor,
+    this.highlightBg,
+    this.trailing,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: highlightBg ?? Colors.transparent,
+      child: InkWell(
+        key: rowKey,
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10.5),
+          child: Row(
+            children: [
+              Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  color: iconColor.withValues(alpha: 0.13),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: iconColor.withValues(alpha: 0.32),
+                    width: 1.0,
+                  ),
+                ),
+                child: Icon(icon, size: 16, color: iconColor),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: highlightBg != null
+                            ? FontWeight.w700
+                            : FontWeight.w600,
+                        color: titleColor ?? JalaEnterpriseTokens.textPrimary,
+                      ),
+                    ),
+                    if (subtitle != null && subtitle!.isNotEmpty) ...[
+                      const SizedBox(height: 1.5),
+                      Text(
+                        subtitle!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: JalaEnterpriseTokens.textMuted,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              trailing ??
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    size: 17,
+                    color: JalaEnterpriseTokens.textMuted.withValues(alpha: 0.7),
+                  ),
+            ],
+          ),
         ),
       ),
     );

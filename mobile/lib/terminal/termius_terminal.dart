@@ -1631,31 +1631,31 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
     Color? accent,
   }) {
     final borderColor = active
-        ? const Color(0xFFE0B454)
-        : (accent != null ? accent.withValues(alpha: 0.45) : const Color(0xFF28364D));
-    final bgColor = active ? const Color(0xFF2B2518) : const Color(0xFF162030);
+        ? const Color(0xFFF3C66F)
+        : (accent != null ? accent.withValues(alpha: 0.5) : const Color(0xFF2A3C53));
+    final bgColor = active ? const Color(0xFF2A241A) : const Color(0xFF152030);
     final fgColor = active
-        ? const Color(0xFFE0B454)
-        : (accent ?? const Color(0xFFE6EDF7));
+        ? const Color(0xFFF3C66F)
+        : (accent ?? const Color(0xFFEBF2FA));
 
     return Padding(
       padding: const EdgeInsets.only(right: 5),
       child: Material(
         color: bgColor,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(7),
         child: InkWell(
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(7),
           onTap: () {
             HapticFeedback.selectionClick();
             onTap();
             _focusTerminal();
           },
           child: Container(
-            constraints: const BoxConstraints(minWidth: 34),
+            constraints: const BoxConstraints(minWidth: 35),
             padding: const EdgeInsets.symmetric(horizontal: 9),
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(7),
               border: Border.all(color: borderColor, width: 1),
             ),
             child: Text(
@@ -1684,28 +1684,28 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
       child: Tooltip(
         message: tooltip,
         child: Material(
-          color: active ? const Color(0xFF2B2518) : const Color(0xFF162030),
-          borderRadius: BorderRadius.circular(6),
+          color: active ? const Color(0xFF2A241A) : const Color(0xFF152030),
+          borderRadius: BorderRadius.circular(7),
           child: InkWell(
-            borderRadius: BorderRadius.circular(6),
+            borderRadius: BorderRadius.circular(7),
             onTap: () {
               HapticFeedback.selectionClick();
               onTap();
               _focusTerminal();
             },
             child: Container(
-              width: 34,
+              width: 35,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(6),
+                borderRadius: BorderRadius.circular(7),
                 border: Border.all(
-                  color: active ? const Color(0xFFE0B454) : const Color(0xFF28364D),
+                  color: active ? const Color(0xFFF3C66F) : const Color(0xFF2A3C53),
                 ),
               ),
               child: Icon(
                 icon,
                 size: 17,
-                color: active ? const Color(0xFFE0B454) : const Color(0xFFE6EDF7),
+                color: active ? const Color(0xFFF3C66F) : const Color(0xFFEBF2FA),
               ),
             ),
           ),

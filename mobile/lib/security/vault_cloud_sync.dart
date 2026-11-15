@@ -622,6 +622,38 @@ class GoogleDriveAppDataSyncTransport implements VaultCloudSyncTransport {
     return res;
   }
 
+  String _formatGoogleDriveHttpError(String action, _HttpResponseSnapshot res) {
+    final body = res.body;
+    final lower = body.toLowerCase();
+    if (res.statusCode == 403 &&
+        (body.contains('accessNotConfigured') ||
+            lower.contains('drive api has not been used') ||
+            body.contains('SERVICE_DISABLED'))) {
+      return 'Google Drive API is disabled in your Google Cloud project. Enable Google Drive API and tap Sync Now.';
+    }
+    if (res.statusCode == 403 &&
+        (body.contains('insufficientPermissions') ||
+            body.contains('ACCESS_TOKEN_SCOPE_INSUFFICIENT'))) {
+      return 'Google Drive AppData permission is missing. Reconnect your Google account and grant AppData access.';
+    }
+    if (res.statusCode == 401) {
+      return 'Google Drive session expired (HTTP 401). Tap Sync Now to refresh authorization.';
+    }
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        final errObj = decoded['error'];
+        if (errObj is Map<String, dynamic>) {
+          final msg = (errObj['message'] ?? '').toString().trim();
+          if (msg.isNotEmpty) {
+            return 'Google Drive $action failed (HTTP ${res.statusCode}): $msg';
+          }
+        }
+      }
+    } catch (_) {}
+    return 'Google Drive $action failed (HTTP ${res.statusCode}).';
+  }
+
   Future<String?> _findAppDataFileId() async {
     final query = "name = '$fileName' and trashed = false";
     final uri = Uri.parse(
@@ -633,9 +665,7 @@ class GoogleDriveAppDataSyncTransport implements VaultCloudSyncTransport {
     );
     final res = await _authorizedCall(method: 'GET', uri: uri);
     if (res.statusCode != 200) {
-      throw VaultCloudSyncException(
-        'Google Drive lookup failed (HTTP ${res.statusCode}).',
-      );
+      throw VaultCloudSyncException(_formatGoogleDriveHttpError('lookup', res));
     }
     final decoded = jsonDecode(res.body);
     if (decoded is Map<String, dynamic>) {
@@ -661,9 +691,7 @@ class GoogleDriveAppDataSyncTransport implements VaultCloudSyncTransport {
     final res = await _authorizedCall(method: 'GET', uri: uri);
     if (res.statusCode == 404) return null;
     if (res.statusCode != 200) {
-      throw VaultCloudSyncException(
-        'Google Drive download failed (HTTP ${res.statusCode}).',
-      );
+      throw VaultCloudSyncException(_formatGoogleDriveHttpError('download', res));
     }
     final trimmed = res.body.trim();
     return trimmed.isEmpty ? null : res.body;
@@ -685,9 +713,7 @@ class GoogleDriveAppDataSyncTransport implements VaultCloudSyncTransport {
         bodyBytes: utf8.encode(sealedJson),
       );
       if (res.statusCode < 200 || res.statusCode >= 300) {
-        throw VaultCloudSyncException(
-          'Google Drive update failed (HTTP ${res.statusCode}).',
-        );
+        throw VaultCloudSyncException(_formatGoogleDriveHttpError('update', res));
       }
       return;
     }
@@ -718,9 +744,7 @@ class GoogleDriveAppDataSyncTransport implements VaultCloudSyncTransport {
       bodyBytes: utf8.encode(multipartBody.toString()),
     );
     if (res.statusCode != 200 && res.statusCode != 201) {
-      throw VaultCloudSyncException(
-        'Google Drive upload failed (HTTP ${res.statusCode}).',
-      );
+      throw VaultCloudSyncException(_formatGoogleDriveHttpError('upload', res));
     }
   }
 }
@@ -1235,8 +1259,10 @@ class VaultSyncConfig {
   final bool isBound;
   final VaultSyncProviderKind provider;
   final String syncPassphrase;
+  final bool useCustomPassphrase;
   final bool autoSyncEnabled;
   final int lastSyncedAtMs;
+  final String lastSyncError;
 
   final String googleAccountEmail;
   final String googleDisplayName;
@@ -1262,8 +1288,10 @@ class VaultSyncConfig {
     this.isBound = false,
     this.provider = VaultSyncProviderKind.googleDrive,
     this.syncPassphrase = '',
+    this.useCustomPassphrase = false,
     this.autoSyncEnabled = true,
     this.lastSyncedAtMs = 0,
+    this.lastSyncError = '',
     this.googleAccountEmail = '',
     this.googleDisplayName = '',
     this.googleApiBaseUrl = GoogleDriveAppDataSyncTransport.defaultApiBaseUrl,
@@ -1281,6 +1309,25 @@ class VaultSyncConfig {
     this.githubGistId = '',
     this.githubApiBaseUrl = GitHubGistVaultSyncTransport.defaultApiBaseUrl,
   });
+
+  String get effectiveEncryptionPassphrase {
+    if (provider == VaultSyncProviderKind.googleDrive && !useCustomPassphrase) {
+      final email = googleAccountEmail.trim().toLowerCase();
+      if (email.isNotEmpty) {
+        return 'jaladesk-gdrive-e2ee-v1:$email';
+      }
+    }
+    return syncPassphrase;
+  }
+
+  bool get hasValidEncryptionKey {
+    if (provider == VaultSyncProviderKind.googleDrive) {
+      return useCustomPassphrase
+          ? syncPassphrase.trim().length >= 4
+          : googleAccountEmail.trim().isNotEmpty;
+    }
+    return syncPassphrase.trim().length >= 4;
+  }
 
   String get accountSummary {
     switch (provider) {
@@ -1315,8 +1362,11 @@ class VaultSyncConfig {
     bool? isBound,
     VaultSyncProviderKind? provider,
     String? syncPassphrase,
+    bool? useCustomPassphrase,
     bool? autoSyncEnabled,
     int? lastSyncedAtMs,
+    String? lastSyncError,
+    bool clearLastSyncError = false,
     String? googleAccountEmail,
     String? googleDisplayName,
     String? googleApiBaseUrl,
@@ -1339,8 +1389,11 @@ class VaultSyncConfig {
       isBound: isBound ?? this.isBound,
       provider: provider ?? this.provider,
       syncPassphrase: syncPassphrase ?? this.syncPassphrase,
+      useCustomPassphrase: useCustomPassphrase ?? this.useCustomPassphrase,
       autoSyncEnabled: autoSyncEnabled ?? this.autoSyncEnabled,
       lastSyncedAtMs: lastSyncedAtMs ?? this.lastSyncedAtMs,
+      lastSyncError:
+          clearLastSyncError ? '' : (lastSyncError ?? this.lastSyncError),
       googleAccountEmail: googleAccountEmail ?? this.googleAccountEmail,
       googleDisplayName: googleDisplayName ?? this.googleDisplayName,
       googleApiBaseUrl: googleApiBaseUrl ?? this.googleApiBaseUrl,
@@ -1365,8 +1418,10 @@ class VaultSyncConfig {
         'isBound': isBound,
         'provider': provider.name,
         'syncPassphrase': syncPassphrase,
+        'useCustomPassphrase': useCustomPassphrase,
         'autoSyncEnabled': autoSyncEnabled,
         'lastSyncedAtMs': lastSyncedAtMs,
+        'lastSyncError': lastSyncError,
         'googleAccountEmail': googleAccountEmail,
         'googleDisplayName': googleDisplayName,
         'googleApiBaseUrl': googleApiBaseUrl,
@@ -1387,12 +1442,21 @@ class VaultSyncConfig {
 
   factory VaultSyncConfig.fromJson(Map<String, dynamic> json) {
     final rawPreset = (json['sftpPresetHostId'] as String?)?.trim();
+    final parsedProvider =
+        VaultSyncProviderKind.fromName(json['provider'] as String?);
+    final parsedPassphrase = json['syncPassphrase'] as String? ?? '';
+    final bool inferredCustomPassphrase = json['useCustomPassphrase'] is bool
+        ? (json['useCustomPassphrase'] as bool)
+        : (parsedProvider == VaultSyncProviderKind.googleDrive &&
+            parsedPassphrase.trim().length >= 4);
     return VaultSyncConfig(
       isBound: json['isBound'] as bool? ?? false,
-      provider: VaultSyncProviderKind.fromName(json['provider'] as String?),
-      syncPassphrase: json['syncPassphrase'] as String? ?? '',
+      provider: parsedProvider,
+      syncPassphrase: parsedPassphrase,
+      useCustomPassphrase: inferredCustomPassphrase,
       autoSyncEnabled: json['autoSyncEnabled'] as bool? ?? true,
       lastSyncedAtMs: (json['lastSyncedAtMs'] as num?)?.toInt() ?? 0,
+      lastSyncError: json['lastSyncError'] as String? ?? '',
       googleAccountEmail: json['googleAccountEmail'] as String? ?? '',
       googleDisplayName: json['googleDisplayName'] as String? ?? '',
       googleApiBaseUrl: (json['googleApiBaseUrl'] as String?)?.trim().isNotEmpty == true
@@ -1459,6 +1523,8 @@ class VaultCloudSyncScreen extends StatefulWidget {
   ) onExecuteSync;
   final Future<void> Function() onUnbindSync;
   final void Function(VaultSyncConfig updatedConfig)? onConfigChanged;
+  final Future<void> Function(VaultSyncConfig updatedConfig)? onPersistConfigNow;
+  final ValueChanged<bool>? onExternalAuthInFlight;
 
   const VaultCloudSyncScreen({
     super.key,
@@ -1468,6 +1534,8 @@ class VaultCloudSyncScreen extends StatefulWidget {
     required this.onExecuteSync,
     required this.onUnbindSync,
     this.onConfigChanged,
+    this.onPersistConfigNow,
+    this.onExternalAuthInFlight,
   });
 
   @override
@@ -1477,8 +1545,10 @@ class VaultCloudSyncScreen extends StatefulWidget {
 class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
   late VaultSyncProviderKind _selectedProvider;
   late bool _isBound;
+  late bool _useCustomPassphrase;
   late bool _autoSyncEnabled;
   late int _lastSyncedAtMs;
+  late String _lastSyncError;
   late String _googleEmail;
   late String _googleDisplayName;
   late String? _selectedSftpPresetId;
@@ -1510,14 +1580,20 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
     final cfg = widget.initialConfig;
     _selectedProvider = cfg.provider;
     _isBound = cfg.isBound;
+    _useCustomPassphrase = cfg.useCustomPassphrase;
     _autoSyncEnabled = cfg.autoSyncEnabled;
     _lastSyncedAtMs = cfg.lastSyncedAtMs;
+    _lastSyncError = cfg.lastSyncError;
     _googleEmail = cfg.googleAccountEmail;
     _googleDisplayName = cfg.googleDisplayName;
     final currentAcc = widget.googleAuthProvider.currentAccount;
     if (_googleEmail.isEmpty && currentAcc != null) {
       _googleEmail = currentAcc.email;
       _googleDisplayName = currentAcc.displayName;
+    }
+    if (_lastSyncError.trim().isNotEmpty) {
+      _statusFeedback = _lastSyncError;
+      _statusIsError = true;
     }
     _selectedSftpPresetId = cfg.sftpPresetHostId;
     _sftpUsePrivateKey =
@@ -1562,8 +1638,10 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
       isBound: _isBound,
       provider: _selectedProvider,
       syncPassphrase: _passphraseCtrl.text,
+      useCustomPassphrase: _useCustomPassphrase,
       autoSyncEnabled: _autoSyncEnabled,
       lastSyncedAtMs: _lastSyncedAtMs,
+      lastSyncError: _lastSyncError,
       googleAccountEmail: _googleEmail.trim(),
       googleDisplayName: _googleDisplayName.trim(),
       sftpHost: _sftpHostCtrl.text.trim(),
@@ -1593,98 +1671,28 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
       _sftpPasswordCtrl.text = preset.password;
       _sftpKeyCtrl.text = preset.privateKeyPem;
       _sftpUsePrivateKey = preset.privateKeyPem.trim().isNotEmpty;
+      _didFlushOnExit = false;
       _statusFeedback = 'Populated endpoint from ${preset.name}';
       _statusIsError = false;
     });
   }
 
-  void _persistDraftNow() {
-    _didFlushOnExit = false;
-    widget.onConfigChanged?.call(_collectDraftConfig());
+  Future<void> _persistConfigImmediate(VaultSyncConfig cfg) async {
+    if (widget.onPersistConfigNow != null) {
+      await widget.onPersistConfigNow!(cfg);
+    } else {
+      widget.onConfigChanged?.call(cfg);
+    }
   }
 
-  Future<String?> _promptQuickGooglePassphraseDialog(String email) async {
-    final quickCtrl = TextEditingController(text: _passphraseCtrl.text);
-    bool obscure = true;
-    String? inlineError;
-
-    return showDialog<String>(
-      context: context,
-      builder: (dCtx) => StatefulBuilder(
-        builder: (dCtx, setModalState) => JalaStudioDialog(
-          dialogKey: const Key('dialog_google_passphrase_quick_setup'),
-          title: 'Set Sync Passphrase',
-          subtitle: 'Zero-Knowledge AES-256-GCM Encryption',
-          icon: Icons.enhanced_encryption_rounded,
-          onClose: () => Navigator.of(dCtx).pop(null),
-          body: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Create or enter your Sync Passphrase to encrypt your vault on $email.',
-                style: const TextStyle(
-                  fontSize: 12,
-                  height: 1.4,
-                  color: JalaEnterpriseTokens.textSecondary,
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                key: const Key('field_quick_google_passphrase'),
-                controller: quickCtrl,
-                autofocus: true,
-                obscureText: obscure,
-                style: const TextStyle(
-                  fontSize: 12.5,
-                  color: JalaEnterpriseTokens.textPrimary,
-                ),
-                decoration: jalaEnterpriseInputDecoration(
-                  label: 'Sync Passphrase *',
-                  hint: 'Min 4 characters • AES-256-GCM + PBKDF2',
-                  icon: Icons.lock_outline_rounded,
-                  suffixIcon: IconButton(
-                    visualDensity: VisualDensity.compact,
-                    onPressed: () => setModalState(() => obscure = !obscure),
-                    icon: Icon(
-                      obscure
-                          ? Icons.visibility_outlined
-                          : Icons.visibility_off_outlined,
-                      size: 17,
-                      color: JalaEnterpriseTokens.textMuted,
-                    ),
-                  ),
-                ),
-              ),
-              if (inlineError != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  inlineError!,
-                  style: const TextStyle(fontSize: 11.5, color: _kSyncDanger),
-                ),
-              ],
-            ],
-          ),
-          footer: JalaDialogFooterBar(
-            cancelLabel: 'Later',
-            onCancel: () => Navigator.of(dCtx).pop(null),
-            primaryKey: const Key('btn_confirm_quick_google_sync'),
-            primaryLabel: 'Bind & Sync Now',
-            primaryIcon: Icons.sync_rounded,
-            onPrimary: () {
-              final entered = quickCtrl.text;
-              if (entered.trim().length < 4) {
-                setModalState(() {
-                  inlineError = 'Passphrase must be at least 4 characters.';
-                });
-                return;
-              }
-              Navigator.of(dCtx).pop(entered);
-            },
-          ),
-        ),
-      ),
-    );
+  void _flushAndClose() {
+    if (!_didFlushOnExit) {
+      _didFlushOnExit = true;
+      unawaited(_persistConfigImmediate(_collectDraftConfig()));
+    }
+    if (mounted) {
+      Navigator.of(context).pop();
+    }
   }
 
   Future<void> _handleGoogleSignIn() async {
@@ -1694,39 +1702,10 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
       _statusFeedback = null;
       _oauthSetupDiagnostic = null;
     });
+    GoogleAuthAccountInfo? account;
+    widget.onExternalAuthInFlight?.call(true);
     try {
-      final account = await widget.googleAuthProvider.signIn();
-      if (!mounted) return;
-      if (account == null) {
-        setState(() {
-          _busy = false;
-          _statusFeedback = 'Google Sign-In cancelled.';
-          _statusIsError = false;
-        });
-        return;
-      }
-      setState(() {
-        _busy = false;
-        _selectedProvider = VaultSyncProviderKind.googleDrive;
-        _googleEmail = account.email;
-        _googleDisplayName = account.displayName;
-        _statusFeedback = 'Connected as ${account.email}';
-        _statusIsError = false;
-      });
-      // Immediately persist signed-in Google account so navigating away never drops state!
-      _persistDraftNow();
-
-      if (_passphraseCtrl.text.trim().length >= 4) {
-        await _runSyncOperation(VaultSyncOperationMode.smartMerge);
-      } else {
-        final quickPass = await _promptQuickGooglePassphraseDialog(account.email);
-        if (!mounted) return;
-        if (quickPass != null && quickPass.trim().length >= 4) {
-          _passphraseCtrl.text = quickPass;
-          _persistDraftNow();
-          await _runSyncOperation(VaultSyncOperationMode.smartMerge);
-        }
-      }
+      account = await widget.googleAuthProvider.signIn();
     } on GoogleOAuthConfigurationException catch (oauthErr) {
       if (!mounted) return;
       setState(() {
@@ -1734,42 +1713,89 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
         _oauthSetupDiagnostic = oauthErr;
         _statusFeedback = null;
       });
+      return;
     } catch (err) {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _statusFeedback = err.toString();
+        _statusFeedback = err.toString().replaceFirst('Exception: ', '');
         _statusIsError = true;
       });
+      return;
+    } finally {
+      widget.onExternalAuthInFlight?.call(false);
     }
+
+    if (!mounted) return;
+    if (account == null) {
+      setState(() {
+        _busy = false;
+        _statusFeedback = 'Google Sign-In cancelled.';
+        _statusIsError = false;
+      });
+      return;
+    }
+
+    final cleanEmail = account.email.trim();
+    final cleanName = account.displayName.trim();
+    setState(() {
+      _busy = false;
+      _selectedProvider = VaultSyncProviderKind.googleDrive;
+      _isBound = true;
+      _googleEmail = cleanEmail;
+      _googleDisplayName = cleanName;
+      _lastSyncError = '';
+      _oauthSetupDiagnostic = null;
+      if (_useCustomPassphrase && _passphraseCtrl.text.trim().length < 4) {
+        _useCustomPassphrase = false;
+      }
+      _statusFeedback = 'Connected as $cleanEmail';
+      _statusIsError = false;
+      _didFlushOnExit = true;
+    });
+
+    final boundDraft = _collectDraftConfig();
+    await _persistConfigImmediate(boundDraft);
+    if (!mounted) return;
+
+    await _runSyncOperation(
+      VaultSyncOperationMode.smartMerge,
+      overrideDraft: boundDraft,
+    );
   }
 
   Future<void> _handleGoogleSignOut() async {
     if (_busy) return;
     setState(() => _busy = true);
-    await widget.googleAuthProvider.signOut();
+    await widget.onUnbindSync();
     if (!mounted) return;
     setState(() {
       _busy = false;
       _googleEmail = '';
       _googleDisplayName = '';
-      if (_selectedProvider == VaultSyncProviderKind.googleDrive) {
-        _isBound = false;
-        _lastSyncedAtMs = 0;
-      }
+      _isBound = false;
+      _lastSyncedAtMs = 0;
+      _lastSyncError = '';
+      _didFlushOnExit = true;
       _statusFeedback = 'Google account disconnected.';
       _statusIsError = false;
     });
-    _persistDraftNow();
   }
 
-  Future<void> _runSyncOperation(VaultSyncOperationMode mode) async {
+  Future<void> _runSyncOperation(
+    VaultSyncOperationMode mode, {
+    VaultSyncConfig? overrideDraft,
+  }) async {
     if (_busy) return;
     FocusScope.of(context).unfocus();
-    final draft = _collectDraftConfig();
-    if (draft.syncPassphrase.trim().length < 4) {
+    final draft = overrideDraft ?? _collectDraftConfig();
+    if (!draft.hasValidEncryptionKey) {
       setState(() {
-        _statusFeedback = 'Sync Passphrase must be at least 4 characters.';
+        _statusFeedback =
+            draft.provider == VaultSyncProviderKind.googleDrive &&
+                    !draft.useCustomPassphrase
+                ? 'Sign in with Google first to bind your encrypted vault.'
+                : 'Sync Passphrase must be at least 4 characters.';
         _statusIsError = true;
       });
       return;
@@ -1788,12 +1814,14 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
         _busy = false;
         _isBound = summary.updatedConfig.isBound;
         _lastSyncedAtMs = summary.updatedConfig.lastSyncedAtMs;
+        _lastSyncError = '';
         if (summary.updatedConfig.githubGistId.isNotEmpty) {
           _githubGistIdCtrl.text = summary.updatedConfig.githubGistId;
         }
         if (summary.updatedConfig.googleAccountEmail.isNotEmpty) {
           _googleEmail = summary.updatedConfig.googleAccountEmail;
         }
+        _didFlushOnExit = true;
         _statusFeedback = summary.message;
         _statusIsError = false;
       });
@@ -1805,12 +1833,18 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
         _statusFeedback = null;
       });
     } catch (err) {
+      final friendlyErr = err.toString().replaceFirst('Exception: ', '').trim();
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _statusFeedback = err.toString().replaceFirst('Exception: ', '');
+        _lastSyncError = friendlyErr;
+        _statusFeedback = friendlyErr;
         _statusIsError = true;
       });
+      if (_isBound) {
+        _didFlushOnExit = true;
+        await _persistConfigImmediate(_collectDraftConfig());
+      }
     }
   }
 
@@ -1823,6 +1857,7 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
       _busy = false;
       _isBound = false;
       _lastSyncedAtMs = 0;
+      _lastSyncError = '';
       if (_selectedProvider == VaultSyncProviderKind.googleDrive) {
         _googleEmail = '';
         _googleDisplayName = '';
@@ -2362,6 +2397,9 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
   }
 
   Widget _buildEncryptionAndActionsPanel() {
+    final bool isGoogle = _selectedProvider == VaultSyncProviderKind.googleDrive;
+    final bool showPassphraseField = !isGoogle || _useCustomPassphrase;
+
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -2389,35 +2427,89 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
             ],
           ),
           const SizedBox(height: 10),
-          TextField(
-            key: const Key('field_cloud_sync_passphrase'),
-            controller: _passphraseCtrl,
-            obscureText: _obscurePassphrase,
-            style: const TextStyle(fontSize: 12.5, color: _kSyncText),
-            decoration: _fieldDecoration(
-              label: 'Sync Passphrase *',
-              hint: 'Min 4 chars • AES-256-GCM + PBKDF2',
-              icon: Icons.lock_outline_rounded,
-              suffixIcon: IconButton(
-                key: const Key('btn_toggle_sync_passphrase_visibility'),
-                visualDensity: VisualDensity.compact,
-                onPressed: () =>
-                    setState(() => _obscurePassphrase = !_obscurePassphrase),
-                icon: Icon(
-                  _obscurePassphrase
-                      ? Icons.visibility_outlined
-                      : Icons.visibility_off_outlined,
-                  size: 17,
-                  color: _kSyncMuted,
+          if (isGoogle) ...[
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Custom E2EE Passphrase (Optional)',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: _kSyncText,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _useCustomPassphrase
+                            ? 'Using your custom PBKDF2-SHA256 + AES-256-GCM passphrase'
+                            : 'Account-Bound AES-256-GCM Key — automatic 1-tap sync across your devices',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: _kSyncMuted,
+                          height: 1.32,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Switch.adaptive(
+                  key: const Key('switch_google_custom_passphrase'),
+                  activeThumbColor: _kSyncGold,
+                  activeTrackColor: _kSyncSelected,
+                  value: _useCustomPassphrase,
+                  onChanged: _busy
+                      ? null
+                      : (v) {
+                          setState(() {
+                            _useCustomPassphrase = v;
+                            _didFlushOnExit = false;
+                          });
+                          if (_isBound && (!v || _passphraseCtrl.text.trim().length >= 4)) {
+                            unawaited(_persistConfigImmediate(_collectDraftConfig()));
+                          }
+                        },
+                ),
+              ],
+            ),
+            if (showPassphraseField) const SizedBox(height: 10),
+          ],
+          if (showPassphraseField) ...[
+            TextField(
+              key: const Key('field_cloud_sync_passphrase'),
+              controller: _passphraseCtrl,
+              obscureText: _obscurePassphrase,
+              onChanged: (_) => _didFlushOnExit = false,
+              style: const TextStyle(fontSize: 12.5, color: _kSyncText),
+              decoration: _fieldDecoration(
+                label: 'Sync Passphrase *',
+                hint: 'Min 4 chars • AES-256-GCM + PBKDF2',
+                icon: Icons.lock_outline_rounded,
+                suffixIcon: IconButton(
+                  key: const Key('btn_toggle_sync_passphrase_visibility'),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () =>
+                      setState(() => _obscurePassphrase = !_obscurePassphrase),
+                  icon: Icon(
+                    _obscurePassphrase
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
+                    size: 17,
+                    color: _kSyncMuted,
+                  ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'Encrypts your vault before upload. Never shared with cloud provider.',
-            style: TextStyle(fontSize: 11, color: _kSyncMuted),
-          ),
+            const SizedBox(height: 6),
+            const Text(
+              'Encrypts your vault before upload. Never shared with cloud provider.',
+              style: TextStyle(fontSize: 11, color: _kSyncMuted),
+            ),
+          ],
           const SizedBox(height: 10),
           const Divider(height: 1, color: _kSyncBorder),
           Row(
@@ -2440,9 +2532,12 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
                 onChanged: _busy
                     ? null
                     : (v) {
-                        setState(() => _autoSyncEnabled = v);
+                        setState(() {
+                          _autoSyncEnabled = v;
+                          _didFlushOnExit = false;
+                        });
                         if (_isBound) {
-                          widget.onConfigChanged?.call(_collectDraftConfig());
+                          unawaited(_persistConfigImmediate(_collectDraftConfig()));
                         }
                       },
               ),
@@ -2641,7 +2736,7 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
       onPopInvokedWithResult: (didPop, _) {
         if (didPop && !_didFlushOnExit) {
           _didFlushOnExit = true;
-          widget.onConfigChanged?.call(_collectDraftConfig());
+          unawaited(_persistConfigImmediate(_collectDraftConfig()));
         }
       },
       child: Scaffold(
@@ -2698,13 +2793,7 @@ class _VaultCloudSyncScreenState extends State<VaultCloudSyncScreen> {
               child: IconButton(
                 key: const Key('btn_close_cloud_sync'),
                 tooltip: 'Close',
-                onPressed: () {
-                  if (!_didFlushOnExit) {
-                    _didFlushOnExit = true;
-                    widget.onConfigChanged?.call(_collectDraftConfig());
-                  }
-                  Navigator.of(context).pop();
-                },
+                onPressed: _flushAndClose,
                 icon: const Icon(Icons.close_rounded, color: _kSyncText2),
               ),
             ),
