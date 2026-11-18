@@ -36,7 +36,7 @@ import {
   type DisplaySizingMode,
 } from './studios-sre-ha.js';
 import {buildConnectionActionSections, type ConnectionActionId, type ConnectionActionTarget} from './context-menu.js';
-import {createCloudSyncStudio} from './cloud-sync-ui.js';
+import {createCloudSyncStudio, jalaSvgIcon, type JalaStudioIconName} from './cloud-sync-ui.js';
 import {createAppLockPinUi, createVault2faStudio} from './vault-2fa-ui.js';
 import {createUserGuideModal} from './user-guide-ui.js';
 import type {IconId} from '../documents/meta.js';
@@ -12685,6 +12685,23 @@ const userGuideModal = createUserGuideModal();
 document.getElementById('cloud-sync-btn')?.addEventListener('click', (e) => void cloudSyncStudio.open(e.currentTarget as HTMLElement));
 document.getElementById('vault-2fa-btn')?.addEventListener('click', (e) => void vault2faStudio.open(e.currentTarget as HTMLElement));
 document.getElementById('user-guide-btn')?.addEventListener('click', (e) => void userGuideModal.open(e.currentTarget as HTMLElement));
+
+const TOPBAR_PILL_ICONS: ReadonlyArray<readonly [string, JalaStudioIconName]> = [
+  ['cloud-sync-btn', 'cloud'],
+  ['vault-2fa-btn', 'shield'],
+  ['user-guide-btn', 'book'],
+  ['cmd-palette-btn', 'command'],
+  ['lock-workspace-btn', 'lock'],
+];
+for (const [btnId, iconName] of TOPBAR_PILL_ICONS) {
+  const pillBtn = document.getElementById(btnId);
+  if (pillBtn && !pillBtn.querySelector('svg')) {
+    const labelText = (pillBtn.textContent ?? '').trim();
+    const labelSpan = document.createElement('span');
+    labelSpan.textContent = labelText;
+    pillBtn.replaceChildren(jalaSvgIcon(iconName, document, 13), labelSpan);
+  }
+}
 
 void appLockPinUi.syncLockState();
 appLockBridge?.onStateChanged?.(() => {

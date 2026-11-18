@@ -29,7 +29,7 @@
             <option value="vmware">ESXi</option>
             <option value="hyperv">Hyper-V</option>
           </select>
-          <button id="quick-connect-go" type="button" class="quick-go-btn" title="Connect Now (Enter)" data-tooltip="Connect Now (Enter)">▶</button>
+          <button id="quick-connect-go" type="button" class="quick-go-btn" title="Connect Now (Enter)" data-tooltip="Connect Now (Enter)">Connect</button>
           <button id="quick-options-toggle" type="button" class="quiet quick-opt-btn" title="Quick Connect Options" data-tooltip="Quick Connect Options">▾</button>
         </div>
       </div>
@@ -40,8 +40,8 @@
         <button id="cloud-sync-btn" type="button" class="quiet topbar-studio-pill" title="Zero-Knowledge Cloud Sync &amp; .jvault Backup" data-tooltip="Cloud Sync &amp; .jvault">Cloud Sync</button>
         <button id="vault-2fa-btn" type="button" class="quiet topbar-studio-pill" title="2FA Authenticator Vault (RFC 6238)" data-tooltip="Authenticator (2FA)">2FA Vault</button>
         <button id="user-guide-btn" type="button" class="quiet topbar-studio-pill" title="JalaDesk Built-In User Guide" data-tooltip="JalaDesk Guide">Guide</button>
-        <button id="cmd-palette-btn" type="button" class="quiet quick-opt-btn" title="Quick Switcher &amp; Command Palette (⌘K)" data-tooltip="Quick Switcher &amp; Command Palette (⌘K)">⌘K</button>
-        <button id="lock-workspace-btn" type="button" class="quiet quick-opt-btn" title="App Lock PIN &amp; Workspace Lock (⌃⌘L)" data-tooltip="Lock Workspace (⌃⌘L)">Lock</button>
+        <button id="cmd-palette-btn" type="button" class="quiet topbar-studio-pill quick-opt-btn" title="Quick Switcher &amp; Command Palette (⌘K)" data-tooltip="Quick Switcher &amp; Command Palette (⌘K)">⌘K</button>
+        <button id="lock-workspace-btn" type="button" class="quiet topbar-studio-pill quick-opt-btn" title="App Lock PIN &amp; Workspace Lock (⌃⌘L)" data-tooltip="Lock Workspace (⌃⌘L)">Lock</button>
         <div class="topbar-search" role="search">
           <input id="tree-search" type="search" placeholder="Search" aria-label="Search connections, folders, or hosts" autocomplete="off" maxlength="200">
           <details class="search-filter-menu">
@@ -123,8 +123,11 @@
             <li><button type="button" class="app-tree-row" data-app-action="templates"><span class="app-tree-icon">📋</span><span>Templates</span></button></li>
             <li><button type="button" class="app-tree-row" data-app-action="user-guide"><span class="app-tree-icon">📖</span><span>JalaDesk Guide</span></button></li>
             <li class="app-tree-group">
-              <details open>
-                <summary class="app-tree-row"><span class="app-tree-icon">📁</span><span>Default Settings</span></summary>
+              <div class="nav-group-header nav-subgroup-header">
+                <span class="nav-group-title">New Item</span>
+              </div>
+              <details class="app-tree-disclosure">
+                <summary class="app-tree-row app-tree-summary"><span class="app-tree-icon">📁</span><span>Connection Templates</span></summary>
                 <ul class="app-tree-children" role="list">
                   <li><button type="button" class="app-tree-row" data-default-plugin="Folder"><span class="app-tree-icon">📁</span><span>Folder</span></button></li>
                   <li><button type="button" class="app-tree-row" data-default-plugin="Remote Desktop"><span class="app-tree-icon">🖥</span><span>Remote Desktop</span></button></li>

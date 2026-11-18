@@ -31,6 +31,7 @@ import {
   executeRawHttp,
   expandSshKeyPath,
   exportEncryptedJvault,
+  hasGoogleDriveAppDataScope,
   hasValidEncryptionKey,
   importEncryptedJvault,
   resolveGoogleDesktopOAuthCredentials,
@@ -1067,6 +1068,229 @@ test('1-Click Google OAuth resolves custom -> env -> built-in credentials and si
     if (prevEnvSecret === undefined) delete process.env.JALADESK_GOOGLE_CLIENT_SECRET;
     else process.env.JALADESK_GOOGLE_CLIENT_SECRET = prevEnvSecret;
     await mockOneClickGoogle.close();
+    await rm(scratchDir, { recursive: true, force: true });
+  }
+});
+
+test('hasGoogleDriveAppDataScope validates exact whitespace-delimited drive.appdata scope token', () => {
+  assert.equal(hasGoogleDriveAppDataScope(undefined), false);
+  assert.equal(hasGoogleDriveAppDataScope(null), false);
+  assert.equal(hasGoogleDriveAppDataScope(''), false);
+  assert.equal(hasGoogleDriveAppDataScope('   '), false);
+  assert.equal(hasGoogleDriveAppDataScope('openid email profile'), false);
+  assert.equal(
+    hasGoogleDriveAppDataScope('openid https://www.googleapis.com/auth/drive.appdata.readonly email'),
+    false,
+  );
+  assert.equal(hasGoogleDriveAppDataScope('https://www.googleapis.com/auth/drive.appdata'), true);
+  assert.equal(
+    hasGoogleDriveAppDataScope('openid email\thttps://www.googleapis.com/auth/drive.appdata\nprofile'),
+    true,
+  );
+});
+
+test('Granular OAuth partial sign-in preserves bound state and Smart Merge Sync auto-upgrades drive.appdata consent', async () => {
+  const scratchDir = await mkdtemp(join(tmpdir(), 'jaladesk-csync-granular-'));
+  let grantAppDataOnNextOAuth = false;
+  let forceInsufficientScope403ForToken = '';
+  let latestIssuedToken = '';
+  let oauthSequence = 0;
+  let driveRequestCount = 0;
+  let storedDriveId = '';
+  let storedDrivePayload = '';
+  const observedAuthUrls: URL[] = [];
+  const observedCallbackBodies: string[] = [];
+
+  const mockGranularGoogle = await startLoopbackServer((req, res, body) => {
+    const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+
+    if (req.method === 'POST' && reqUrl.pathname === '/oauth/token') {
+      oauthSequence += 1;
+      latestIssuedToken = `ya29.granular-token-${oauthSequence}`;
+      const grantedScope = grantAppDataOnNextOAuth
+        ? 'openid email profile https://www.googleapis.com/auth/drive.appdata'
+        : 'openid email profile';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          access_token: latestIssuedToken,
+          refresh_token: `1//granular-refresh-${oauthSequence}`,
+          expires_in: 3600,
+          token_type: 'Bearer',
+          scope: grantedScope,
+        }),
+      );
+      return;
+    }
+
+    if (req.method === 'GET' && reqUrl.pathname === '/oauth/userinfo') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ email: 'rizkybachtiar7@gmail.com', name: 'Rizky Bachtiar' }));
+      return;
+    }
+
+    driveRequestCount += 1;
+    const authHeader = req.headers.authorization ?? '';
+    if (authHeader !== `Bearer ${latestIssuedToken}`) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 401, message: 'Invalid token' } }));
+      return;
+    }
+
+    if (
+      !grantAppDataOnNextOAuth ||
+      (forceInsufficientScope403ForToken && authHeader === `Bearer ${forceInsufficientScope403ForToken}`)
+    ) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: {
+            code: 403,
+            message: 'Request had insufficient authentication scopes.',
+            status: 'PERMISSION_DENIED',
+            details: [{ reason: 'ACCESS_TOKEN_SCOPE_INSUFFICIENT' }],
+            errors: [{ reason: 'insufficientPermissions' }],
+          },
+        }),
+      );
+      return;
+    }
+
+    if (req.method === 'GET' && reqUrl.pathname === '/drive/v3/files') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          files: storedDriveId
+            ? [{ id: storedDriveId, name: GOOGLE_DRIVE_PRIMARY_VAULT_FILE, modifiedTime: '2026-11-18T14:00:00Z' }]
+            : [],
+        }),
+      );
+      return;
+    }
+
+    if (req.method === 'POST' && reqUrl.pathname === '/upload/drive/v3/files') {
+      storedDriveId = 'granular-drive-vault-01';
+      const parts = body.split(/\r\n--[^\r\n]+/);
+      const mediaPart = parts.find((p) => p.includes('"jaladesk-encrypted-vault-v1"')) ?? '';
+      const jsonStart = mediaPart.indexOf('{');
+      storedDrivePayload = jsonStart >= 0 ? mediaPart.slice(jsonStart).trim() : '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id: storedDriveId }));
+      return;
+    }
+
+    if (req.method === 'GET' && reqUrl.pathname === `/drive/v3/files/${storedDriveId}`) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(storedDrivePayload);
+      return;
+    }
+
+    if (req.method === 'PATCH' && reqUrl.pathname === `/upload/drive/v3/files/${storedDriveId}`) {
+      storedDrivePayload = body;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id: storedDriveId }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  try {
+    const vault = createInMemoryVaultBridge({
+      hosts: [
+        {
+          id: 'h-mac-01',
+          name: 'Jakarta Core Bastion',
+          address: '10.88.1.10',
+          port: 22,
+          protocol: 'ssh',
+          updatedAtMs: 8000,
+        },
+      ],
+    });
+
+    const service = new DesktopCloudSyncService({
+      userDataDir: scratchDir,
+      vaultBridge: vault.bridge,
+      openExternal: async (authUrlStr) => {
+        const parsedAuth = new URL(authUrlStr);
+        observedAuthUrls.push(parsedAuth);
+        const cbUrl = new URL(parsedAuth.searchParams.get('redirect_uri') ?? '');
+        cbUrl.searchParams.set('code', `granular-code-${observedAuthUrls.length}`);
+        cbUrl.searchParams.set('state', parsedAuth.searchParams.get('state') ?? '');
+        cbUrl.searchParams.set(
+          'scope',
+          grantAppDataOnNextOAuth
+            ? 'openid email profile https://www.googleapis.com/auth/drive.appdata'
+            : 'openid email profile',
+        );
+        const cbRes = await executeRawHttp({ method: 'GET', url: cbUrl });
+        assert.equal(cbRes.statusCode, 200);
+        observedCallbackBodies.push(cbRes.body);
+      },
+    });
+
+    // 1. Partial granular sign-in (Drive checkbox unchecked) -> bound immediately with clear guidance, zero wasted Drive calls
+    grantAppDataOnNextOAuth = false;
+    const partialRes = await service.signInGoogle({
+      googleApiBaseUrl: mockGranularGoogle.baseUrl,
+      googleAuthEndpoint: `${mockGranularGoogle.baseUrl}/oauth/authorize`,
+      googleTokenEndpoint: `${mockGranularGoogle.baseUrl}/oauth/token`,
+      googleUserInfoEndpoint: `${mockGranularGoogle.baseUrl}/oauth/userinfo`,
+    });
+
+    assert.equal(partialRes.account.email, 'rizkybachtiar7@gmail.com');
+    assert.equal(partialRes.updatedConfig.isBound, true);
+    assert.equal(partialRes.updatedConfig.googleAccountEmail, 'rizkybachtiar7@gmail.com');
+    assert.equal(
+      partialRes.initialSyncError,
+      'Google Drive checkbox was left unchecked in your browser. Click "Smart Merge Sync" (or "Grant Drive Access") and tick "See, create, and delete its own configuration data in your Google Drive".',
+    );
+    assert.equal(partialRes.updatedConfig.lastSyncError, partialRes.initialSyncError);
+    assert.equal(driveRequestCount, 0, 'Must skip guaranteed-403 Drive HTTP request when scope is missing');
+    assert.equal(observedAuthUrls[0]?.searchParams.get('include_granted_scopes'), 'true');
+    assert.match(observedCallbackBodies[0] ?? '', /amber-note/);
+
+    // 2. Clicking Smart Merge Sync while STILL leaving checkbox unchecked throws actionable error and stays bound
+    await assert.rejects(
+      () => service.executeSync(undefined, 'smartMerge'),
+      (err: unknown) => {
+        assert.ok(err instanceof VaultCloudSyncError);
+        assert.equal(
+          err.message,
+          'Permission still unchecked: in the Google browser prompt, tick the box "See, create, and delete its own configuration data in your Google Drive" before clicking Continue.',
+        );
+        return true;
+      },
+    );
+    assert.equal(observedAuthUrls[1]?.searchParams.get('login_hint'), 'rizkybachtiar7@gmail.com');
+    assert.equal(observedAuthUrls[1]?.searchParams.get('include_granted_scopes'), 'true');
+    assert.equal(observedAuthUrls[1]?.searchParams.get('prompt'), 'consent');
+    const afterStillUnchecked = await service.getState();
+    assert.equal(afterStillUnchecked.config.isBound, true);
+    assert.match(afterStillUnchecked.config.lastSyncError, /Permission still unchecked/);
+
+    // 3. Clicking Smart Merge Sync and ticking Drive AppData checkbox upgrades token & completes smartMerge in 1 click!
+    grantAppDataOnNextOAuth = true;
+    const upgradedSync = await service.executeSync(undefined, 'smartMerge');
+    assert.equal(observedAuthUrls[2]?.searchParams.get('login_hint'), 'rizkybachtiar7@gmail.com');
+    assert.equal(observedAuthUrls[2]?.searchParams.get('include_granted_scopes'), 'true');
+    assert.equal(upgradedSync.connectionCount, 1);
+    assert.equal(upgradedSync.updatedConfig.isBound, true);
+    assert.equal(upgradedSync.updatedConfig.lastSyncError, '');
+    assert.ok(storedDrivePayload.includes(JALADESK_VAULT_FORMAT_ID));
+
+    // 4. Reactive HTTP 403 insufficientPermissions during executeSync (e.g. revoked permission) -> auto-upgrades & retries once!
+    forceInsufficientScope403ForToken = latestIssuedToken;
+    const recoveredFrom403 = await service.executeSync(undefined, 'smartMerge');
+    assert.equal(observedAuthUrls.length, 4, 'Should trigger incremental OAuth once on HTTP 403 insufficientPermissions');
+    assert.equal(observedAuthUrls[3]?.searchParams.get('login_hint'), 'rizkybachtiar7@gmail.com');
+    assert.equal(observedAuthUrls[3]?.searchParams.get('include_granted_scopes'), 'true');
+    assert.equal(recoveredFrom403.connectionCount, 1);
+    assert.equal(recoveredFrom403.updatedConfig.lastSyncError, '');
+  } finally {
+    await mockGranularGoogle.close();
     await rm(scratchDir, { recursive: true, force: true });
   }
 });

@@ -115,7 +115,9 @@ export type JalaStudioIconName =
   | 'server'
   | 'clock'
   | 'qr'
-  | 'archive';
+  | 'archive'
+  | 'chevron'
+  | 'command';
 
 type SvgShapeSpec = readonly [
   tag: 'path' | 'rect' | 'circle' | 'line' | 'polyline',
@@ -238,6 +240,12 @@ const ICON_SHAPES: Readonly<Record<JalaStudioIconName, readonly SvgShapeSpec[]>>
     ['path', { d: 'M3.2 5.6v7a1.2 1.2 0 0 0 1.2 1.2h7.2a1.2 1.2 0 0 0 1.2-1.2v-7' }],
     ['line', { x1: '6.2', y1: '8.4', x2: '9.8', y2: '8.4' }],
   ],
+  chevron: [
+    ['polyline', { points: '6 3.8 10.2 8 6 12.2' }],
+  ],
+  command: [
+    ['path', { d: 'M5.2 5.2V3.9a1.7 1.7 0 1 0-1.7 1.7h9a1.7 1.7 0 1 0-1.7-1.7v8.2a1.7 1.7 0 1 0 1.7-1.7h-9a1.7 1.7 0 1 0 1.7 1.7V5.2Z' }],
+  ],
 };
 
 export function jalaSvgIcon(
@@ -356,6 +364,95 @@ export function createJalaSegmentedBar<T extends string | number>(options: {
   };
 }
 
+export interface JalaToggleRowControl {
+  readonly root: HTMLElement;
+  readonly button: HTMLButtonElement;
+  getChecked: () => boolean;
+  setChecked: (checked: boolean, silent?: boolean) => void;
+  setDisabled: (disabled: boolean) => void;
+  setSubtitle: (subtitle: string) => void;
+}
+
+export function createJalaToggleRow(options: {
+  id?: string;
+  title: string;
+  subtitle: string;
+  initialChecked?: boolean;
+  onChange?: (checked: boolean) => void;
+  doc?: Document;
+}): JalaToggleRowControl {
+  const doc = options.doc ?? document;
+  let checked = Boolean(options.initialChecked);
+  let disabled = false;
+
+  const root = doc.createElement('div');
+  root.className = 'jala-toggle-row';
+
+  const copy = doc.createElement('div');
+  copy.className = 'jala-toggle-copy';
+
+  const titleEl = doc.createElement('span');
+  titleEl.className = 'jala-toggle-title';
+  titleEl.textContent = options.title;
+
+  const subEl = doc.createElement('span');
+  subEl.className = 'jala-toggle-subtitle';
+  subEl.textContent = options.subtitle;
+
+  copy.append(titleEl, subEl);
+
+  const button = doc.createElement('button');
+  button.type = 'button';
+  button.className = 'jala-switch';
+  button.setAttribute('role', 'switch');
+  button.setAttribute('aria-label', options.title);
+  if (options.id) button.id = options.id;
+
+  const thumb = doc.createElement('span');
+  thumb.className = 'jala-switch-thumb';
+  thumb.setAttribute('aria-hidden', 'true');
+  button.append(thumb);
+
+  const syncDom = () => {
+    button.setAttribute('aria-checked', checked ? 'true' : 'false');
+    button.dataset.checked = checked ? 'true' : 'false';
+    button.disabled = disabled;
+    root.dataset.checked = checked ? 'true' : 'false';
+    root.dataset.disabled = disabled ? 'true' : 'false';
+  };
+
+  const toggle = () => {
+    if (disabled) return;
+    checked = !checked;
+    syncDom();
+    options.onChange?.(checked);
+  };
+
+  button.onclick = () => toggle();
+  copy.onclick = () => toggle();
+
+  syncDom();
+  root.append(copy, button);
+
+  return {
+    root,
+    button,
+    getChecked: () => checked,
+    setChecked: (nextChecked: boolean, silent = true) => {
+      checked = Boolean(nextChecked);
+      syncDom();
+      if (!silent) options.onChange?.(checked);
+    },
+    setDisabled: (nextDisabled: boolean) => {
+      disabled = Boolean(nextDisabled);
+      syncDom();
+    },
+    setSubtitle: (subtitle: string) => {
+      subEl.textContent = subtitle;
+    },
+  };
+}
+
 export function defaultCloudSyncUiState(over: Partial<CloudSyncUiState> = {}): CloudSyncUiState {
   return {
     provider: 'googleDrive',
@@ -387,7 +484,7 @@ export function defaultCloudSyncUiState(over: Partial<CloudSyncUiState> = {}): C
 }
 
 function formatSyncTimestamp(ts: number | null): string {
-  if (!ts || !Number.isFinite(ts) || ts <= 0) return 'Never synced on this desktop';
+  if (!ts || !Number.isFinite(ts) || ts <= 0) return 'Not synced yet on this desktop';
   try {
     return `Last synced ${new Date(ts).toLocaleString('en-US', {
       month: 'short',
@@ -398,6 +495,26 @@ function formatSyncTimestamp(ts: number | null): string {
   } catch {
     return 'Synced recently';
   }
+}
+
+function isGoogleAppDataPermissionIssue(rawMessage: string | null | undefined): boolean {
+  if (!rawMessage) return false;
+  const lower = rawMessage.toLowerCase();
+  return (
+    lower.includes('appdata') ||
+    lower.includes('checkbox') ||
+    lower.includes('unchecked') ||
+    lower.includes('configuration data in your google drive') ||
+    lower.includes('insufficientpermissions') ||
+    lower.includes('insufficient authentication scopes') ||
+    (lower.includes('google drive') && (lower.includes('permission') || lower.includes('403') || lower.includes('scope')))
+  );
+}
+
+function accountInitial(email: string, name?: string): string {
+  const source = (name?.trim() || email.trim() || 'G');
+  const ch = source[0] ?? 'G';
+  return ch.toUpperCase();
 }
 
 function createFieldLabel(
@@ -421,6 +538,55 @@ function createFieldLabel(
   return label;
 }
 
+function createDisclosureSection(options: {
+  title: string;
+  badgeText?: string;
+  icon: JalaStudioIconName;
+  doc: Document;
+}): {
+  readonly details: HTMLDetailsElement;
+  readonly body: HTMLDivElement;
+} {
+  const { doc } = options;
+  const details = doc.createElement('details');
+  details.className = 'jala-studio-disclosure';
+
+  const summary = doc.createElement('summary');
+  summary.className = 'jala-disclosure-summary';
+
+  const left = doc.createElement('span');
+  left.className = 'jala-disclosure-lead';
+  left.append(jalaSvgIcon(options.icon, doc, 15));
+
+  const titleSpan = doc.createElement('span');
+  titleSpan.className = 'jala-disclosure-title';
+  titleSpan.textContent = options.title;
+  left.append(titleSpan);
+
+  const right = doc.createElement('span');
+  right.className = 'jala-disclosure-meta';
+
+  if (options.badgeText) {
+    const badge = doc.createElement('span');
+    badge.className = 'jala-disclosure-tag jala-mono';
+    badge.textContent = options.badgeText;
+    right.append(badge);
+  }
+
+  const chevron = doc.createElement('span');
+  chevron.className = 'jala-disclosure-chevron';
+  chevron.append(jalaSvgIcon('chevron', doc, 13));
+  right.append(chevron);
+
+  summary.append(left, right);
+
+  const body = doc.createElement('div');
+  body.className = 'jala-disclosure-body';
+
+  details.append(summary, body);
+  return { details, body };
+}
+
 export function createCloudSyncStudio(
   bridge: CloudSyncUiBridge,
   doc: Document = document,
@@ -429,13 +595,15 @@ export function createCloudSyncStudio(
   let busy = false;
   let lastTrigger: HTMLElement | null = null;
   let closingFlushed = false;
+  let transientTone: 'ok' | 'warn' | 'danger' | 'none' = 'none';
+  let transientMessage = '';
 
   const dialog = doc.createElement('dialog');
   dialog.id = 'jala-cloud-sync-dialog';
   dialog.className = 'jala-studio-dialog jala-cloud-sync-dialog';
   dialog.setAttribute('aria-labelledby', 'jala-cloud-sync-title');
 
-  // ---- Header (#0D141F studio header bar) ----
+  // ---- Header ----
   const header = doc.createElement('div');
   header.className = 'jala-studio-header';
 
@@ -444,7 +612,7 @@ export function createCloudSyncStudio(
 
   const badgeIcon = doc.createElement('div');
   badgeIcon.className = 'jala-studio-icon-badge';
-  badgeIcon.dataset.tone = 'gold';
+  badgeIcon.dataset.tone = 'blue';
   badgeIcon.append(jalaSvgIcon('cloud', doc, 18));
 
   const titleGroup = doc.createElement('div');
@@ -453,11 +621,11 @@ export function createCloudSyncStudio(
   const titleEl = doc.createElement('h2');
   titleEl.id = 'jala-cloud-sync-title';
   titleEl.className = 'jala-studio-title';
-  titleEl.textContent = 'Zero-Knowledge Cloud Sync & Backup';
+  titleEl.textContent = 'Cloud Sync';
 
   const subtitleEl = doc.createElement('p');
   subtitleEl.className = 'jala-studio-subtitle';
-  subtitleEl.textContent = 'Client-side AES-256-GCM vault sync compatible with JalaDesk Mobile';
+  subtitleEl.textContent = 'Zero-knowledge AES-256-GCM sync across Desktop & Mobile';
 
   titleGroup.append(titleEl, subtitleEl);
   headerLead.append(badgeIcon, titleGroup);
@@ -465,38 +633,26 @@ export function createCloudSyncStudio(
   const headerRight = doc.createElement('div');
   headerRight.className = 'jala-studio-header-actions';
 
-  const lastSyncBadge = doc.createElement('span');
-  lastSyncBadge.className = 'jala-status-pill';
-  lastSyncBadge.dataset.tone = 'neutral';
-  lastSyncBadge.textContent = 'Ready';
+  const headerStatusPill = doc.createElement('span');
+  headerStatusPill.id = 'jala-cloud-sync-status-pill';
+  headerStatusPill.className = 'jala-status-pill';
+  headerStatusPill.dataset.tone = 'neutral';
+  headerStatusPill.textContent = 'Unbound';
 
   const headerCloseBtn = doc.createElement('button');
   headerCloseBtn.type = 'button';
   headerCloseBtn.className = 'jala-icon-close-btn quiet';
-  headerCloseBtn.setAttribute('aria-label', 'Close Cloud Sync Studio');
+  headerCloseBtn.setAttribute('aria-label', 'Close Cloud Sync');
   headerCloseBtn.append(jalaSvgIcon('close', doc, 15));
 
-  headerRight.append(lastSyncBadge, headerCloseBtn);
+  headerRight.append(headerStatusPill, headerCloseBtn);
   header.append(headerLead, headerRight);
 
-  // ---- Scrollable Body (#141D29 studio surface) ----
+  // ---- Body ----
   const body = doc.createElement('div');
   body.className = 'jala-studio-body';
 
-  // Status / Feedback Banner
-  const feedbackBanner = doc.createElement('div');
-  feedbackBanner.className = 'jala-alert-banner';
-  feedbackBanner.setAttribute('role', 'status');
-  feedbackBanner.hidden = true;
-
-  // Section 1: Provider Segmented Bar (1-row guaranteed)
-  const providerSection = doc.createElement('section');
-  providerSection.className = 'jala-studio-section';
-
-  const providerHeading = doc.createElement('h3');
-  providerHeading.className = 'jala-section-heading';
-  providerHeading.textContent = 'Sync Transport Provider';
-
+  // 1-Row Provider Segmented Bar (sits cleanly below header with zero extra wrapper box)
   const providerBar = createJalaSegmentedBar<CloudSyncProviderId>({
     ariaLabel: 'Cloud Sync Provider',
     testId: 'cloud-sync-provider-bar',
@@ -510,141 +666,144 @@ export function createCloudSyncStudio(
     ],
     onChange: (nextProvider) => {
       state.provider = nextProvider;
+      setFeedback('none');
       updateProviderVisibility();
+      renderStatusAndCallout();
     },
   });
 
-  providerSection.append(providerHeading, providerBar.root);
+  // SINGLE Unified Status / Permission Callout (never duplicated!)
+  const unifiedCallout = doc.createElement('div');
+  unifiedCallout.id = 'jala-sync-warning-pill';
+  unifiedCallout.className = 'jala-unified-callout';
+  unifiedCallout.setAttribute('role', 'status');
+  unifiedCallout.hidden = true;
 
-  // ---- Provider Pane A: Google Drive ----
-  const googlePane = doc.createElement('section');
-  googlePane.className = 'jala-studio-section jala-provider-pane';
+  const calloutIconWrap = doc.createElement('span');
+  calloutIconWrap.className = 'jala-callout-icon';
+
+  const calloutContent = doc.createElement('div');
+  calloutContent.className = 'jala-callout-content';
+
+  const calloutTitle = doc.createElement('strong');
+  calloutTitle.className = 'jala-callout-title';
+
+  const calloutText = doc.createElement('p');
+  calloutText.className = 'jala-callout-text';
+
+  calloutContent.append(calloutTitle, calloutText);
+
+  const grantAccessSyncBtn = doc.createElement('button');
+  grantAccessSyncBtn.id = 'jala-gdrive-grant-sync-btn';
+  grantAccessSyncBtn.type = 'button';
+  grantAccessSyncBtn.className = 'jala-btn jala-btn-primary jala-callout-cta';
+  grantAccessSyncBtn.append(jalaSvgIcon('sync', doc, 14));
+  const grantAccessSyncLbl = doc.createElement('span');
+  grantAccessSyncLbl.textContent = 'Grant Access & Sync';
+  grantAccessSyncBtn.append(grantAccessSyncLbl);
+  grantAccessSyncBtn.hidden = true;
+
+  unifiedCallout.append(calloutIconWrap, calloutContent, grantAccessSyncBtn);
+
+  // ---- Provider Surface A: Google Drive (flat studio surface, zero card-in-card!) ----
+  const googlePane = doc.createElement('div');
+  googlePane.className = 'jala-provider-surface';
   googlePane.dataset.provider = 'googleDrive';
 
-  const googleTopRow = doc.createElement('div');
-  googleTopRow.className = 'jala-section-row-between';
+  // Unbound Hero View
+  const googleUnboundHero = doc.createElement('div');
+  googleUnboundHero.className = 'cs-gdrive-hero';
 
-  const googleTitle = doc.createElement('h3');
-  googleTitle.className = 'jala-section-heading';
-  googleTitle.textContent = 'Google Drive (AppData)';
+  const heroEmblem = doc.createElement('div');
+  heroEmblem.className = 'cs-gdrive-emblem';
+  heroEmblem.append(jalaSvgIcon('cloud', doc, 22));
 
-  const accountPill = doc.createElement('div');
-  accountPill.id = 'jala-gdrive-account-pill';
-  accountPill.className = 'jala-status-pill';
-  accountPill.dataset.tone = 'neutral';
-  accountPill.textContent = 'Not connected';
+  const heroCopy = doc.createElement('div');
+  heroCopy.className = 'cs-gdrive-hero-copy';
 
-  googleTopRow.append(googleTitle, accountPill);
+  const heroHeading = doc.createElement('strong');
+  heroHeading.className = 'cs-gdrive-hero-title';
+  heroHeading.textContent = 'Private Google Drive AppData Vault';
 
-  // Clean 1-Click Hero Card matching JalaDesk Mobile v1.16
-  const googleHeroCard = doc.createElement('div');
-  googleHeroCard.className = 'cs-google-hero-card';
+  const heroDesc = doc.createElement('p');
+  heroDesc.className = 'cs-gdrive-hero-desc';
+  heroDesc.textContent =
+    'Your connections, credentials, and 2FA tokens are encrypted locally before upload and sync automatically with JalaDesk Mobile.';
 
-  const googleHeroDesc = doc.createElement('p');
-  googleHeroDesc.className = 'cs-google-hero-desc';
-  googleHeroDesc.textContent =
-    'Encrypted vault stored in your private Google Drive AppData folder — syncs automatically across Mobile & Desktop.';
-
-  const googleAuthBar = doc.createElement('div');
-  googleAuthBar.className = 'jala-inline-actions';
+  heroCopy.append(heroHeading, heroDesc);
 
   const signInGoogleBtn = doc.createElement('button');
   signInGoogleBtn.id = 'jala-gdrive-signin-btn';
   signInGoogleBtn.type = 'button';
   signInGoogleBtn.className = 'jala-btn jala-btn-primary cs-google-signin-btn';
-  signInGoogleBtn.append(jalaSvgIcon('cloud', doc, 16));
+  signInGoogleBtn.append(jalaSvgIcon('cloud', doc, 15));
   const signInGoogleLabel = doc.createElement('span');
   signInGoogleLabel.textContent = 'Sign in with Google';
   signInGoogleBtn.append(signInGoogleLabel);
 
+  googleUnboundHero.append(heroEmblem, heroCopy, signInGoogleBtn);
+
+  // Bound Account Identity Bar
+  const accountIdentityBar = doc.createElement('div');
+  accountIdentityBar.className = 'cs-account-bar';
+  accountIdentityBar.hidden = true;
+
+  const accountLead = doc.createElement('div');
+  accountLead.className = 'cs-account-lead';
+
+  const avatarEl = doc.createElement('div');
+  avatarEl.className = 'cs-account-avatar';
+  avatarEl.textContent = 'G';
+
+  const accountMeta = doc.createElement('div');
+  accountMeta.className = 'cs-account-meta';
+
+  const accountTitleRow = doc.createElement('div');
+  accountTitleRow.className = 'cs-account-title-row';
+
+  const accountEmailEl = doc.createElement('strong');
+  accountEmailEl.className = 'cs-account-email';
+
+  const accountBoundBadge = doc.createElement('span');
+  accountBoundBadge.id = 'jala-gdrive-account-pill';
+  accountBoundBadge.className = 'jala-status-pill jala-status-pill-compact';
+  accountBoundBadge.dataset.tone = 'ok';
+  accountBoundBadge.textContent = 'Bound';
+
+  accountTitleRow.append(accountEmailEl, accountBoundBadge);
+
+  const accountSubtitleEl = doc.createElement('span');
+  accountSubtitleEl.className = 'cs-account-sub';
+  accountSubtitleEl.textContent = 'Google Drive AppData';
+
+  accountMeta.append(accountTitleRow, accountSubtitleEl);
+  accountLead.append(avatarEl, accountMeta);
+
+  const accountActions = doc.createElement('div');
+  accountActions.className = 'cs-account-actions';
+
+  const reconnectGoogleBtn = doc.createElement('button');
+  reconnectGoogleBtn.id = 'jala-gdrive-reconnect-btn';
+  reconnectGoogleBtn.type = 'button';
+  reconnectGoogleBtn.className = 'jala-btn jala-btn-compact quiet';
+  reconnectGoogleBtn.textContent = 'Reconnect';
+
   const unbindGoogleBtn = doc.createElement('button');
   unbindGoogleBtn.id = 'jala-gdrive-unbind-btn';
   unbindGoogleBtn.type = 'button';
-  unbindGoogleBtn.className = 'jala-btn jala-btn-danger-outline quiet';
-  unbindGoogleBtn.textContent = 'Unbind Account';
-  unbindGoogleBtn.hidden = true;
+  unbindGoogleBtn.className = 'jala-btn jala-btn-compact jala-btn-subtle-danger quiet';
+  unbindGoogleBtn.textContent = 'Disconnect';
 
-  googleAuthBar.append(signInGoogleBtn, unbindGoogleBtn);
-  googleHeroCard.append(googleHeroDesc, googleAuthBar);
+  accountActions.append(reconnectGoogleBtn, unbindGoogleBtn);
+  accountIdentityBar.append(accountLead, accountActions);
 
-  // Actionable warning pill when lastSyncError is present (e.g. Drive API HTTP 403)
-  const syncErrorPill = doc.createElement('div');
-  syncErrorPill.id = 'jala-sync-warning-pill';
-  syncErrorPill.className = 'jala-warning-callout';
-  syncErrorPill.setAttribute('role', 'alert');
-  syncErrorPill.hidden = true;
+  googlePane.append(googleUnboundHero, accountIdentityBar);
 
-  // Optional Custom E2EE Passphrase toggle (off by default = Account-Bound key!)
-  const customPassToggleWrap = doc.createElement('label');
-  customPassToggleWrap.className = 'jala-switch-row check';
-  const customPassCheckbox = doc.createElement('input');
-  customPassCheckbox.id = 'jala-gdrive-custom-pass-toggle';
-  customPassCheckbox.type = 'checkbox';
-  const customPassText = doc.createElement('span');
-  customPassText.textContent = 'Use Custom E2EE Passphrase instead of automatic Account-Bound key';
-  customPassToggleWrap.append(customPassCheckbox, customPassText);
-
-  const keyDerivationNote = doc.createElement('p');
-  keyDerivationNote.className = 'jala-helper-note';
-
-  // Collapsed, unobtrusive Enterprise OAuth Override at the bottom so normal users never touch OAuth IDs
-  const advancedDisclosure = doc.createElement('details');
-  advancedDisclosure.className = 'cs-advanced-disclosure';
-
-  const advancedSummary = doc.createElement('summary');
-  advancedSummary.className = 'cs-advanced-summary';
-  advancedSummary.textContent = 'Custom Enterprise OAuth App (Optional)';
-
-  const advancedBody = doc.createElement('div');
-  advancedBody.className = 'cs-advanced-body';
-
-  const advancedNote = doc.createElement('p');
-  advancedNote.className = 'jala-helper-note';
-  advancedNote.textContent =
-    'Leave blank for standard 1-click Google Sign-In. IT administrators can optionally override the built-in OAuth app with a custom Google Cloud Desktop Client ID.';
-
-  const oauthClientIdInput = doc.createElement('input');
-  oauthClientIdInput.id = 'jala-gdrive-client-id';
-  oauthClientIdInput.type = 'text';
-  oauthClientIdInput.className = 'jala-input jala-mono';
-  oauthClientIdInput.placeholder = 'Optional custom Client ID (*.apps.googleusercontent.com)';
-  oauthClientIdInput.autocomplete = 'off';
-
-  const oauthClientSecretInput = doc.createElement('input');
-  oauthClientSecretInput.id = 'jala-gdrive-client-secret';
-  oauthClientSecretInput.type = 'password';
-  oauthClientSecretInput.className = 'jala-input jala-mono';
-  oauthClientSecretInput.placeholder = 'Optional custom Client Secret';
-  oauthClientSecretInput.autocomplete = 'off';
-
-  const oauthGrid = doc.createElement('div');
-  oauthGrid.className = 'jala-form-grid-2';
-  oauthGrid.append(
-    createFieldLabel('Custom OAuth Client ID', oauthClientIdInput, doc, 'optional'),
-    createFieldLabel('Custom Client Secret', oauthClientSecretInput, doc, 'optional'),
-  );
-
-  advancedBody.append(advancedNote, oauthGrid);
-  advancedDisclosure.append(advancedSummary, advancedBody);
-
-  googlePane.append(
-    googleTopRow,
-    googleHeroCard,
-    syncErrorPill,
-    customPassToggleWrap,
-    keyDerivationNote,
-    advancedDisclosure,
-  );
-
-  // ---- Provider Pane B: Private SFTP ----
-  const sftpPane = doc.createElement('section');
-  sftpPane.className = 'jala-studio-section jala-provider-pane';
+  // ---- Provider Surface B: Private SFTP ----
+  const sftpPane = doc.createElement('div');
+  sftpPane.className = 'jala-provider-surface';
   sftpPane.dataset.provider = 'sftp';
   sftpPane.hidden = true;
-
-  const sftpTitle = doc.createElement('h3');
-  sftpTitle.className = 'jala-section-heading';
-  sftpTitle.textContent = 'Private SFTP Vault Storage';
 
   const sftpHostInput = doc.createElement('input');
   sftpHostInput.id = 'jala-sftp-host';
@@ -670,7 +829,7 @@ export function createCloudSyncStudio(
   sftpPassInput.id = 'jala-sftp-password';
   sftpPassInput.type = 'password';
   sftpPassInput.className = 'jala-input';
-  sftpPassInput.placeholder = 'SSH password (optional if using key)';
+  sftpPassInput.placeholder = 'Optional if using SSH key';
 
   const sftpKeyPathInput = doc.createElement('input');
   sftpKeyPathInput.id = 'jala-sftp-key-path';
@@ -705,17 +864,13 @@ export function createCloudSyncStudio(
     createFieldLabel('Remote Envelope Path', sftpRemotePathInput, doc),
   );
 
-  sftpPane.append(sftpTitle, sftpHostPortRow, sftpAuthRow, sftpPathRow);
+  sftpPane.append(sftpHostPortRow, sftpAuthRow, sftpPathRow);
 
-  // ---- Provider Pane C: WebDAV ----
-  const webdavPane = doc.createElement('section');
-  webdavPane.className = 'jala-studio-section jala-provider-pane';
+  // ---- Provider Surface C: WebDAV ----
+  const webdavPane = doc.createElement('div');
+  webdavPane.className = 'jala-provider-surface';
   webdavPane.dataset.provider = 'webdav';
   webdavPane.hidden = true;
-
-  const webdavTitle = doc.createElement('h3');
-  webdavTitle.className = 'jala-section-heading';
-  webdavTitle.textContent = 'WebDAV HTTPS Endpoint';
 
   const webdavUrlInput = doc.createElement('input');
   webdavUrlInput.id = 'jala-webdav-url';
@@ -743,20 +898,15 @@ export function createCloudSyncStudio(
   );
 
   webdavPane.append(
-    webdavTitle,
-    createFieldLabel('WebDAV File URL', webdavUrlInput, doc),
+    createFieldLabel('WebDAV HTTPS Endpoint URL', webdavUrlInput, doc),
     webdavAuthGrid,
   );
 
-  // ---- Provider Pane D: GitHub Gist ----
-  const gistPane = doc.createElement('section');
-  gistPane.className = 'jala-studio-section jala-provider-pane';
+  // ---- Provider Surface D: GitHub Gist ----
+  const gistPane = doc.createElement('div');
+  gistPane.className = 'jala-provider-surface';
   gistPane.dataset.provider = 'githubGist';
   gistPane.hidden = true;
-
-  const gistTitle = doc.createElement('h3');
-  gistTitle.className = 'jala-section-heading';
-  gistTitle.textContent = 'GitHub Secret Gist Transport';
 
   const githubTokenInput = doc.createElement('input');
   githubTokenInput.id = 'jala-gist-token';
@@ -784,18 +934,35 @@ export function createCloudSyncStudio(
   );
 
   gistPane.append(
-    gistTitle,
     createFieldLabel('Personal Access Token (gist scope)', githubTokenInput, doc),
     gistMetaGrid,
   );
 
-  // ---- Shared E2EE Passphrase & Auto-Sync Controls ----
-  const securitySection = doc.createElement('section');
-  securitySection.className = 'jala-studio-section';
+  // ---- Hairline + Precision Toggle Switch Rows ----
+  const dividerPrimary = doc.createElement('hr');
+  dividerPrimary.className = 'jala-hairline';
 
-  const securityHeading = doc.createElement('h3');
-  securityHeading.className = 'jala-section-heading';
-  securityHeading.textContent = 'Zero-Knowledge Encryption & Schedule';
+  const togglesStack = doc.createElement('div');
+  togglesStack.className = 'jala-toggles-stack';
+
+  const autoSyncToggle = createJalaToggleRow({
+    id: 'jala-sync-autosync',
+    title: 'Automatic Background Sync',
+    subtitle: 'Sync encrypted vault updates automatically when workspace changes are saved',
+    initialChecked: true,
+    doc,
+  });
+
+  const customPassToggle = createJalaToggleRow({
+    id: 'jala-gdrive-custom-pass-toggle',
+    title: 'Custom E2EE Passphrase',
+    subtitle: 'Automatic Google account-bound AES-256-GCM key active (matches Mobile seamlessly)',
+    initialChecked: false,
+    doc,
+    onChange: () => {
+      updateProviderVisibility();
+    },
+  });
 
   const syncPassphraseInput = doc.createElement('input');
   syncPassphraseInput.id = 'jala-sync-passphrase';
@@ -808,61 +975,87 @@ export function createCloudSyncStudio(
     syncPassphraseInput,
     doc,
   );
+  syncPassphraseField.classList.add('jala-passphrase-reveal');
 
-  const autoSyncWrap = doc.createElement('label');
-  autoSyncWrap.className = 'jala-switch-row check';
-  const autoSyncCheckbox = doc.createElement('input');
-  autoSyncCheckbox.id = 'jala-sync-autosync';
-  autoSyncCheckbox.type = 'checkbox';
-  const autoSyncText = doc.createElement('span');
-  autoSyncText.textContent = 'Automatically sync vault changes in the background';
-  autoSyncWrap.append(autoSyncCheckbox, autoSyncText);
+  togglesStack.append(autoSyncToggle.root, customPassToggle.root, syncPassphraseField);
 
-  securitySection.append(securityHeading, syncPassphraseField, autoSyncWrap);
+  // ---- Hairline + Sleek Collapsible Disclosures ----
+  const dividerDisclosures = doc.createElement('hr');
+  dividerDisclosures.className = 'jala-hairline';
 
-  // ---- Portable .jvault Encrypted Offline Backup Section ----
-  const jvaultSection = doc.createElement('section');
-  jvaultSection.className = 'jala-studio-section jala-jvault-section';
+  const disclosuresGroup = doc.createElement('div');
+  disclosuresGroup.className = 'jala-disclosures-group';
 
-  const jvaultHeaderRow = doc.createElement('div');
-  jvaultHeaderRow.className = 'jala-section-row-between';
+  // Disclosure 1: Custom Enterprise OAuth App
+  const enterpriseDisclosure = createDisclosureSection({
+    title: 'Custom Enterprise OAuth App',
+    badgeText: 'Optional',
+    icon: 'shield',
+    doc,
+  });
 
-  const jvaultHeading = doc.createElement('h3');
-  jvaultHeading.className = 'jala-section-heading';
-  jvaultHeading.textContent = 'Portable .jvault Encrypted Backup';
+  const advancedNote = doc.createElement('p');
+  advancedNote.className = 'jala-helper-note';
+  advancedNote.textContent =
+    'Leave blank for standard 1-click Google Sign-In. Organizations with restricted OAuth policies can specify a custom Desktop Client ID.';
 
-  const jvaultExtBadge = doc.createElement('span');
-  jvaultExtBadge.className = 'jala-status-pill jala-mono';
-  jvaultExtBadge.dataset.tone = 'neutral';
-  jvaultExtBadge.textContent = '.jvault';
-  jvaultHeaderRow.append(jvaultHeading, jvaultExtBadge);
+  const oauthClientIdInput = doc.createElement('input');
+  oauthClientIdInput.id = 'jala-gdrive-client-id';
+  oauthClientIdInput.type = 'text';
+  oauthClientIdInput.className = 'jala-input jala-mono';
+  oauthClientIdInput.placeholder = 'Custom Client ID (*.apps.googleusercontent.com)';
+  oauthClientIdInput.autocomplete = 'off';
+
+  const oauthClientSecretInput = doc.createElement('input');
+  oauthClientSecretInput.id = 'jala-gdrive-client-secret';
+  oauthClientSecretInput.type = 'password';
+  oauthClientSecretInput.className = 'jala-input jala-mono';
+  oauthClientSecretInput.placeholder = 'Custom Client Secret';
+  oauthClientSecretInput.autocomplete = 'off';
+
+  const oauthGrid = doc.createElement('div');
+  oauthGrid.className = 'jala-form-grid-2';
+  oauthGrid.append(
+    createFieldLabel('OAuth Client ID', oauthClientIdInput, doc),
+    createFieldLabel('Client Secret', oauthClientSecretInput, doc, 'optional'),
+  );
+
+  enterpriseDisclosure.body.append(advancedNote, oauthGrid);
+
+  // Disclosure 2: Portable .jvault Backup Archive
+  const jvaultDisclosure = createDisclosureSection({
+    title: 'Portable .jvault Backup Archive',
+    badgeText: '.jvault',
+    icon: 'archive',
+    doc,
+  });
 
   const jvaultDesc = doc.createElement('p');
   jvaultDesc.className = 'jala-helper-note';
   jvaultDesc.textContent =
-    'Export or restore air-gapped AES-256-GCM .jvault snapshots across JalaDesk Desktop and Mobile.';
+    'Export or restore air-gapped AES-256-GCM snapshots compatible with JalaDesk Mobile and Desktop.';
 
   const jvaultPassInput = doc.createElement('input');
   jvaultPassInput.id = 'jala-jvault-passphrase';
   jvaultPassInput.type = 'password';
   jvaultPassInput.className = 'jala-input';
-  jvaultPassInput.placeholder = 'Archive passphrase (minimum 4 characters)';
+  jvaultPassInput.placeholder = 'Archive passphrase (min. 4 chars)';
 
   const jvaultModeBar = createJalaSegmentedBar<JvaultImportMode>({
-    ariaLabel: 'Backup Import Mode',
+    ariaLabel: 'Backup Restore Strategy',
     testId: 'jvault-import-mode-bar',
     doc,
     initialValue: 'merge',
     items: [
-      { value: 'merge', label: 'Import: Smart Merge', icon: 'sync' },
-      { value: 'replace', label: 'Import: Replace Local', icon: 'archive' },
+      { value: 'merge', label: 'Smart Merge' },
+      { value: 'replace', label: 'Replace Local' },
     ],
   });
 
   const jvaultGrid = doc.createElement('div');
-  jvaultGrid.className = 'jala-form-grid-2';
+  jvaultGrid.className = 'jala-form-grid-2 jala-jvault-grid';
   jvaultGrid.append(
-    createFieldLabel('Backup Archive Passphrase', jvaultPassInput, doc),
+    createFieldLabel('Archive Passphrase', jvaultPassInput, doc),
     createFieldLabel('Restore Strategy', jvaultModeBar.root, doc),
   );
 
@@ -888,20 +1081,24 @@ export function createCloudSyncStudio(
   importJvaultBtn.append(importLbl);
 
   jvaultBtnRow.append(exportJvaultBtn, importJvaultBtn);
-  jvaultSection.append(jvaultHeaderRow, jvaultDesc, jvaultGrid, jvaultBtnRow);
+  jvaultDisclosure.body.append(jvaultDesc, jvaultGrid, jvaultBtnRow);
+
+  disclosuresGroup.append(enterpriseDisclosure.details, jvaultDisclosure.details);
 
   body.append(
-    feedbackBanner,
-    providerSection,
+    providerBar.root,
+    unifiedCallout,
     googlePane,
     sftpPane,
     webdavPane,
     gistPane,
-    securitySection,
-    jvaultSection,
+    dividerPrimary,
+    togglesStack,
+    dividerDisclosures,
+    disclosuresGroup,
   );
 
-  // ---- Separated #0A1018 Studio Footer ----
+  // ---- Separated Footer Bar ----
   const footer = doc.createElement('div');
   footer.className = 'jala-studio-footer';
 
@@ -952,25 +1149,19 @@ export function createCloudSyncStudio(
   dialog.append(header, body, footer);
 
   function setFeedback(tone: 'ok' | 'warn' | 'danger' | 'none', message = ''): void {
-    if (tone === 'none' || !message.trim()) {
-      feedbackBanner.hidden = true;
-      feedbackBanner.textContent = '';
-      delete feedbackBanner.dataset.tone;
-      return;
-    }
-    feedbackBanner.hidden = false;
-    feedbackBanner.dataset.tone = tone;
-    feedbackBanner.textContent = message;
+    transientTone = tone;
+    transientMessage = tone === 'none' ? '' : message.trim();
+    renderStatusAndCallout();
   }
 
   function collectDraft(): CloudSyncDraftPatch {
     const parsedPort = Number.parseInt(sftpPortInput.value.trim(), 10);
     return {
       provider: providerBar.getValue(),
-      autoSync: autoSyncCheckbox.checked,
+      autoSync: autoSyncToggle.getChecked(),
       oauthClientId: oauthClientIdInput.value.trim(),
       oauthClientSecret: oauthClientSecretInput.value.trim(),
-      useCustomPassphrase: customPassCheckbox.checked,
+      useCustomPassphrase: customPassToggle.getChecked(),
       syncPassphrase: syncPassphraseInput.value,
       sftpHost: sftpHostInput.value.trim(),
       sftpPort: Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : 22,
@@ -994,60 +1185,121 @@ export function createCloudSyncStudio(
     webdavPane.hidden = activeProvider !== 'webdav';
     gistPane.hidden = activeProvider !== 'githubGist';
 
-    const needsCustomPass =
-      activeProvider !== 'googleDrive' || customPassCheckbox.checked;
-    syncPassphraseField.hidden = !needsCustomPass;
+    customPassToggle.root.hidden = activeProvider !== 'googleDrive';
+    enterpriseDisclosure.details.hidden = activeProvider !== 'googleDrive';
+
+    const useCustomPass = customPassToggle.getChecked();
+    const showPassphraseField = activeProvider !== 'googleDrive' || useCustomPass;
+    syncPassphraseField.hidden = !showPassphraseField;
 
     if (activeProvider === 'googleDrive') {
-      keyDerivationNote.textContent = customPassCheckbox.checked
-        ? 'Custom E2EE Passphrase active: both Desktop and Mobile must enter the exact same passphrase.'
-        : 'Automatic Account-Bound AES-256-GCM key active: matches JalaDesk Mobile seamlessly with zero extra passphrase.';
+      customPassToggle.setSubtitle(
+        useCustomPass
+          ? 'Custom passphrase enabled — enter the exact same secret on Mobile and Desktop'
+          : 'Automatic Google account-bound AES-256-GCM key active (matches Mobile seamlessly)',
+      );
     }
   }
 
-  function renderBoundState(): void {
+  function renderStatusAndCallout(): void {
+    const activeProvider = providerBar.getValue();
     const email = state.googleAccountEmail.trim();
     const isBound = Boolean(state.isBound && email);
+    const persistedErr = state.lastSyncError?.trim() ?? '';
+
+    // 1. Account Identity vs Unbound Hero on Google Drive
+    googleUnboundHero.hidden = isBound;
+    accountIdentityBar.hidden = !isBound;
 
     if (isBound) {
-      accountPill.dataset.tone = 'ok';
-      accountPill.textContent = `Connected \u2022 ${email}`;
-      signInGoogleLabel.textContent = 'Reconnect Google Account';
-      unbindGoogleBtn.hidden = false;
-    } else {
-      accountPill.dataset.tone = 'neutral';
-      accountPill.textContent = 'Not connected';
-      signInGoogleLabel.textContent = 'Sign in with Google';
-      unbindGoogleBtn.hidden = true;
+      avatarEl.textContent = accountInitial(email, state.googleAccountName);
+      accountEmailEl.textContent = email;
+      const syncMeta = state.lastSyncSummary?.trim() || formatSyncTimestamp(state.lastSyncAtMs);
+      accountSubtitleEl.textContent = `Google Drive AppData \u00b7 ${syncMeta}`;
     }
 
-    if (state.lastSyncError && state.lastSyncError.trim().length > 0) {
-      syncErrorPill.hidden = false;
-      syncErrorPill.textContent = isBound
-        ? `Account remains bound (${email}). Last sync warning: ${state.lastSyncError}`
-        : `Sync error: ${state.lastSyncError}`;
+    // 2. Header Status Pill (Synced emerald / Action Needed amber / Bound emerald / Unbound slate)
+    const fullStatusDetail = state.lastSyncSummary?.trim() || formatSyncTimestamp(state.lastSyncAtMs);
+    headerStatusPill.title = fullStatusDetail;
+    if (persistedErr.length > 0) {
+      headerStatusPill.dataset.tone = 'warn';
+      headerStatusPill.textContent = 'Action Needed';
+    } else if (state.lastSyncAtMs && state.lastSyncAtMs > 0) {
+      headerStatusPill.dataset.tone = 'ok';
+      headerStatusPill.textContent = 'Synced';
+    } else if (activeProvider === 'googleDrive' && isBound) {
+      headerStatusPill.dataset.tone = 'ok';
+      headerStatusPill.textContent = 'Bound';
+    } else if (activeProvider !== 'googleDrive') {
+      headerStatusPill.dataset.tone = 'neutral';
+      headerStatusPill.textContent = 'Configured';
     } else {
-      syncErrorPill.hidden = true;
-      syncErrorPill.textContent = '';
+      headerStatusPill.dataset.tone = 'neutral';
+      headerStatusPill.textContent = 'Unbound';
     }
 
-    lastSyncBadge.textContent = state.lastSyncSummary?.trim()
-      ? state.lastSyncSummary
-      : formatSyncTimestamp(state.lastSyncAtMs);
-    lastSyncBadge.dataset.tone = state.lastSyncError
-      ? 'warn'
-      : state.lastSyncAtMs
-        ? 'ok'
-        : 'neutral';
+    // 3. SINGLE Unified Callout (never duplicated!)
+    // Priority: active transient message (unless it's an AppData permission message, which gets the rich permission callout) -> persisted lastSyncError.
+    const candidateProblem =
+      transientTone === 'warn' || transientTone === 'danger'
+        ? transientMessage
+        : transientTone === 'none'
+          ? persistedErr
+          : '';
+
+    if (activeProvider === 'googleDrive' && isGoogleAppDataPermissionIssue(candidateProblem)) {
+      unifiedCallout.hidden = false;
+      unifiedCallout.dataset.tone = 'warn';
+      calloutIconWrap.replaceChildren(jalaSvgIcon('alert', doc, 16));
+      calloutTitle.hidden = false;
+      calloutTitle.textContent = 'Google Drive AppData permission required';
+      calloutText.textContent =
+        'In your browser, tick "See, create, and delete its own configuration data in your Google Drive" and click Continue.';
+      grantAccessSyncBtn.hidden = false;
+      return;
+    }
+
+    grantAccessSyncBtn.hidden = true;
+
+    if (transientTone !== 'none' && transientMessage.length > 0) {
+      unifiedCallout.hidden = false;
+      unifiedCallout.dataset.tone = transientTone;
+      const iconName: JalaStudioIconName =
+        transientTone === 'ok' ? 'check' : transientTone === 'warn' ? 'sync' : 'alert';
+      calloutIconWrap.replaceChildren(jalaSvgIcon(iconName, doc, 16));
+      calloutTitle.hidden = true;
+      calloutTitle.textContent = '';
+      calloutText.textContent = transientMessage;
+      return;
+    }
+
+    if (persistedErr.length > 0 && (activeProvider === state.provider || activeProvider === 'googleDrive')) {
+      unifiedCallout.hidden = false;
+      unifiedCallout.dataset.tone = 'warn';
+      calloutIconWrap.replaceChildren(jalaSvgIcon('alert', doc, 16));
+      calloutTitle.hidden = false;
+      calloutTitle.textContent = 'Sync attention needed';
+      calloutText.textContent = persistedErr;
+      return;
+    }
+
+    unifiedCallout.hidden = true;
+    delete unifiedCallout.dataset.tone;
+    calloutTitle.hidden = true;
+    calloutTitle.textContent = '';
+    calloutText.textContent = '';
   }
 
   function applyStateToInputs(incoming: Partial<CloudSyncUiState>): void {
     state = defaultCloudSyncUiState({ ...state, ...incoming });
     providerBar.setValue(state.provider, true);
-    autoSyncCheckbox.checked = state.autoSync;
+    autoSyncToggle.setChecked(state.autoSync, true);
     oauthClientIdInput.value = state.oauthClientId;
     oauthClientSecretInput.value = state.oauthClientSecret;
-    customPassCheckbox.checked = state.useCustomPassphrase;
+    if (state.oauthClientId.trim().length > 0) {
+      enterpriseDisclosure.details.open = true;
+    }
+    customPassToggle.setChecked(state.useCustomPassphrase, true);
     syncPassphraseInput.value = state.syncPassphrase;
     sftpHostInput.value = state.sftpHost;
     sftpPortInput.value = String(state.sftpPort || 22);
@@ -1062,15 +1314,19 @@ export function createCloudSyncStudio(
     githubGistIdInput.value = state.githubGistId;
     githubFilenameInput.value = state.githubFilename || 'jaladesk_vault_sync.jdesk';
     updateProviderVisibility();
-    renderBoundState();
+    renderStatusAndCallout();
   }
 
   function setBusyState(nextBusy: boolean): void {
     busy = nextBusy;
     providerBar.setDisabled(nextBusy);
     jvaultModeBar.setDisabled(nextBusy);
+    autoSyncToggle.setDisabled(nextBusy);
+    customPassToggle.setDisabled(nextBusy);
     signInGoogleBtn.disabled = nextBusy;
+    reconnectGoogleBtn.disabled = nextBusy;
     unbindGoogleBtn.disabled = nextBusy;
+    grantAccessSyncBtn.disabled = nextBusy;
     pullBtn.disabled = nextBusy;
     forcePushBtn.disabled = nextBusy;
     smartMergeBtn.disabled = nextBusy;
@@ -1105,11 +1361,7 @@ export function createCloudSyncStudio(
     return null;
   }
 
-  customPassCheckbox.onchange = () => {
-    updateProviderVisibility();
-  };
-
-  signInGoogleBtn.onclick = async () => {
+  async function triggerGoogleSignIn(): Promise<void> {
     if (busy) return;
     const draft = collectDraft();
     if (draft.useCustomPassphrase && (draft.syncPassphrase?.trim().length ?? 0) < 4) {
@@ -1133,17 +1385,22 @@ export function createCloudSyncStudio(
       } else {
         await refresh();
       }
-      if (res.ok) {
+      if (res.ok && !res.error && !state.lastSyncError) {
         setFeedback(
           'ok',
           res.message ||
-            `Google Drive bound to ${state.googleAccountEmail || 'your account'} and synchronized.`,
+            `Connected to ${state.googleAccountEmail || 'Google Drive'} and synchronized.`,
         );
         await bridge.onSyncApplied?.(res);
+      } else if (res.ok) {
+        setFeedback(
+          'warn',
+          res.error || state.lastSyncError || res.message || 'Action needed to finish Google Drive sync.',
+        );
       } else {
         setFeedback(
           state.isBound ? 'warn' : 'danger',
-          res.error || res.message || 'Google sign-in or initial sync reported an issue.',
+          res.error || state.lastSyncError || res.message || 'Google sign-in or initial sync reported an issue.',
         );
       }
     } catch (err) {
@@ -1151,6 +1408,22 @@ export function createCloudSyncStudio(
       setFeedback('danger', `Google sign-in failed: ${msg}`);
     } finally {
       setBusyState(false);
+    }
+  }
+
+  signInGoogleBtn.onclick = () => {
+    void triggerGoogleSignIn();
+  };
+
+  reconnectGoogleBtn.onclick = () => {
+    void triggerGoogleSignIn();
+  };
+
+  grantAccessSyncBtn.onclick = () => {
+    if (state.isBound) {
+      void runSyncAction('smartMerge', 'Smart Merge Sync');
+    } else {
+      void triggerGoogleSignIn();
     }
   };
 
@@ -1165,12 +1438,12 @@ export function createCloudSyncStudio(
         state.isBound = false;
         state.googleAccountEmail = '';
         state.lastSyncError = null;
-        renderBoundState();
+        renderStatusAndCallout();
       }
-      setFeedback('ok', res.message || 'Google Drive account unbound on this desktop.');
+      setFeedback('ok', res.message || 'Google Drive account disconnected on this desktop.');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setFeedback('danger', `Could not unbind account: ${msg}`);
+      setFeedback('danger', `Could not disconnect account: ${msg}`);
     } finally {
       setBusyState(false);
     }
@@ -1223,7 +1496,8 @@ export function createCloudSyncStudio(
     if (busy) return;
     const pass = jvaultPassInput.value.trim();
     if (pass.length < 4) {
-      setFeedback('danger', 'Enter a Backup Archive Passphrase of at least 4 characters to export .jvault.');
+      jvaultDisclosure.details.open = true;
+      setFeedback('danger', 'Enter an Archive Passphrase of at least 4 characters to export .jvault.');
       jvaultPassInput.focus();
       return;
     }
@@ -1252,6 +1526,7 @@ export function createCloudSyncStudio(
     if (busy) return;
     const pass = jvaultPassInput.value.trim();
     if (pass.length < 4) {
+      jvaultDisclosure.details.open = true;
       setFeedback('danger', 'Enter the .jvault archive passphrase (at least 4 characters) before importing.');
       jvaultPassInput.focus();
       return;
@@ -1315,7 +1590,8 @@ export function createCloudSyncStudio(
     dialog,
     open: async (triggerEl?: HTMLElement | null) => {
       lastTrigger = triggerEl ?? null;
-      setFeedback('none');
+      transientTone = 'none';
+      transientMessage = '';
       await refresh();
       if (!dialog.open) dialog.showModal();
     },

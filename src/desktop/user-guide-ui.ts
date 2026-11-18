@@ -191,9 +191,9 @@ export const JALADESK_GUIDE_TOPICS: readonly GuideTopicSpec[] = [
           'Generate live 6-digit or 8-digit TOTP codes using SHA1, SHA256, or SHA512 over 30s or 60s windows. Add Base32 secrets manually or paste standard otpauth://totp/ provisioning URIs.',
       },
       {
-        heading: '1-Click Copy & Auto-Type to Active Session',
+        heading: '1-Click Copy & Auto-Type',
         body:
-          'Copy formatted codes in one click or click Auto-Type to Active Session to stream the live OTP directly into an open RDP, VNC, or SSH login prompt.',
+          'Copy formatted codes in one click or click Auto-Type to stream the live OTP directly into an open RDP, VNC, or SSH login prompt.',
       },
     ],
   },
@@ -206,21 +206,21 @@ export const JALADESK_GUIDE_TOPICS: readonly GuideTopicSpec[] = [
     summary:
       'Synchronize connections, folders, gateways, credentials, and 2FA tokens seamlessly across JalaDesk Mobile and Desktop.',
     pills: [
-      { codeOrKey: 'Google Drive', detail: '1-Click AppData sync' },
+      { codeOrKey: 'Google Drive', detail: 'Private AppData folder' },
       { codeOrKey: 'Private SFTP', detail: '.jaladesk/vault-sync.jdesk', mono: true },
       { codeOrKey: 'WebDAV', detail: 'Nextcloud & HTTPS DAV' },
-      { codeOrKey: 'GitHub Gist', detail: 'Private Secret Gist API' },
+      { codeOrKey: 'GitHub Gist', detail: 'Secret Gist API' },
     ],
     bullets: [
       {
-        heading: 'Instant 1-Click Sign in with Google',
+        heading: 'Instant 1-Click Sign in with Google & Scope Upgrade',
         body:
-          'Open Cloud Sync & Backup and click Sign in with Google to authenticate in your default browser and immediately sync your encrypted vault across JalaDesk Mobile and Desktop — no manual Client ID setup required. Enterprise administrators who self-host an internal OAuth policy can optionally expand Custom Enterprise OAuth App (Optional) at the bottom.',
+          'Open Cloud Sync and click Sign in with Google to authenticate in your browser and sync immediately. If Google Drive AppData permission was left unchecked during consent, click Grant Access & Sync to approve the scope and complete synchronization in one step.',
       },
       {
         heading: 'Zero-Knowledge Account-Bound Key vs Custom Passphrase',
         body:
-          'By default, Google Drive sync derives an automatic account-bound PBKDF2-HMAC-SHA256 + AES-256-GCM key matching JalaDesk Mobile with zero extra passphrase. Toggle Custom E2EE Passphrase when you want a separate secret, or use a passphrase for SFTP, WebDAV, and GitHub Gist.',
+          'By default, Google Drive sync derives an automatic account-bound PBKDF2-HMAC-SHA256 + AES-256-GCM key matching JalaDesk Mobile with zero extra passphrase. Enable the Custom E2EE Passphrase switch when you want a separate secret, or use a passphrase for SFTP, WebDAV, and GitHub Gist.',
       },
       {
         heading: 'Smart Merge, Force Push & Pull',
@@ -239,19 +239,19 @@ export const JALADESK_GUIDE_TOPICS: readonly GuideTopicSpec[] = [
       'Create air-gapped vault snapshots and resolve common authentication, NLA, or cloud API errors quickly.',
     pills: [
       { codeOrKey: '.jvault', detail: 'Portable AES-256-GCM archive', mono: true },
-      { codeOrKey: 'HTTP 403', detail: 'Account binding preserved', mono: true },
+      { codeOrKey: 'Smart Merge', detail: 'Non-destructive restore' },
       { codeOrKey: 'DOMAIN\\user', detail: 'Windows RDP NLA format', mono: true },
     ],
     bullets: [
       {
-        heading: 'Portable .jvault Export & Restore Strategies',
+        heading: 'Portable .jvault Backup Archive',
         body:
-          'Open Cloud Sync & Backup to export passphrase-sealed .jvault files for offline backup or migration, and restore them using either Smart Merge or Replace Local.',
+          'Expand Portable .jvault Backup Archive inside Cloud Sync to export passphrase-sealed .jvault snapshots for offline backup, or restore them using Smart Merge or Replace Local.',
       },
       {
         heading: 'Resilient Account Binding on Cloud API Warnings',
         body:
-          'If a network interruption or enterprise Google Drive API restriction (HTTP 403) occurs right after sign-in, your Google account remains safely bound on Desktop so you can retry Smart Merge Sync without signing in again.',
+          'If a network interruption or Google Drive AppData permission check (HTTP 403) occurs after sign-in, your Google account remains safely bound on Desktop so Smart Merge Sync can recover without re-entering credentials.',
       },
       {
         heading: 'RDP NLA Login & Bastion Connectivity Checks',
@@ -310,7 +310,7 @@ export function createUserGuidePanel(
   const root = doc.createElement('div');
   root.className = 'jala-guide-shell';
 
-  // ---- Header (#0D141F) ----
+  // ---- Header ----
   const header = doc.createElement('div');
   header.className = 'jala-studio-header jala-guide-header';
 
@@ -319,7 +319,7 @@ export function createUserGuidePanel(
 
   const iconBadge = doc.createElement('div');
   iconBadge.className = 'jala-studio-icon-badge';
-  iconBadge.dataset.tone = 'gold';
+  iconBadge.dataset.tone = 'teal';
   iconBadge.append(jalaSvgIcon('book', doc, 18));
 
   const titleGroup = doc.createElement('div');
@@ -333,7 +333,7 @@ export function createUserGuidePanel(
   const subtitleEl = doc.createElement('p');
   subtitleEl.className = 'jala-studio-subtitle';
   subtitleEl.textContent =
-    'Protocols, Jump Host routing, proportional display sizing, 2FA vault & zero-knowledge Cloud Sync';
+    'Protocols, Jump Host bastions, proportional display sizing, 2FA vault & zero-knowledge Cloud Sync';
 
   titleGroup.append(titleEl, subtitleEl);
   headerLead.append(iconBadge, titleGroup);
@@ -360,34 +360,39 @@ export function createUserGuidePanel(
 
   header.append(headerLead, headerActions);
 
-  // ---- Search + Category Filter Strip ----
+  // ---- Search + Editorial Category Filter Bar ----
   const filterStrip = doc.createElement('div');
   filterStrip.className = 'jala-guide-filter-strip';
 
   const searchRow = doc.createElement('div');
   searchRow.className = 'jala-guide-search-row';
 
+  const searchFieldWrap = doc.createElement('div');
+  searchFieldWrap.className = 'jala-search-field';
+
   const searchIconHolder = doc.createElement('span');
-  searchIconHolder.className = 'jala-guide-search-icon';
-  searchIconHolder.append(jalaSvgIcon('search', doc, 15));
+  searchIconHolder.className = 'jala-search-field-icon';
+  searchIconHolder.append(jalaSvgIcon('search', doc, 14));
 
   const searchInput = doc.createElement('input');
   searchInput.id = 'jala-guide-search-input';
   searchInput.type = 'search';
-  searchInput.className = 'jala-input jala-guide-search-input';
+  searchInput.className = 'jala-input jala-search-field-input';
   searchInput.placeholder =
-    'Search topics (e.g. Jump Host, Fit, ssh -L, Google Drive, otpauth, .jvault)...';
+    'Search guide topics (Jump Host, Fit, ssh -L, Google Drive, otpauth, .jvault)...';
   searchInput.value = searchQuery;
   searchInput.setAttribute('aria-label', 'Search JalaDesk Guide');
+
+  searchFieldWrap.append(searchIconHolder, searchInput);
 
   const clearSearchBtn = doc.createElement('button');
   clearSearchBtn.id = 'jala-guide-search-clear';
   clearSearchBtn.type = 'button';
-  clearSearchBtn.className = 'jala-btn quiet';
+  clearSearchBtn.className = 'jala-btn jala-btn-compact quiet';
   clearSearchBtn.textContent = 'Clear';
   clearSearchBtn.hidden = searchQuery.trim().length === 0;
 
-  searchRow.append(searchIconHolder, searchInput, clearSearchBtn);
+  searchRow.append(searchFieldWrap, clearSearchBtn);
 
   const categoryBar = doc.createElement('div');
   categoryBar.className = 'jala-guide-category-bar';
@@ -421,7 +426,7 @@ export function createUserGuidePanel(
 
   filterStrip.append(searchRow, categoryBar);
 
-  // ---- Scrollable 2-Column Topic Grid (#141D29 cards) ----
+  // ---- Scrollable 2-Column Editorial Grid ----
   const body = doc.createElement('div');
   body.className = 'jala-studio-body jala-guide-body';
 
@@ -431,14 +436,14 @@ export function createUserGuidePanel(
 
   body.append(grid);
 
-  // ---- Separated #0A1018 Footer ----
+  // ---- Separated Footer ----
   const footer = doc.createElement('div');
   footer.className = 'jala-studio-footer';
 
   const footerNote = doc.createElement('span');
   footerNote.className = 'jala-footer-note';
   footerNote.textContent =
-    'All encryption keys, SSH credentials, and TOTP secrets stay encrypted locally on your device.';
+    'All encryption keys, SSH credentials, and TOTP secrets remain encrypted locally on your device.';
 
   const footerRight = doc.createElement('div');
   footerRight.className = 'jala-studio-footer-right';
@@ -448,7 +453,7 @@ export function createUserGuidePanel(
     closeBtn.id = 'jala-guide-close-btn';
     closeBtn.type = 'button';
     closeBtn.className = 'jala-btn jala-btn-primary';
-    closeBtn.textContent = 'Close Guide';
+    closeBtn.textContent = 'Done';
     closeBtn.onclick = () => options.onClose?.();
     footerRight.append(closeBtn);
   }
@@ -466,23 +471,26 @@ export function createUserGuidePanel(
     cardHead.className = 'jala-guide-card-header';
 
     const cardIcon = doc.createElement('div');
-    cardIcon.className = 'jala-studio-icon-badge';
+    cardIcon.className = 'jala-studio-icon-badge jala-guide-topic-badge';
     cardIcon.dataset.tone = topic.accentTone;
     cardIcon.append(jalaSvgIcon(topic.icon, doc, 16));
+
+    const headText = doc.createElement('div');
+    headText.className = 'jala-guide-head-copy';
 
     const cardTitle = doc.createElement('h3');
     cardTitle.className = 'jala-guide-card-title';
     cardTitle.textContent = topic.title;
 
-    cardHead.append(cardIcon, cardTitle);
-
-    const cardBody = doc.createElement('div');
-    cardBody.className = 'jala-guide-card-body';
-
     const summaryP = doc.createElement('p');
     summaryP.className = 'jala-guide-card-summary';
     summaryP.textContent = topic.summary;
-    cardBody.append(summaryP);
+
+    headText.append(cardTitle, summaryP);
+    cardHead.append(cardIcon, headText);
+
+    const cardBody = doc.createElement('div');
+    cardBody.className = 'jala-guide-card-body';
 
     if (topic.pills.length > 0) {
       const pillRow = doc.createElement('div');

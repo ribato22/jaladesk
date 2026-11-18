@@ -6,6 +6,7 @@
 import {
   createJalaSegmentedBar,
   jalaSvgIcon,
+  type JalaStudioIconName,
 } from './cloud-sync-ui.js';
 
 export type TotpAlgorithm = 'SHA1' | 'SHA256' | 'SHA512';
@@ -286,6 +287,52 @@ function makeField(
   return label;
 }
 
+function serviceInitial(issuer: string, accountName: string): string {
+  const src = issuer.trim() || accountName.trim() || '2';
+  const ch = src[0] ?? '2';
+  return ch.toUpperCase();
+}
+
+function createCalloutBanner(doc: Document): {
+  readonly root: HTMLDivElement;
+  show: (tone: 'ok' | 'warn' | 'danger' | 'none', text?: string) => void;
+} {
+  const root = doc.createElement('div');
+  root.className = 'jala-unified-callout';
+  root.setAttribute('role', 'status');
+  root.hidden = true;
+
+  const iconWrap = doc.createElement('span');
+  iconWrap.className = 'jala-callout-icon';
+
+  const content = doc.createElement('div');
+  content.className = 'jala-callout-content';
+
+  const textEl = doc.createElement('p');
+  textEl.className = 'jala-callout-text';
+  content.append(textEl);
+
+  root.append(iconWrap, content);
+
+  return {
+    root,
+    show: (tone, text = '') => {
+      if (tone === 'none' || !text.trim()) {
+        root.hidden = true;
+        delete root.dataset.tone;
+        textEl.textContent = '';
+        return;
+      }
+      root.hidden = false;
+      root.dataset.tone = tone;
+      const iconName: JalaStudioIconName =
+        tone === 'ok' ? 'check' : tone === 'warn' ? 'clock' : 'alert';
+      iconWrap.replaceChildren(jalaSvgIcon(iconName, doc, 16));
+      textEl.textContent = text;
+    },
+  };
+}
+
 // ============================================================================
 // PART A: 2FA Authenticator Studio Modal / Panel
 // ============================================================================
@@ -314,7 +361,7 @@ export function createVault2faStudio(
   dialog.className = 'jala-studio-dialog jala-vault-2fa-dialog';
   dialog.setAttribute('aria-labelledby', 'jala-vault-2fa-title');
 
-  // ---- Header (#0D141F) ----
+  // ---- Header ----
   const header = doc.createElement('div');
   header.className = 'jala-studio-header';
 
@@ -323,7 +370,7 @@ export function createVault2faStudio(
 
   const iconBadge = doc.createElement('div');
   iconBadge.className = 'jala-studio-icon-badge';
-  iconBadge.dataset.tone = 'gold';
+  iconBadge.dataset.tone = 'green';
   iconBadge.append(jalaSvgIcon('shield', doc, 18));
 
   const titleGroup = doc.createElement('div');
@@ -347,8 +394,8 @@ export function createVault2faStudio(
   const pinShortcutBtn = doc.createElement('button');
   pinShortcutBtn.id = 'jala-2fa-open-pin-btn';
   pinShortcutBtn.type = 'button';
-  pinShortcutBtn.className = 'jala-btn quiet';
-  pinShortcutBtn.append(jalaSvgIcon('lock', doc, 14));
+  pinShortcutBtn.className = 'jala-btn jala-btn-compact quiet';
+  pinShortcutBtn.append(jalaSvgIcon('lock', doc, 13));
   const pinShortcutLbl = doc.createElement('span');
   pinShortcutLbl.textContent = 'App Lock PIN';
   pinShortcutBtn.append(pinShortcutLbl);
@@ -366,42 +413,63 @@ export function createVault2faStudio(
   headerActions.append(pinShortcutBtn, headerCloseBtn);
   header.append(headerLead, headerActions);
 
-  // ---- Body (#141D29) ----
+  // ---- Body ----
   const body = doc.createElement('div');
   body.className = 'jala-studio-body';
 
-  const feedbackBanner = doc.createElement('div');
-  feedbackBanner.className = 'jala-alert-banner';
-  feedbackBanner.setAttribute('role', 'status');
-  feedbackBanner.hidden = true;
+  const callout = createCalloutBanner(doc);
 
-  // Search & Toolbar Strip
+  // Search & Count Toolbar Strip
   const searchBarRow = doc.createElement('div');
   searchBarRow.className = 'jala-totp-toolbar';
+
+  const searchFieldWrap = doc.createElement('div');
+  searchFieldWrap.className = 'jala-search-field';
+
+  const searchIconSpan = doc.createElement('span');
+  searchIconSpan.className = 'jala-search-field-icon';
+  searchIconSpan.append(jalaSvgIcon('search', doc, 14));
 
   const searchInput = doc.createElement('input');
   searchInput.id = 'jala-totp-search';
   searchInput.type = 'search';
-  searchInput.className = 'jala-input';
+  searchInput.className = 'jala-input jala-search-field-input';
   searchInput.placeholder = 'Filter 2FA tokens by service or account...';
 
-  searchBarRow.append(searchInput);
+  searchFieldWrap.append(searchIconSpan, searchInput);
 
-  // Import otpauth:// URI Collapsible Drawer
+  const tokenCountBadge = doc.createElement('span');
+  tokenCountBadge.className = 'jala-status-pill';
+  tokenCountBadge.dataset.tone = 'neutral';
+  tokenCountBadge.textContent = '0 tokens';
+
+  searchBarRow.append(searchFieldWrap, tokenCountBadge);
+
+  // Import otpauth:// URI Collapsible Panel (recessed studio surface, zero card-in-card)
   const uriImportSection = doc.createElement('section');
   uriImportSection.id = 'jala-totp-uri-drawer';
-  uriImportSection.className = 'jala-studio-section jala-totp-drawer';
+  uriImportSection.className = 'jala-totp-drawer';
   uriImportSection.hidden = true;
+
+  const uriTopRow = doc.createElement('div');
+  uriTopRow.className = 'jala-section-row-between';
 
   const uriHeading = doc.createElement('h3');
   uriHeading.className = 'jala-section-heading';
   uriHeading.textContent = 'Import otpauth:// Provisioning URI';
 
+  const uriCancelBtn = doc.createElement('button');
+  uriCancelBtn.type = 'button';
+  uriCancelBtn.className = 'jala-btn jala-btn-compact quiet';
+  uriCancelBtn.textContent = 'Cancel';
+
+  uriTopRow.append(uriHeading, uriCancelBtn);
+
   const uriInput = doc.createElement('input');
   uriInput.id = 'jala-totp-uri-input';
   uriInput.type = 'text';
   uriInput.className = 'jala-input jala-mono';
-  uriInput.placeholder = 'otpauth://totp/GitHub:ops@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&algorithm=SHA256&digits=6&period=30';
+  uriInput.placeholder = 'otpauth://totp/GitHub:ops@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub';
 
   const uriActions = doc.createElement('div');
   uriActions.className = 'jala-inline-actions';
@@ -416,11 +484,14 @@ export function createVault2faStudio(
   uriImportNowBtn.id = 'jala-totp-uri-save-btn';
   uriImportNowBtn.type = 'button';
   uriImportNowBtn.className = 'jala-btn jala-btn-primary';
-  uriImportNowBtn.textContent = 'Import Token Now';
+  uriImportNowBtn.append(jalaSvgIcon('check', doc, 14));
+  const uriImportLbl = doc.createElement('span');
+  uriImportLbl.textContent = 'Import Token';
+  uriImportNowBtn.append(uriImportLbl);
 
   uriActions.append(uriFillFormBtn, uriImportNowBtn);
   uriImportSection.append(
-    uriHeading,
+    uriTopRow,
     makeField('Provisioning URI', uriInput, doc),
     uriActions,
   );
@@ -428,7 +499,7 @@ export function createVault2faStudio(
   // Add 2FA Token Studio Form (with 3 guaranteed 1-row segmented bars!)
   const addFormSection = doc.createElement('section');
   addFormSection.id = 'jala-totp-add-drawer';
-  addFormSection.className = 'jala-studio-section jala-totp-drawer';
+  addFormSection.className = 'jala-totp-drawer';
   addFormSection.hidden = true;
 
   const addHeading = doc.createElement('h3');
@@ -530,20 +601,20 @@ export function createVault2faStudio(
     addFormActions,
   );
 
-  // Live Token List Container
+  // Live Token List Container (Tabular 1Password-grade rows)
   const tokenListWrap = doc.createElement('div');
   tokenListWrap.id = 'jala-totp-list';
   tokenListWrap.className = 'jala-totp-list';
 
   body.append(
-    feedbackBanner,
+    callout.root,
     searchBarRow,
     uriImportSection,
     addFormSection,
     tokenListWrap,
   );
 
-  // ---- Separated #0A1018 Studio Footer ----
+  // ---- Separated Studio Footer ----
   const footer = doc.createElement('div');
   footer.className = 'jala-studio-footer';
 
@@ -556,7 +627,7 @@ export function createVault2faStudio(
   toggleUriBtn.className = 'jala-btn quiet';
   toggleUriBtn.append(jalaSvgIcon('qr', doc, 14));
   const toggleUriLbl = doc.createElement('span');
-  toggleUriLbl.textContent = 'Import otpauth:// URI';
+  toggleUriLbl.textContent = 'Import otpauth://';
   toggleUriBtn.append(toggleUriLbl);
 
   const toggleAddBtn = doc.createElement('button');
@@ -573,32 +644,19 @@ export function createVault2faStudio(
   const footerRight = doc.createElement('div');
   footerRight.className = 'jala-studio-footer-right';
 
-  const tokenCountBadge = doc.createElement('span');
-  tokenCountBadge.className = 'jala-status-pill';
-  tokenCountBadge.dataset.tone = 'neutral';
-  tokenCountBadge.textContent = '0 tokens';
-
   const closeFooterBtn = doc.createElement('button');
   closeFooterBtn.id = 'jala-totp-close-btn';
   closeFooterBtn.type = 'button';
   closeFooterBtn.className = 'jala-btn quiet';
   closeFooterBtn.textContent = 'Close';
 
-  footerRight.append(tokenCountBadge, closeFooterBtn);
+  footerRight.append(closeFooterBtn);
   footer.append(footerLeft, footerRight);
 
   dialog.append(header, body, footer);
 
   function showNotice(tone: 'ok' | 'warn' | 'danger' | 'none', text = ''): void {
-    if (tone === 'none' || !text.trim()) {
-      feedbackBanner.hidden = true;
-      feedbackBanner.textContent = '';
-      delete feedbackBanner.dataset.tone;
-      return;
-    }
-    feedbackBanner.hidden = false;
-    feedbackBanner.dataset.tone = tone;
-    feedbackBanner.textContent = text;
+    callout.show(tone, text);
   }
 
   function resetAddForm(): void {
@@ -671,13 +729,13 @@ export function createVault2faStudio(
       const emptyTitle = doc.createElement('strong');
       emptyTitle.textContent =
         items.length === 0
-          ? 'No 2FA Authenticator tokens stored yet'
+          ? 'No 2FA Authenticator tokens yet'
           : `No tokens matched "${searchQuery}"`;
       const emptySub = doc.createElement('p');
       emptySub.textContent =
         items.length === 0
-          ? 'Click Add 2FA Token or Import otpauth:// URI below to generate RFC 6238 codes locally.'
-          : 'Clear your search filter to view all configured tokens.';
+          ? 'Add a Base32 secret or import an otpauth:// URI below to generate RFC 6238 codes locally.'
+          : 'Clear your filter to view all configured tokens.';
       emptyBox.append(emptyTitle, emptySub);
       tokenListWrap.replaceChildren(emptyBox);
       return;
@@ -690,47 +748,67 @@ export function createVault2faStudio(
       card.className = 'jala-totp-card';
       card.dataset.tokenId = item.id;
 
-      const topRow = doc.createElement('div');
-      topRow.className = 'jala-totp-card-top';
+      const mainRow = doc.createElement('div');
+      mainRow.className = 'jala-totp-row-main';
+
+      // Left: Monogram + Identity + Spec tag
+      const lead = doc.createElement('div');
+      lead.className = 'jala-totp-lead';
+
+      const monogram = doc.createElement('div');
+      monogram.className = 'jala-totp-monogram';
+      monogram.textContent = serviceInitial(item.issuer, item.accountName);
 
       const identityWrap = doc.createElement('div');
       identityWrap.className = 'jala-totp-identity';
+
+      const issuerLine = doc.createElement('div');
+      issuerLine.className = 'jala-totp-issuer-line';
 
       const issuerEl = doc.createElement('strong');
       issuerEl.className = 'jala-totp-issuer';
       issuerEl.textContent = item.issuer || 'Service';
 
-      const accountEl = doc.createElement('span');
-      accountEl.className = 'jala-totp-account';
-      accountEl.textContent = item.accountName || '';
-
-      identityWrap.append(issuerEl);
-      if (item.accountName) identityWrap.append(accountEl);
-
       const specPill = doc.createElement('span');
-      specPill.className = 'jala-status-pill jala-mono';
-      specPill.dataset.tone = 'neutral';
-      specPill.textContent = `${item.algorithm} \u2022 ${item.digits}d \u2022 ${item.period}s`;
+      specPill.className = 'jala-totp-spec jala-mono';
+      specPill.textContent = `${item.algorithm} \u00b7 ${item.digits}d \u00b7 ${item.period}s`;
 
-      topRow.append(identityWrap, specPill);
+      issuerLine.append(issuerEl, specPill);
+      identityWrap.append(issuerLine);
 
-      const middleRow = doc.createElement('div');
-      middleRow.className = 'jala-totp-code-row';
+      if (item.accountName) {
+        const accountEl = doc.createElement('span');
+        accountEl.className = 'jala-totp-account';
+        accountEl.textContent = item.accountName;
+        identityWrap.append(accountEl);
+      }
+
+      lead.append(monogram, identityWrap);
+
+      // Right: Live Tabular Code + Remaining Countdown + Crisp Action Pills
+      const rightCluster = doc.createElement('div');
+      rightCluster.className = 'jala-totp-right';
+
+      const codeWrap = doc.createElement('div');
+      codeWrap.className = 'jala-totp-code-group';
 
       const codeEl = doc.createElement('div');
       codeEl.className = 'jala-totp-code jala-mono';
       codeEl.textContent = item.digits === 8 ? '\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022' : '\u2022\u2022\u2022 \u2022\u2022\u2022';
 
-      const actionsCluster = doc.createElement('div');
-      actionsCluster.className = 'jala-totp-card-actions';
-
       const remainingEl = doc.createElement('span');
       remainingEl.className = 'jala-totp-remaining jala-mono';
       remainingEl.textContent = `${item.period}s`;
 
+      codeWrap.append(codeEl, remainingEl);
+
+      const actionsCluster = doc.createElement('div');
+      actionsCluster.className = 'jala-totp-card-actions';
+
       const copyBtn = doc.createElement('button');
       copyBtn.type = 'button';
-      copyBtn.className = 'jala-btn quiet jala-totp-copy-btn';
+      copyBtn.className = 'jala-btn jala-btn-compact quiet jala-totp-copy-btn';
+      copyBtn.title = 'Copy OTP code to clipboard';
       copyBtn.append(jalaSvgIcon('copy', doc, 13));
       const copyLbl = doc.createElement('span');
       copyLbl.textContent = 'Copy';
@@ -738,26 +816,35 @@ export function createVault2faStudio(
 
       const autoTypeBtn = doc.createElement('button');
       autoTypeBtn.type = 'button';
-      autoTypeBtn.className = 'jala-btn jala-btn-primary jala-totp-autotype-btn';
+      autoTypeBtn.className = 'jala-btn jala-btn-compact jala-btn-primary jala-totp-autotype-btn';
+      autoTypeBtn.title = 'Stream OTP code directly into active RDP, VNC, or SSH session';
       autoTypeBtn.append(jalaSvgIcon('bolt', doc, 13));
       const autoTypeLbl = doc.createElement('span');
-      autoTypeLbl.textContent = 'Auto-Type to Active Session';
+      autoTypeLbl.textContent = 'Auto-Type';
       autoTypeBtn.append(autoTypeLbl);
 
       const removeBtn = doc.createElement('button');
       removeBtn.type = 'button';
-      removeBtn.className = 'jala-btn jala-btn-danger-outline quiet';
-      removeBtn.textContent = pendingDeleteId === item.id ? 'Confirm Remove' : 'Remove';
+      removeBtn.className = 'jala-btn jala-btn-compact jala-btn-subtle-danger quiet';
+      removeBtn.title = 'Remove 2FA token';
+      if (pendingDeleteId === item.id) {
+        removeBtn.textContent = 'Confirm';
+      } else {
+        removeBtn.append(jalaSvgIcon('trash', doc, 13));
+        removeBtn.setAttribute('aria-label', `Remove ${item.issuer} token`);
+      }
 
-      actionsCluster.append(remainingEl, copyBtn, autoTypeBtn, removeBtn);
-      middleRow.append(codeEl, actionsCluster);
+      actionsCluster.append(copyBtn, autoTypeBtn, removeBtn);
+      rightCluster.append(codeWrap, actionsCluster);
+
+      mainRow.append(lead, rightCluster);
 
       const progressEl = doc.createElement('progress');
       progressEl.className = 'jala-totp-progress';
       progressEl.max = 1000;
       progressEl.value = 1000;
 
-      card.append(topRow, middleRow, progressEl);
+      card.append(mainRow, progressEl);
 
       const rowRef: RenderedTokenRow = {
         item,
@@ -820,7 +907,8 @@ export function createVault2faStudio(
       removeBtn.onclick = async () => {
         if (pendingDeleteId !== item.id) {
           pendingDeleteId = item.id;
-          removeBtn.textContent = 'Confirm Remove';
+          removeBtn.replaceChildren();
+          removeBtn.textContent = 'Confirm';
           return;
         }
         pendingDeleteId = null;
@@ -852,6 +940,11 @@ export function createVault2faStudio(
       addFormSection.hidden = true;
       uriInput.focus();
     }
+  };
+
+  uriCancelBtn.onclick = () => {
+    uriImportSection.hidden = true;
+    uriInput.value = '';
   };
 
   toggleAddBtn.onclick = () => {
@@ -1045,7 +1138,7 @@ export function createAppLockPinUi(
   let cooldownTimer: ReturnType<typeof setInterval> | null = null;
   let settingsTrigger: HTMLElement | null = null;
 
-  // ---- 1. Full-Screen Obsidian Lock Overlay (#070B12) ----
+  // ---- 1. Full-Screen Obsidian Lock Overlay ----
   const overlay = doc.createElement('div');
   overlay.id = 'jala-app-lock-overlay';
   overlay.className = 'jala-pin-overlay';
@@ -1059,17 +1152,17 @@ export function createAppLockPinUi(
 
   const emblem = doc.createElement('div');
   emblem.className = 'jala-pin-emblem';
-  emblem.append(jalaSvgIcon('shield', doc, 28));
+  emblem.append(jalaSvgIcon('shield', doc, 26));
 
   const lockTitle = doc.createElement('h2');
   lockTitle.id = 'jala-pin-lock-title';
   lockTitle.className = 'jala-pin-title';
-  lockTitle.textContent = 'JalaDesk Workspace Locked';
+  lockTitle.textContent = 'Workspace Locked';
 
   const lockSubtitle = doc.createElement('p');
   lockSubtitle.id = 'jala-pin-lock-subtitle';
   lockSubtitle.className = 'jala-pin-subtitle';
-  lockSubtitle.textContent = 'Enter your security PIN to unlock sessions and credentials';
+  lockSubtitle.textContent = 'Enter your security PIN to resume active sessions';
 
   const dotsRow = doc.createElement('div');
   dotsRow.id = 'jala-pin-dots';
@@ -1280,7 +1373,7 @@ export function createAppLockPinUi(
     globalThis.window.addEventListener('keydown', onWindowKeyDown, true);
   }
 
-  // ---- 2. App Lock PIN Settings Modal (#141D29 / #0D141F / #0A1018) ----
+  // ---- 2. App Lock PIN Settings Modal (clean flat studio surface, zero card-in-card!) ----
   const settingsDialog = doc.createElement('dialog');
   settingsDialog.id = 'jala-pin-settings-dialog';
   settingsDialog.className = 'jala-studio-dialog jala-pin-settings-dialog';
@@ -1303,11 +1396,11 @@ export function createAppLockPinUi(
   const sTitle = doc.createElement('h2');
   sTitle.id = 'jala-pin-settings-title';
   sTitle.className = 'jala-studio-title';
-  sTitle.textContent = 'App Lock PIN & Auto-Lock';
+  sTitle.textContent = 'App Lock PIN';
 
   const sSubtitle = doc.createElement('p');
   sSubtitle.className = 'jala-studio-subtitle';
-  sSubtitle.textContent = 'Zero-trust 4-8 digit workspace screen lock (PBKDF2-HMAC-SHA256)';
+  sSubtitle.textContent = '4-8 digit PBKDF2-HMAC-SHA256 workspace screen lock';
 
   sTitleGroup.append(sTitle, sSubtitle);
   sLead.append(sBadge, sTitleGroup);
@@ -1319,7 +1412,7 @@ export function createAppLockPinUi(
   pinStatePill.id = 'jala-pin-state-pill';
   pinStatePill.className = 'jala-status-pill';
   pinStatePill.dataset.tone = 'neutral';
-  pinStatePill.textContent = 'PIN Disabled';
+  pinStatePill.textContent = 'Disabled';
 
   const sHeaderClose = doc.createElement('button');
   sHeaderClose.type = 'button';
@@ -1333,29 +1426,26 @@ export function createAppLockPinUi(
   const sBody = doc.createElement('div');
   sBody.className = 'jala-studio-body';
 
-  const sFeedback = doc.createElement('div');
-  sFeedback.className = 'jala-alert-banner';
-  sFeedback.setAttribute('role', 'status');
-  sFeedback.hidden = true;
+  const sCallout = createCalloutBanner(doc);
 
-  // Auto-Lock 1-row Segmented Bar: Immediate | 1m | 5m | 15m | Off
-  const autoLockSection = doc.createElement('section');
-  autoLockSection.className = 'jala-studio-section';
+  // Auto-Lock 1-row Segmented Bar: Immediate | 1m | 5m | 15m | Off (flat surface, no card wrapper)
+  const autoLockBlock = doc.createElement('div');
+  autoLockBlock.className = 'jala-provider-surface';
 
   const autoLockRowTop = doc.createElement('div');
   autoLockRowTop.className = 'jala-section-row-between';
 
   const autoLockHeading = doc.createElement('h3');
   autoLockHeading.className = 'jala-section-heading';
-  autoLockHeading.textContent = 'Inactivity Auto-Lock Timer';
+  autoLockHeading.textContent = 'Inactivity Auto-Lock';
 
   const lockNowBtn = doc.createElement('button');
   lockNowBtn.id = 'jala-pin-lock-now-btn';
   lockNowBtn.type = 'button';
-  lockNowBtn.className = 'jala-btn quiet';
+  lockNowBtn.className = 'jala-btn jala-btn-compact quiet';
   lockNowBtn.append(jalaSvgIcon('lock', doc, 13));
   const lockNowLbl = doc.createElement('span');
-  lockNowLbl.textContent = 'Lock Workspace Now';
+  lockNowLbl.textContent = 'Lock Now';
   lockNowBtn.append(lockNowLbl);
 
   autoLockRowTop.append(autoLockHeading, lockNowBtn);
@@ -1376,7 +1466,7 @@ export function createAppLockPinUi(
       status.autoLockSeconds = seconds;
       try {
         await bridge.setAutoLockSeconds(seconds);
-        setSettingsFeedback('ok', 'Updated Auto-Lock inactivity timeout.');
+        setSettingsFeedback('ok', 'Updated Auto-Lock inactivity timer.');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setSettingsFeedback('danger', `Failed to save Auto-Lock timeout: ${msg}`);
@@ -1384,15 +1474,18 @@ export function createAppLockPinUi(
     },
   });
 
-  autoLockSection.append(autoLockRowTop, autoLockBar.root);
+  autoLockBlock.append(autoLockRowTop, autoLockBar.root);
 
-  // Set / Change / Remove PIN Section
-  const pinFormSection = doc.createElement('section');
-  pinFormSection.className = 'jala-studio-section';
+  const pinDivider = doc.createElement('hr');
+  pinDivider.className = 'jala-hairline';
+
+  // Set / Change / Remove PIN Section (flat surface)
+  const pinFormBlock = doc.createElement('div');
+  pinFormBlock.className = 'jala-provider-surface';
 
   const pinFormHeading = doc.createElement('h3');
   pinFormHeading.className = 'jala-section-heading';
-  pinFormHeading.textContent = 'Configure 4-8 Digit Security PIN';
+  pinFormHeading.textContent = 'Set 4-8 Digit Security PIN';
 
   const currentPinInput = doc.createElement('input');
   currentPinInput.id = 'jala-pin-current-input';
@@ -1422,19 +1515,19 @@ export function createAppLockPinUi(
   const newPinGrid = doc.createElement('div');
   newPinGrid.className = 'jala-form-grid-2';
   newPinGrid.append(
-    makeField('New Security PIN (4-8 Digits)', newPinInput, doc),
+    makeField('New PIN (4-8 Digits)', newPinInput, doc),
     makeField('Confirm New PIN', confirmPinInput, doc),
   );
 
   const pinHint = doc.createElement('p');
   pinHint.className = 'jala-helper-note';
   pinHint.textContent =
-    'Unlock triggers automatically as soon as the final PIN digit is entered — no Enter key required.';
+    'Workspace unlocks instantaneously as soon as the final PIN digit is typed.';
 
-  pinFormSection.append(pinFormHeading, currentPinField, newPinGrid, pinHint);
-  sBody.append(sFeedback, autoLockSection, pinFormSection);
+  pinFormBlock.append(pinFormHeading, currentPinField, newPinGrid, pinHint);
+  sBody.append(sCallout.root, autoLockBlock, pinDivider, pinFormBlock);
 
-  // Separated #0A1018 Footer
+  // Separated Footer
   const sFooter = doc.createElement('div');
   sFooter.className = 'jala-studio-footer';
 
@@ -1444,7 +1537,7 @@ export function createAppLockPinUi(
   const removePinBtn = doc.createElement('button');
   removePinBtn.id = 'jala-pin-remove-btn';
   removePinBtn.type = 'button';
-  removePinBtn.className = 'jala-btn jala-btn-danger-outline quiet';
+  removePinBtn.className = 'jala-btn jala-btn-subtle-danger quiet';
   removePinBtn.textContent = 'Remove PIN';
 
   sFooterLeft.append(removePinBtn);
@@ -1464,7 +1557,7 @@ export function createAppLockPinUi(
   savePinBtn.className = 'jala-btn jala-btn-primary';
   savePinBtn.append(jalaSvgIcon('shield', doc, 14));
   const savePinLbl = doc.createElement('span');
-  savePinLbl.textContent = 'Save Security PIN';
+  savePinLbl.textContent = 'Save PIN';
   savePinBtn.append(savePinLbl);
 
   sFooterRight.append(sCloseBtn, savePinBtn);
@@ -1472,22 +1565,14 @@ export function createAppLockPinUi(
   settingsDialog.append(sHeader, sBody, sFooter);
 
   function setSettingsFeedback(tone: 'ok' | 'warn' | 'danger' | 'none', text = ''): void {
-    if (tone === 'none' || !text.trim()) {
-      sFeedback.hidden = true;
-      sFeedback.textContent = '';
-      delete sFeedback.dataset.tone;
-      return;
-    }
-    sFeedback.hidden = false;
-    sFeedback.dataset.tone = tone;
-    sFeedback.textContent = text;
+    sCallout.show(tone, text);
   }
 
   function renderSettingsState(): void {
     pinStatePill.dataset.tone = status.hasPin ? 'ok' : 'neutral';
     pinStatePill.textContent = status.hasPin
-      ? `PIN Enabled (${expectedPinLen()} digits)`
-      : 'PIN Disabled';
+      ? `Enabled \u00b7 ${expectedPinLen()} digits`
+      : 'Disabled';
     currentPinField.hidden = !status.hasPin;
     removePinBtn.hidden = !status.hasPin;
     lockNowBtn.hidden = !status.hasPin;
@@ -1650,7 +1735,7 @@ export function createAppLockPinUi(
     clearDigits,
     dispose: () => {
       stopCooldownTicker();
-      if (typeof globalThis.window !== 'undefined' && typeof globalThis.window.removeEventListener === 'function') {
+      if (typeof globalThis.window !== 'undefined' && typeof globalThis.window.addEventListener === 'function') {
         globalThis.window.removeEventListener('keydown', onWindowKeyDown, true);
       }
     },

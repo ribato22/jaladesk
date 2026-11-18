@@ -65,8 +65,37 @@ export const GOOGLE_DRIVE_DEFAULT_API_BASE_URL = 'https://www.googleapis.com';
 export const GOOGLE_OAUTH_DEFAULT_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 export const GOOGLE_OAUTH_DEFAULT_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 export const GOOGLE_OAUTH_DEFAULT_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
+export const GOOGLE_DRIVE_APPDATA_PERMISSION_URI =
+  'https://www.googleapis.com/auth/drive.appdata';
 export const GOOGLE_DRIVE_APPDATA_SCOPE =
   'https://www.googleapis.com/auth/drive.appdata openid email profile';
+export const GOOGLE_DRIVE_CHECKBOX_UNCHECKED_SIGNIN_MESSAGE =
+  'Google Drive checkbox was left unchecked in your browser. Click "Smart Merge Sync" (or "Grant Drive Access") and tick "See, create, and delete its own configuration data in your Google Drive".';
+export const GOOGLE_DRIVE_PERMISSION_STILL_UNCHECKED_MESSAGE =
+  'Permission still unchecked: in the Google browser prompt, tick the box "See, create, and delete its own configuration data in your Google Drive" before clicking Continue.';
+export const GOOGLE_DRIVE_APPDATA_MISSING_MESSAGE =
+  'Google Drive AppData permission is missing. Reconnect your Google account and grant AppData access.';
+
+export function hasGoogleDriveAppDataScope(scopeStr: string | undefined | null): boolean {
+  if (typeof scopeStr !== 'string') return false;
+  const trimmed = scopeStr.trim();
+  if (!trimmed) return false;
+  return trimmed.split(/\s+/).includes(GOOGLE_DRIVE_APPDATA_PERMISSION_URI);
+}
+
+function isMissingGoogleDriveAppDataErrorMessage(msg: string | undefined | null): boolean {
+  if (typeof msg !== 'string') return false;
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('appdata permission is missing') ||
+    lower.includes('checkbox was left unchecked') ||
+    lower.includes('permission still unchecked') ||
+    lower.includes('insufficientpermissions') ||
+    lower.includes('access_token_scope_insufficient') ||
+    lower.includes('insufficient authentication scopes') ||
+    lower.includes('own configuration data in your google drive')
+  );
+}
 export const GOOGLE_DRIVE_PRIMARY_VAULT_FILE = 'jaladesk-vault-v1.jvault';
 export const GOOGLE_DRIVE_ALT_VAULT_FILE = 'jaladesk_vault_sync_v1.jdesk';
 export const SFTP_DEFAULT_REMOTE_PATH = '.jaladesk/jaladesk-vault.jvault';
@@ -1066,8 +1095,17 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function buildLoopbackOAuthHtml(params: { ok: boolean; title: string; detail: string }): string {
+function buildLoopbackOAuthHtml(params: {
+  ok: boolean;
+  title: string;
+  detail: string;
+  amberNote?: string;
+}): string {
   const accent = params.ok ? '#80D3A3' : '#FFAAA1';
+  const noteBlock =
+    params.amberNote && params.amberNote.trim().length > 0
+      ? `\n    <div class="amber-note">${escapeHtml(params.amberNote)}</div>`
+      : '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1105,12 +1143,22 @@ function buildLoopbackOAuthHtml(params: { ok: boolean; title: string; detail: st
       line-height: 1.55;
       color: #C3CFDB;
     }
+    .amber-note {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      color: #FCD34D;
+      font-size: 13px;
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
   <main>
     <h1>${escapeHtml(params.title)}</h1>
-    <p>${escapeHtml(params.detail)}</p>
+    <p>${escapeHtml(params.detail)}</p>${noteBlock}
   </main>
 </body>
 </html>`;
@@ -1136,6 +1184,9 @@ export interface GoogleOAuthLoopbackOptions {
   tokenEndpoint?: string;
   userInfoEndpoint?: string;
   scope?: string;
+  includeGrantedScopes?: boolean;
+  loginHint?: string;
+  prompt?: string;
   openExternal: (authUrl: string) => Promise<void> | void;
   authTimeoutMs?: number;
   httpTimeoutMs?: number;
@@ -1180,6 +1231,7 @@ export async function runGoogleDesktopLoopbackOAuth(
   });
 
   let settled = false;
+  let observedCallbackScope: string | null = null;
   const server = http.createServer((req, res) => {
     const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
     if (reqUrl.pathname !== '/oauth2callback') {
@@ -1191,6 +1243,7 @@ export async function runGoogleDesktopLoopbackOAuth(
     const oauthErr = reqUrl.searchParams.get('error');
     const returnedState = reqUrl.searchParams.get('state') ?? '';
     const authCode = reqUrl.searchParams.get('code') ?? '';
+    const callbackScope = reqUrl.searchParams.get('scope');
 
     if (oauthErr) {
       const desc = reqUrl.searchParams.get('error_description') ?? oauthErr;
@@ -1225,12 +1278,19 @@ export async function runGoogleDesktopLoopbackOAuth(
       return;
     }
 
+    observedCallbackScope = callbackScope;
+    const missingCallbackDriveScope =
+      callbackScope !== null && !hasGoogleDriveAppDataScope(callbackScope);
+
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', Connection: 'close' });
     res.end(
       buildLoopbackOAuthHtml({
         ok: true,
         title: 'Google Account Connected',
         detail: 'Zero-knowledge encrypted Cloud Sync is now bound in JalaDesk. You can close this browser tab.',
+        amberNote: missingCallbackDriveScope
+          ? 'Google Drive configuration data access was left unchecked. If JalaDesk asks again during sync, tick "See, create, and delete its own configuration data in your Google Drive" before clicking Continue.'
+          : undefined,
       }),
     );
     if (!settled) {
@@ -1254,6 +1314,10 @@ export async function runGoogleDesktopLoopbackOAuth(
   }
   const redirectUri = `http://127.0.0.1:${addr.port}/oauth2callback`;
 
+  const includeGrantedScopes = options.includeGrantedScopes ?? true;
+  const loginHint = (options.loginHint ?? '').trim();
+  const promptMode = (options.prompt ?? 'consent').trim() || 'consent';
+
   const authUrl = new URL(authEndpoint);
   authUrl.searchParams.set('client_id', clientId);
   authUrl.searchParams.set('redirect_uri', redirectUri);
@@ -1262,7 +1326,11 @@ export async function runGoogleDesktopLoopbackOAuth(
   authUrl.searchParams.set('code_challenge', codeChallenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
   authUrl.searchParams.set('access_type', 'offline');
-  authUrl.searchParams.set('prompt', 'consent');
+  authUrl.searchParams.set('prompt', promptMode);
+  authUrl.searchParams.set('include_granted_scopes', includeGrantedScopes ? 'true' : 'false');
+  if (loginHint.length > 0) {
+    authUrl.searchParams.set('login_hint', loginHint);
+  }
   authUrl.searchParams.set('state', expectedState);
 
   let timer: NodeJS.Timeout | undefined;
@@ -1377,13 +1445,20 @@ export async function runGoogleDesktopLoopbackOAuth(
       );
     }
 
+    const resolvedTokenScope =
+      typeof tokenJson.scope === 'string'
+        ? tokenJson.scope
+        : typeof observedCallbackScope === 'string'
+          ? observedCallbackScope
+          : scope;
+
     return {
       account: { email, displayName },
       tokens: {
         accessToken,
         refreshToken,
         expiresAtMs: Date.now() + Math.max(60, expiresInSec) * 1000,
-        scope: typeof tokenJson.scope === 'string' ? tokenJson.scope : scope,
+        scope: resolvedTokenScope,
         tokenType: typeof tokenJson.token_type === 'string' ? tokenJson.token_type : 'Bearer',
       },
       redirectUri,
@@ -1400,6 +1475,7 @@ export async function refreshGoogleOAuthAccessToken(params: {
   clientSecret?: string;
   refreshToken: string;
   tokenEndpoint?: string;
+  fallbackScope?: string;
   timeoutMs?: number;
 }): Promise<GoogleOAuthTokenState> {
   const resolvedOAuth = resolveGoogleDesktopOAuthCredentials(params.clientId, params.clientSecret);
@@ -1466,7 +1542,10 @@ export async function refreshGoogleOAuthAccessToken(params: {
         ? decoded.refresh_token.trim()
         : refreshToken,
     expiresAtMs: Date.now() + Math.max(60, expiresInSec) * 1000,
-    scope: typeof decoded.scope === 'string' ? decoded.scope : GOOGLE_DRIVE_APPDATA_SCOPE,
+    scope:
+      typeof decoded.scope === 'string'
+        ? decoded.scope
+        : (params.fallbackScope ?? GOOGLE_DRIVE_APPDATA_SCOPE),
     tokenType: typeof decoded.token_type === 'string' ? decoded.token_type : 'Bearer',
   };
 }
@@ -1542,9 +1621,11 @@ export class GoogleDriveAppDataSyncTransport implements VaultCloudSyncTransport 
     }
     if (
       res.statusCode === 403 &&
-      (body.includes('insufficientPermissions') || body.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT'))
+      (body.includes('insufficientPermissions') ||
+        body.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') ||
+        lower.includes('insufficient authentication scopes'))
     ) {
-      return 'Google Drive AppData permission is missing. Reconnect your Google account and grant AppData access.';
+      return GOOGLE_DRIVE_APPDATA_MISSING_MESSAGE;
     }
     if (res.statusCode === 401) {
       return 'Google Drive session expired (HTTP 401). Click Sync Now to refresh authorization.';
@@ -2568,7 +2649,7 @@ export interface CloudSyncStateView {
 export interface DesktopCloudSyncServiceOptions {
   userDataDir: string;
   vaultBridge: DesktopCloudSyncVaultBridge;
-  openExternal: (url: string) => Promise<void> | void;
+  openExternal?: (url: string) => Promise<void> | void;
   sftpExecutor?: SftpCommandExecutor;
   oauthTimeoutMs?: number;
   httpTimeoutMs?: number;
@@ -2585,7 +2666,7 @@ export interface DesktopCloudSyncServiceOptions {
 export class DesktopCloudSyncService {
   private readonly store: EncryptedCloudSyncConfigStore;
   private readonly vaultBridge: DesktopCloudSyncVaultBridge;
-  private readonly openExternal: (url: string) => Promise<void> | void;
+  private readonly openExternal: ((url: string) => Promise<void> | void) | undefined;
   private readonly sftpExecutor: SftpCommandExecutor | undefined;
   private readonly oauthTimeoutMs: number;
   private readonly httpTimeoutMs: number;
@@ -2694,23 +2775,37 @@ export class DesktopCloudSyncService {
       this.config = protectBoundCloudSyncDraft(this.config, draftPatch);
     }
 
+    if (!this.openExternal) {
+      throw new VaultCloudSyncError(
+        'Browser opener is unavailable in this environment.',
+        'oauth-opener-missing',
+      );
+    }
+
     const resolvedOAuth = resolveGoogleDesktopOAuthCredentials(
       this.config.googleClientId,
       this.config.googleClientSecret,
     );
+    const existingEmailHint = this.config.googleAccountEmail.trim();
     const oauthResult = await runGoogleDesktopLoopbackOAuth({
       clientId: resolvedOAuth.clientId,
       clientSecret: resolvedOAuth.clientSecret,
       authEndpoint: this.config.googleAuthEndpoint,
       tokenEndpoint: this.config.googleTokenEndpoint,
       userInfoEndpoint: this.config.googleUserInfoEndpoint,
+      includeGrantedScopes: true,
+      loginHint: existingEmailHint || undefined,
+      prompt: 'consent',
       openExternal: this.openExternal,
       authTimeoutMs: this.oauthTimeoutMs,
       httpTimeoutMs: this.httpTimeoutMs,
       signal: options?.signal,
     });
 
-    const previousRefresh = this.googleTokens?.refreshToken ?? '';
+    const sameAccount =
+      existingEmailHint.length === 0 ||
+      existingEmailHint.toLowerCase() === oauthResult.account.email.trim().toLowerCase();
+    const previousRefresh = sameAccount ? (this.googleTokens?.refreshToken ?? '') : '';
     this.googleTokens = {
       ...oauthResult.tokens,
       refreshToken: oauthResult.tokens.refreshToken || previousRefresh,
@@ -2718,6 +2813,7 @@ export class DesktopCloudSyncService {
 
     const shouldDisableEmptyCustomPass =
       this.config.useCustomPassphrase && this.config.syncPassphrase.trim().length < 4;
+    const missingAppDataScope = !hasGoogleDriveAppDataScope(this.googleTokens.scope);
 
     // STEP 1 (CRITICAL): Immediately bind and persist to disk BEFORE attempting Drive sync!
     this.config = {
@@ -2727,9 +2823,18 @@ export class DesktopCloudSyncService {
       googleAccountEmail: oauthResult.account.email,
       googleDisplayName: oauthResult.account.displayName,
       useCustomPassphrase: shouldDisableEmptyCustomPass ? false : this.config.useCustomPassphrase,
-      lastSyncError: '',
+      lastSyncError: missingAppDataScope ? GOOGLE_DRIVE_CHECKBOX_UNCHECKED_SIGNIN_MESSAGE : '',
     };
     await this.persistNow();
+
+    if (missingAppDataScope) {
+      return {
+        account: oauthResult.account,
+        updatedConfig: { ...this.config },
+        syncSummary: null,
+        initialSyncError: GOOGLE_DRIVE_CHECKBOX_UNCHECKED_SIGNIN_MESSAGE,
+      };
+    }
 
     if (options?.runInitialSync === false) {
       return {
@@ -2741,7 +2846,9 @@ export class DesktopCloudSyncService {
     }
 
     try {
-      const summary = await this.executeSync(this.config, 'smartMerge');
+      const summary = await this.executeSync(this.config, 'smartMerge', {
+        allowInteractiveOAuthUpgrade: false,
+      });
       return {
         account: oauthResult.account,
         updatedConfig: { ...this.config },
@@ -2823,6 +2930,7 @@ export class DesktopCloudSyncService {
           clientSecret: resolvedOAuth.clientSecret,
           refreshToken: this.googleTokens.refreshToken,
           tokenEndpoint: activeConfig.googleTokenEndpoint,
+          fallbackScope: this.googleTokens.scope || undefined,
           timeoutMs: this.httpTimeoutMs,
         });
         this.googleTokens = refreshed;
@@ -2830,6 +2938,75 @@ export class DesktopCloudSyncService {
         return refreshed.accessToken;
       },
     };
+  }
+
+  private async performIncrementalGoogleConsentUpgrade(
+    draft: VaultSyncConfig,
+    signal?: AbortSignal,
+  ): Promise<VaultSyncConfig> {
+    if (!this.openExternal) {
+      throw new VaultCloudSyncError(
+        GOOGLE_DRIVE_APPDATA_MISSING_MESSAGE,
+        'gdrive-appdata-scope-missing',
+      );
+    }
+    const resolvedOAuth = resolveGoogleDesktopOAuthCredentials(
+      draft.googleClientId,
+      draft.googleClientSecret,
+    );
+    const hintEmail = draft.googleAccountEmail.trim() || this.config.googleAccountEmail.trim();
+    const oauthResult = await runGoogleDesktopLoopbackOAuth({
+      clientId: resolvedOAuth.clientId,
+      clientSecret: resolvedOAuth.clientSecret,
+      authEndpoint: draft.googleAuthEndpoint,
+      tokenEndpoint: draft.googleTokenEndpoint,
+      userInfoEndpoint: draft.googleUserInfoEndpoint,
+      includeGrantedScopes: true,
+      loginHint: hintEmail || undefined,
+      prompt: 'consent',
+      openExternal: this.openExternal,
+      authTimeoutMs: this.oauthTimeoutMs,
+      httpTimeoutMs: this.httpTimeoutMs,
+      signal,
+    });
+
+    const sameAccount =
+      hintEmail.length === 0 ||
+      hintEmail.toLowerCase() === oauthResult.account.email.trim().toLowerCase();
+    const previousRefresh = sameAccount ? (this.googleTokens?.refreshToken ?? '') : '';
+    this.googleTokens = {
+      ...oauthResult.tokens,
+      refreshToken: oauthResult.tokens.refreshToken || previousRefresh,
+    };
+
+    const shouldDisableEmptyCustomPass =
+      draft.useCustomPassphrase && draft.syncPassphrase.trim().length < 4;
+    const upgradedDraft: VaultSyncConfig = {
+      ...draft,
+      provider: 'googleDrive',
+      isBound: true,
+      googleAccountEmail: oauthResult.account.email,
+      googleDisplayName: oauthResult.account.displayName || draft.googleDisplayName,
+      useCustomPassphrase: shouldDisableEmptyCustomPass ? false : draft.useCustomPassphrase,
+      lastSyncError: '',
+    };
+
+    if (!hasGoogleDriveAppDataScope(this.googleTokens.scope)) {
+      this.config = {
+        ...upgradedDraft,
+        isBound: true,
+        lastSyncError: GOOGLE_DRIVE_PERMISSION_STILL_UNCHECKED_MESSAGE,
+      };
+      await this.persistNow();
+      throw new VaultCloudSyncError(
+        GOOGLE_DRIVE_PERMISSION_STILL_UNCHECKED_MESSAGE,
+        'gdrive-appdata-scope-unchecked',
+      );
+    }
+
+    this.config = { ...upgradedDraft };
+    await this.persistNow();
+    return upgradedDraft;
   }
 
   private buildTransport(
@@ -2872,73 +3049,140 @@ export class DesktopCloudSyncService {
     }
   }
 
+  private async runSingleTransportSync(params: {
+    draft: VaultSyncConfig;
+    mode: VaultSyncOperationMode;
+    localRaw: Record<string, unknown>;
+    onGistIdResolved: (id: string) => void;
+  }): Promise<VaultSyncPayload> {
+    const { draft, mode, localRaw, onGistIdResolved } = params;
+    const passphrase = effectiveEncryptionPassphrase(draft);
+    const transport = this.buildTransport(draft, onGistIdResolved);
+
+    if (mode === 'pushForce') {
+      const resultingPayload = VaultSyncPayloadMerger.normalizePayload(localRaw);
+      const sealed = await VaultCloudSyncCrypto.sealAsync({
+        payload: resultingPayload as unknown as Record<string, unknown>,
+        passphrase,
+      });
+      await transport.uploadEnvelope(sealed);
+      return resultingPayload;
+    }
+
+    if (mode === 'pullOnly') {
+      const remoteRaw = await transport.downloadEnvelope();
+      if (!remoteRaw || remoteRaw.trim().length === 0) {
+        throw new VaultCloudSyncError(
+          `No encrypted vault found on ${providerLabel(draft.provider)} yet.`,
+          'remote-vault-empty',
+        );
+      }
+      const opened = await VaultCloudSyncCrypto.openAsync({
+        rawEnvelopeJson: remoteRaw,
+        passphrase,
+      });
+      const resultingPayload = VaultSyncPayloadMerger.normalizePayload(opened);
+      this.tombstones = { ...resultingPayload.tombstones };
+      await this.vaultBridge.applySyncedPayload(resultingPayload);
+      return resultingPayload;
+    }
+
+    const remoteRaw = await transport.downloadEnvelope();
+    const resultingPayload =
+      remoteRaw && remoteRaw.trim().length > 0
+        ? VaultSyncPayloadMerger.merge(
+            localRaw,
+            await VaultCloudSyncCrypto.openAsync({
+              rawEnvelopeJson: remoteRaw,
+              passphrase,
+            }),
+          )
+        : VaultSyncPayloadMerger.normalizePayload(localRaw);
+
+    const sealed = await VaultCloudSyncCrypto.sealAsync({
+      payload: resultingPayload as unknown as Record<string, unknown>,
+      passphrase,
+    });
+    await transport.uploadEnvelope(sealed);
+    this.tombstones = { ...resultingPayload.tombstones };
+    await this.vaultBridge.applySyncedPayload(resultingPayload);
+    return resultingPayload;
+  }
+
   async executeSync(
     draftInput?: Partial<VaultSyncConfig>,
     rawMode: VaultSyncOperationMode = 'smartMerge',
+    options?: { allowInteractiveOAuthUpgrade?: boolean; signal?: AbortSignal },
   ): Promise<VaultSyncRunSummary> {
     await this.init();
     const mode = normalizeOperationMode(rawMode);
-    const draft = draftInput ? protectBoundCloudSyncDraft(this.config, draftInput) : { ...this.config };
+    let draft = draftInput ? protectBoundCloudSyncDraft(this.config, draftInput) : { ...this.config };
 
-    if (!hasValidEncryptionKey(draft)) {
-      const msg =
-        draft.provider === 'googleDrive' && !draft.useCustomPassphrase
-          ? 'Sign in with Google first to bind your encrypted vault.'
-          : 'Sync Passphrase must be at least 4 characters.';
-      throw new VaultCloudSyncError(msg, 'missing-encryption-key');
+    if (draft.useCustomPassphrase && draft.syncPassphrase.trim().length < 4) {
+      throw new VaultCloudSyncError('Sync Passphrase must be at least 4 characters.', 'missing-encryption-key');
     }
 
     let resolvedGistId = draft.githubGistId;
-    const passphrase = effectiveEncryptionPassphrase(draft);
+    const canInteractiveUpgrade =
+      (options?.allowInteractiveOAuthUpgrade ?? true) && typeof this.openExternal === 'function';
+    let didAttemptConsentUpgrade = false;
 
     try {
-      const transport = this.buildTransport(draft, (id) => {
-        resolvedGistId = id;
-      });
+      const needsPreSyncGoogleUpgrade =
+        draft.provider === 'googleDrive' &&
+        (this.googleTokens === null ||
+          (this.googleTokens.scope.trim().length > 0 && !hasGoogleDriveAppDataScope(this.googleTokens.scope)) ||
+          isMissingGoogleDriveAppDataErrorMessage(draft.lastSyncError) ||
+          isMissingGoogleDriveAppDataErrorMessage(this.config.lastSyncError));
+
+      if (needsPreSyncGoogleUpgrade && canInteractiveUpgrade) {
+        didAttemptConsentUpgrade = true;
+        draft = await this.performIncrementalGoogleConsentUpgrade(draft, options?.signal);
+      }
+
+      if (!hasValidEncryptionKey(draft)) {
+        const msg =
+          draft.provider === 'googleDrive' && !draft.useCustomPassphrase
+            ? 'Sign in with Google first to bind your encrypted vault.'
+            : 'Sync Passphrase must be at least 4 characters.';
+        throw new VaultCloudSyncError(msg, 'missing-encryption-key');
+      }
 
       const localRaw = await this.vaultBridge.exportLocalPayload({ ...this.tombstones });
       let resultingPayload: VaultSyncPayload;
 
-      if (mode === 'pushForce') {
-        resultingPayload = VaultSyncPayloadMerger.normalizePayload(localRaw);
-        const sealed = await VaultCloudSyncCrypto.sealAsync({
-          payload: resultingPayload as unknown as Record<string, unknown>,
-          passphrase,
+      try {
+        resultingPayload = await this.runSingleTransportSync({
+          draft,
+          mode,
+          localRaw,
+          onGistIdResolved: (id) => {
+            resolvedGistId = id;
+          },
         });
-        await transport.uploadEnvelope(sealed);
-      } else if (mode === 'pullOnly') {
-        const remoteRaw = await transport.downloadEnvelope();
-        if (!remoteRaw || remoteRaw.trim().length === 0) {
-          throw new VaultCloudSyncError(
-            `No encrypted vault found on ${providerLabel(draft.provider)} yet.`,
-            'remote-vault-empty',
-          );
+      } catch (innerErr) {
+        const isReactiveHttp403ScopeError =
+          draft.provider === 'googleDrive' &&
+          canInteractiveUpgrade &&
+          !didAttemptConsentUpgrade &&
+          innerErr instanceof VaultCloudSyncError &&
+          innerErr.code === 'gdrive-http-403' &&
+          isMissingGoogleDriveAppDataErrorMessage(innerErr.message);
+
+        if (!isReactiveHttp403ScopeError) {
+          throw innerErr;
         }
-        const opened = await VaultCloudSyncCrypto.openAsync({
-          rawEnvelopeJson: remoteRaw,
-          passphrase,
+
+        didAttemptConsentUpgrade = true;
+        draft = await this.performIncrementalGoogleConsentUpgrade(draft, options?.signal);
+        resultingPayload = await this.runSingleTransportSync({
+          draft,
+          mode,
+          localRaw,
+          onGistIdResolved: (id) => {
+            resolvedGistId = id;
+          },
         });
-        resultingPayload = VaultSyncPayloadMerger.normalizePayload(opened);
-        this.tombstones = { ...resultingPayload.tombstones };
-        await this.vaultBridge.applySyncedPayload(resultingPayload);
-      } else {
-        const remoteRaw = await transport.downloadEnvelope();
-        if (remoteRaw && remoteRaw.trim().length > 0) {
-          const remotePayload = await VaultCloudSyncCrypto.openAsync({
-            rawEnvelopeJson: remoteRaw,
-            passphrase,
-          });
-          resultingPayload = VaultSyncPayloadMerger.merge(localRaw, remotePayload);
-        } else {
-          resultingPayload = VaultSyncPayloadMerger.normalizePayload(localRaw);
-        }
-        const sealed = await VaultCloudSyncCrypto.sealAsync({
-          payload: resultingPayload as unknown as Record<string, unknown>,
-          passphrase,
-        });
-        await transport.uploadEnvelope(sealed);
-        this.tombstones = { ...resultingPayload.tombstones };
-        await this.vaultBridge.applySyncedPayload(resultingPayload);
       }
 
       const nowMs = Date.now();
