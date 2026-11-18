@@ -67,3 +67,120 @@ export function parseContextRequest(value: unknown): ContextRequest | undefined 
   if (!CONTEXT_KINDS.includes(kind as ContextKind) || !isPoint(x) || !isPoint(y)) return undefined;
   return { kind: kind as ContextKind, x, y };
 }
+
+export type ConnectionActionId =
+  | 'connect-primary'
+  | 'launch-ssh'
+  | 'launch-sftp'
+  | 'launch-port-forward'
+  | 'toggle-favorite'
+  | 'edit-properties'
+  | 'duplicate'
+  | 'copy-endpoint'
+  | 'delete-connection';
+
+export interface ConnectionActionTarget {
+  readonly key: string;
+  readonly name: string;
+  readonly protocol: string;
+  readonly pluginType: string;
+  readonly host: string;
+  readonly port: number;
+  readonly username: string;
+  readonly jumpHost: string;
+  readonly sshKey?: string;
+  readonly isFavorite: boolean;
+  readonly folderName?: string;
+}
+
+export interface ConnectionActionItem {
+  readonly id: ConnectionActionId;
+  readonly label: string;
+  readonly hint?: string;
+  readonly shortcut?: string;
+  readonly primary?: boolean;
+  readonly active?: boolean;
+  readonly destructive?: boolean;
+}
+
+export interface ConnectionActionSection {
+  readonly id: 'launch' | 'manage' | 'danger';
+  readonly title?: string;
+  readonly separatedDanger?: boolean;
+  readonly items: readonly ConnectionActionItem[];
+}
+
+/** Builds crisp grouped action sections for the Connection Action Context Sheet, isolating destructive Delete at the bottom. */
+export function buildConnectionActionSections(target: ConnectionActionTarget): ConnectionActionSection[] {
+  const protoLabel = target.protocol || target.pluginType || 'RDP';
+  const viaNote = target.jumpHost ? `via ${target.jumpHost}` : 'Direct';
+  return [
+    {
+      id: 'launch',
+      title: 'Connect & Tunnels',
+      items: [
+        {
+          id: 'connect-primary',
+          label: `Connect (${protoLabel})`,
+          hint: `${target.host}:${target.port} · ${viaNote}`,
+          shortcut: '↩',
+          primary: true,
+        },
+        {
+          id: 'launch-ssh',
+          label: 'Open SSH Terminal',
+          hint: `${target.username || 'root'}@${target.host}:22`,
+        },
+        {
+          id: 'launch-sftp',
+          label: 'Open SFTP Commander',
+          hint: `Dual-pane transfer · ${viaNote}`,
+        },
+        {
+          id: 'launch-port-forward',
+          label: 'Local Port Forward (ssh -L)',
+          hint: `Tunnel 127.0.0.1 → ${target.host}:${target.port}`,
+        },
+      ],
+    },
+    {
+      id: 'manage',
+      title: 'Organize',
+      items: [
+        {
+          id: 'toggle-favorite',
+          label: target.isFavorite ? 'Remove from Favorites' : 'Pin to Favorites',
+          shortcut: '⌘B',
+          active: target.isFavorite,
+        },
+        {
+          id: 'edit-properties',
+          label: 'Edit Properties…',
+          shortcut: '⌘I',
+        },
+        {
+          id: 'duplicate',
+          label: 'Duplicate Connection',
+          shortcut: '⌘D',
+        },
+        {
+          id: 'copy-endpoint',
+          label: 'Copy Host & Endpoint',
+          hint: `${target.host}:${target.port}`,
+        },
+      ],
+    },
+    {
+      id: 'danger',
+      separatedDanger: true,
+      items: [
+        {
+          id: 'delete-connection',
+          label: 'Delete Connection…',
+          shortcut: '⌫',
+          destructive: true,
+        },
+      ],
+    },
+  ];
+}

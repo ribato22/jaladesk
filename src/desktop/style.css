@@ -411,8 +411,10 @@ dialog#conflicts[open],dialog#toolbar-dialog[open],dialog#shortcuts-dialog[open]
 #hist-tree:focus-visible .row[aria-selected=true]{outline:2px solid var(--focus);outline-offset:-2px}
 
 .buttons,.dialog-actions{display:flex;gap:8px;justify-content:flex-end;align-items:center;flex-wrap:wrap;margin-top:6px}
-.dialog-actions{padding-top:10px;border-top:1px solid var(--line);margin-top:4px}
+.dialog-actions{padding:12px 20px;margin:12px -20px -18px;border-top:1px solid var(--line);background:color-mix(in srgb,var(--tabs) 78%,var(--bar));border-radius:0 0 10px 10px}
+.config-body > .dialog-actions{padding:12px 22px;margin:10px -22px -18px}
 .buttons.spread{margin-top:10px;flex-wrap:wrap}
+.buttons.spread.dialog-actions{margin:12px -20px -18px}
 .buttons.spread button{width:auto}
 .buttons .grow{flex:1}
 
@@ -523,10 +525,12 @@ body.settings .settings-footer button{height:30px;padding:0 14px;border-radius:7
 .jump-vnc-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
 .jump-vnc-actions .plugin-pass-input{width:136px;height:26px;font-size:12px}
 .jump-vnc-stage{position:relative;flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;overflow:auto;background:var(--canvas)}
-.jump-vnc-canvas{display:block;background:var(--canvas);outline:none;cursor:default}
+.jump-vnc-canvas{display:block;flex:none;background:var(--canvas);outline:none;cursor:default;max-width:none;max-height:none}
 .jump-vnc-canvas:focus-visible{box-shadow:0 0 0 2px var(--accent-line)}
-.jump-vnc-shell[data-scale=fit] .jump-vnc-canvas{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
-.jump-vnc-shell[data-scale=actual] .jump-vnc-canvas{max-width:none;max-height:none}
+.jump-vnc-shell[data-scale=fit] .jump-vnc-stage{overflow:hidden;align-items:center;justify-content:center}
+.jump-vnc-shell[data-scale=fill] .jump-vnc-stage,.jump-vnc-shell[data-scale=actual] .jump-vnc-stage{overflow:auto;align-items:flex-start;justify-content:flex-start}
+.jump-vnc-shell[data-scale=fill] .jump-vnc-canvas{cursor:grab}
+.jump-vnc-shell[data-scale=fill] .jump-vnc-canvas[data-panning=true]{cursor:grabbing}
 .jump-vnc-overlay{max-width:520px;margin:24px;padding:24px 28px;border-radius:12px;background:var(--surface);border:1px solid var(--line-input);box-shadow:0 12px 32px var(--shadow);text-align:center;display:flex;flex-direction:column;align-items:center;gap:10px}
 .jump-vnc-overlay h3{margin:0;font-size:16px;font-weight:700;color:var(--text)}
 .jump-vnc-overlay p{margin:0;font-size:12.5px;line-height:1.5;color:var(--muted)}
@@ -535,7 +539,8 @@ body.settings .settings-footer button{height:30px;padding:0 14px;border-radius:7
 /* ---- Jump Desktop & Royal TSX Session Toolbar, Split-View & Machine Dashboard Grid ---- */
 .tab-strip-tool{height:26px;padding:2px 10px;margin-bottom:4px;font-size:11.5px;font-weight:600;border-radius:6px;flex:none}
 .session-select{width:auto;min-height:26px;height:26px;margin:0;padding:2px 24px 2px 8px;font-size:12px;font-weight:550;border-radius:6px;background-color:var(--surface);border:1px solid var(--line-input);color:var(--text-2)}
-body[data-rdp-scale=stretch] #screen > canvas{object-fit:fill;width:100%;height:100%}
+body[data-rdp-scale=fill] #screen > canvas{object-fit:cover;width:100%;height:100%}
+body[data-rdp-scale=stretch] #screen > canvas{object-fit:cover;width:100%;height:100%}
 body[data-rdp-scale=actual] #screen{overflow:auto;align-items:flex-start;justify-content:flex-start}
 body[data-rdp-scale=actual] #screen > canvas{max-width:none;max-height:none;width:auto;height:auto;object-fit:none}
 #screen[data-split]{display:grid;gap:6px;padding:6px;align-items:stretch;justify-items:stretch;overflow:hidden}
@@ -575,7 +580,151 @@ body[data-rdp-scale=actual] #screen > canvas{max-width:none;max-height:none;widt
 #screen,#placeholder,aside,.settings-content{scrollbar-width:none;-ms-overflow-style:none}
 #screen::-webkit-scrollbar,#placeholder::-webkit-scrollbar,aside::-webkit-scrollbar,.settings-content::-webkit-scrollbar{display:none;width:0;height:0}
 
+/* ---- v1.16 Enterprise Parity: 1-Row Segmented Controls, Topbar Pills & Connection Action Sheet ---- */
+.topbar-studio-pill{height:28px;padding:0 11px;font-size:12px;font-weight:650;border-radius:7px;background:color-mix(in srgb,var(--chip) 78%,var(--surface));color:var(--chip-text);border:1px solid color-mix(in srgb,var(--line-input) 55%,transparent);display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.topbar-studio-pill:hover:not(:disabled){filter:none;background:var(--selected);border-color:var(--accent-line);color:var(--text)}
+.overview-studio-strip{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:7px;width:100%}
+.overview-studio-chip{height:32px;padding:0 13px;border-radius:8px;font-size:12px;font-weight:650;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.overview-studio-chip.primary{background:var(--accent);color:var(--on-accent);box-shadow:0 2px 8px var(--shadow)}
+
+.segmented-bar,.jala-segmented-bar{display:flex;flex-wrap:nowrap;align-items:center;gap:3px;width:100%;padding:3px;margin:0 0 8px;border-radius:8px;background:color-mix(in srgb,var(--tabs) 72%,var(--bar));border:1px solid var(--line)}
+.segmented-bar-compact{width:auto;min-width:138px;margin:0;padding:2px;border-radius:7px}
+.segmented-item,.jala-segment-pill{flex:1 1 0;min-width:0;height:30px;padding:0 8px;border-radius:6px;border:1px solid transparent;background:transparent;color:var(--muted);font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;justify-content:center;gap:5px;cursor:pointer}
+.segmented-bar-compact .segmented-item{height:24px;padding:0 9px;font-size:12px}
+.segmented-item:hover:not(:disabled),.jala-segment-pill:hover:not(:disabled){filter:none;color:var(--text);background:color-mix(in srgb,var(--surface) 65%,transparent)}
+.segmented-item.active,.segmented-item[aria-pressed=true],.jala-segment-pill.is-selected,.jala-segment-pill[data-selected=true]{background:var(--selected);border-color:var(--accent-line);color:var(--text);font-weight:700;box-shadow:0 1px 4px var(--shadow)}
+
+.conn-action-sheet{position:fixed;z-index:1100;width:min(308px,calc(100vw - 24px));border-radius:11px;background:var(--surface);border:1px solid var(--line-input);box-shadow:0 16px 40px var(--shadow);overflow:hidden;display:flex;flex-direction:column}
+.conn-sheet-head{padding:10px 13px;background:color-mix(in srgb,var(--header) 86%,var(--bar));border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:2px}
+.conn-sheet-title{font-size:13px;font-weight:700;color:var(--header-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conn-sheet-sub{font-size:12px;color:var(--header-sub);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conn-sheet-section{padding:5px;display:flex;flex-direction:column;gap:2px}
+.conn-sheet-section + .conn-sheet-section{border-top:1px solid var(--line)}
+.conn-sheet-section-label{padding:4px 8px 2px;font-size:12px;font-weight:700;color:var(--muted)}
+.conn-sheet-danger{background:color-mix(in srgb,var(--tabs) 74%,var(--bar));padding:6px 5px}
+.conn-sheet-item{width:100%;padding:7px 9px;border-radius:7px;border:1px solid transparent;background:transparent;color:var(--text);text-align:left;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12.5px;font-weight:550}
+.conn-sheet-item:hover:not(:disabled),.conn-sheet-item:focus-visible{filter:none;background:var(--selected);border-color:color-mix(in srgb,var(--accent-line) 55%,transparent)}
+.conn-sheet-item[data-primary=true]{background:color-mix(in srgb,var(--accent) 22%,var(--surface));border-color:color-mix(in srgb,var(--accent-line) 55%,var(--line));font-weight:650}
+.conn-sheet-item[data-active=true]{color:var(--amber);font-weight:650}
+.conn-sheet-item[data-destructive=true]{color:var(--danger);font-weight:650}
+.conn-sheet-item[data-destructive=true]:hover:not(:disabled){background:color-mix(in srgb,var(--danger) 16%,var(--surface));border-color:color-mix(in srgb,var(--danger) 55%,var(--line))}
+.conn-sheet-item-main{display:flex;flex-direction:column;gap:1px;min-width:0}
+.conn-sheet-item-hint{font-size:12px;font-weight:450;color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conn-sheet-kbd{font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--muted);padding:1px 6px;border-radius:5px;background:var(--bar);border:1px solid var(--line);flex:none}
+
+/* ---- Cloud Sync, RFC 6238 2FA Authenticator, App Lock PIN & Built-In User Guide Studios ---- */
+dialog.jala-studio-dialog{width:min(680px,94vw);max-height:90vh;padding:0;border:1px solid var(--line-input);border-radius:12px;background:var(--aside);color:var(--text);box-shadow:0 18px 44px var(--shadow);overflow:hidden}
+dialog.jala-studio-dialog[open]{display:flex;flex-direction:column}
+dialog.jala-user-guide-dialog{width:min(980px,95vw);max-height:90vh}
+.jala-studio-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 18px;background:color-mix(in srgb,var(--header) 88%,var(--bar));color:var(--header-text);border-bottom:1px solid var(--line);flex:none}
+.jala-studio-header-lead{display:flex;align-items:center;gap:11px;min-width:0}
+.jala-studio-icon-badge{width:34px;height:34px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;background:var(--chip);color:var(--brand);border:1px solid color-mix(in srgb,var(--line-input) 65%,transparent);flex:none}
+.jala-studio-icon-badge[data-tone=blue]{color:var(--mark-blue)}
+.jala-studio-icon-badge[data-tone=green]{color:var(--ok)}
+.jala-studio-icon-badge[data-tone=purple]{color:var(--mark-purple)}
+.jala-studio-icon-badge[data-tone=teal]{color:var(--mark-teal)}
+.jala-studio-icon-badge[data-tone=gold]{color:var(--brand)}
+.jala-studio-title-group{display:flex;flex-direction:column;gap:2px;min-width:0}
+.jala-studio-title{margin:0;font-size:15px;font-weight:700;color:var(--header-text)}
+.jala-studio-subtitle{margin:0;font-size:12px;color:var(--header-sub)}
+.jala-studio-header-actions{display:flex;align-items:center;gap:6px;flex:none}
+.jala-icon-close-btn{width:28px;height:28px;padding:0;border-radius:7px;background:color-mix(in srgb,var(--chip) 70%,transparent);color:var(--header-text);border:1px solid color-mix(in srgb,var(--line-input) 50%,transparent);display:inline-flex;align-items:center;justify-content:center}
+.jala-icon-close-btn:hover:not(:disabled){filter:none;background:var(--selected);border-color:var(--accent-line)}
+.jala-studio-body{flex:1 1 auto;min-height:0;overflow:auto;padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.jala-studio-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding:12px 18px;background:color-mix(in srgb,var(--tabs) 82%,var(--header));border-top:1px solid var(--line);flex:none}
+.jala-studio-footer-left,.jala-studio-footer-right,.jala-inline-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.jala-footer-note,.jala-helper-note{margin:0;font-size:12px;color:var(--muted);line-height:1.45}
+.jala-studio-section{padding:12px 14px;border-radius:9px;background:var(--surface);border:1px solid var(--line);display:flex;flex-direction:column;gap:9px}
+.jala-section-heading{margin:0;font-size:13px;font-weight:700;color:var(--text)}
+.jala-section-row-between{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.jala-form-grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.jala-form-host-port{display:grid;grid-template-columns:1fr 96px;gap:10px}
+.jala-field-label{margin:0;display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--text-2)}
+.jala-field-optional{font-size:12px;font-weight:450;color:var(--muted);margin-left:4px}
+.jala-input{margin:0;height:32px;padding:5px 10px;font-size:12.5px;border-radius:7px;background:var(--aside);border:1px solid var(--line-input);color:var(--text)}
+.jala-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.jala-switch-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0;font-size:12.5px;color:var(--text)}
+.jala-setup-hint{border:1px solid var(--line);border-radius:8px;padding:8px 11px;background:var(--bar);font-size:12px;color:var(--text-2)}
+.jala-setup-hint-summary{cursor:pointer;font-weight:650;color:var(--text)}
+.jala-setup-hint-body{margin-top:6px;display:flex;flex-direction:column;gap:4px;line-height:1.45}
+.cs-google-hero-card{padding:12px 14px;border-radius:8px;background:var(--bar);border:1px solid var(--line);display:flex;flex-direction:column;gap:10px}
+.cs-google-hero-desc{margin:0;font-size:12.5px;line-height:1.45;color:var(--text-2)}
+.cs-google-signin-btn{height:34px;padding:0 16px;font-size:12.5px;font-weight:650}
+.cs-advanced-disclosure{margin-top:2px;border-top:1px solid var(--line);padding-top:8px;font-size:12px;color:var(--muted)}
+.cs-advanced-summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);user-select:none}
+.cs-advanced-summary:hover{color:var(--text-2)}
+.cs-advanced-body{margin-top:9px;padding:10px 12px;border-radius:8px;background:var(--bar);border:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.jala-btn{height:30px;padding:0 12px;border-radius:7px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--surface);border:1px solid var(--line-input);color:var(--text)}
+.jala-btn:hover:not(:disabled){filter:none;background:var(--selected);border-color:var(--accent-line)}
+.jala-btn-primary{background:var(--accent);border-color:var(--accent-line);color:var(--on-accent)}
+.jala-btn-primary:hover:not(:disabled){filter:brightness(1.08);background:var(--accent);color:var(--on-accent)}
+.jala-btn-danger-outline{background:transparent;border-color:color-mix(in srgb,var(--danger) 55%,var(--line));color:var(--danger)}
+.jala-btn-danger-outline:hover:not(:disabled){filter:none;background:color-mix(in srgb,var(--danger) 14%,var(--surface));border-color:var(--danger)}
+.jala-status-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:650;background:var(--bar);border:1px solid var(--line);color:var(--text-2)}
+.jala-status-pill[data-tone=ok]{background:color-mix(in srgb,var(--ok) 15%,var(--surface));border-color:color-mix(in srgb,var(--ok) 50%,var(--line));color:var(--ok)}
+.jala-status-pill[data-tone=warn]{background:var(--confirm);border-color:var(--amber);color:var(--amber)}
+.jala-status-pill[data-tone=danger]{background:color-mix(in srgb,var(--danger) 15%,var(--surface));border-color:color-mix(in srgb,var(--danger) 50%,var(--line));color:var(--danger)}
+.jala-warning-callout,.jala-alert-banner{padding:9px 12px;border-radius:8px;font-size:12px;line-height:1.45;background:var(--confirm);border:1px solid var(--amber);color:var(--text)}
+.jala-alert-banner[data-tone=ok]{background:color-mix(in srgb,var(--ok) 14%,var(--surface));border-color:color-mix(in srgb,var(--ok) 48%,var(--line));color:var(--ok)}
+.jala-alert-banner[data-tone=danger]{background:color-mix(in srgb,var(--danger) 14%,var(--surface));border-color:color-mix(in srgb,var(--danger) 48%,var(--line));color:var(--danger)}
+.jala-empty-state{padding:22px 16px;border:1px dashed var(--decor-line);border-radius:9px;text-align:center;color:var(--muted);font-size:12.5px}
+
+.jala-totp-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.jala-totp-drawer{padding:12px 14px;border-radius:9px;background:var(--surface);border:1px solid var(--line);display:flex;flex-direction:column;gap:9px}
+.jala-totp-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:10px}
+.jala-totp-card{padding:12px 14px;border-radius:10px;background:var(--surface);border:1px solid var(--line);display:flex;flex-direction:column;gap:8px;box-shadow:0 2px 8px var(--shadow)}
+.jala-totp-card-top,.jala-totp-code-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.jala-totp-identity{display:flex;flex-direction:column;gap:1px;min-width:0}
+.jala-totp-issuer{font-size:13px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jala-totp-account{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jala-totp-code{font-size:22px;font-weight:750;letter-spacing:.06em;color:var(--accent-line);font-variant-numeric:tabular-nums}
+.jala-totp-card-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.jala-totp-remaining{font-size:12px;font-weight:650;color:var(--muted);font-variant-numeric:tabular-nums}
+.jala-totp-remaining[data-urgent=true]{color:var(--danger)}
+.jala-totp-progress{width:100%;height:5px;border-radius:999px;accent-color:var(--accent-line)}
+.jala-totp-progress[data-urgent=true]{accent-color:var(--danger)}
+
+.jala-pin-overlay{position:fixed;inset:0;z-index:1200;display:flex;align-items:center;justify-content:center;padding:20px;background:color-mix(in srgb,var(--header) 94%,var(--tabs));backdrop-filter:blur(18px)}
+.jala-pin-lock-card{width:min(380px,94vw);padding:26px 24px;border-radius:16px;background:var(--surface);border:1px solid var(--line-input);box-shadow:0 20px 48px var(--shadow);display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center}
+.jala-pin-emblem{width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:var(--header);color:var(--brand);border:1px solid var(--line-input)}
+.jala-pin-title{margin:0;font-size:17px;font-weight:750;color:var(--text)}
+.jala-pin-subtitle{margin:0;font-size:12.5px;color:var(--muted)}
+.jala-pin-dots{display:flex;align-items:center;justify-content:center;gap:10px;min-height:20px}
+.jala-pin-dot{width:12px;height:12px;border-radius:999px;border:2px solid var(--line-input);background:transparent}
+.jala-pin-dot[data-filled=true]{background:var(--brand);border-color:var(--brand)}
+.jala-pin-dot[data-error=true]{background:var(--danger);border-color:var(--danger)}
+.jala-pin-error{margin:0;min-height:18px;font-size:12px;font-weight:600;color:var(--danger)}
+.jala-pin-keypad{width:100%;max-width:264px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.jala-pin-key{height:48px;border-radius:11px;font-size:17px;font-weight:700;background:var(--bar);border:1px solid var(--line-input);color:var(--text);display:inline-flex;align-items:center;justify-content:center}
+.jala-pin-key:hover:not(:disabled){filter:none;background:var(--selected);border-color:var(--accent-line)}
+.jala-pin-key-aux{font-size:12.5px;font-weight:600;color:var(--muted)}
+
+.jala-guide-shell{display:flex;flex-direction:column;gap:12px;min-height:0;flex:1 1 auto}
+.jala-guide-filter-strip{display:flex;flex-direction:column;gap:8px;padding:12px 18px;background:var(--bar);border-bottom:1px solid var(--line)}
+.jala-guide-search-row{position:relative;display:flex;align-items:center;gap:8px}
+.jala-guide-search-icon{color:var(--glyph);display:inline-flex;align-items:center}
+.jala-guide-search-input{margin:0;flex:1;height:34px;padding:6px 12px;font-size:13px;border-radius:8px;background:var(--surface);border:1px solid var(--line-input);color:var(--text)}
+.jala-guide-category-bar{display:flex;flex-wrap:wrap;gap:6px}
+.jala-guide-cat-chip{height:28px;padding:0 11px;border-radius:999px;font-size:12px;font-weight:600;background:var(--surface);border:1px solid var(--line);color:var(--text-2)}
+.jala-guide-cat-chip.is-selected{background:var(--selected);border-color:var(--accent-line);color:var(--text);font-weight:700}
+.jala-guide-body{flex:1 1 auto;min-height:0;overflow:auto;padding:16px 18px}
+.jala-guide-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start}
+.jala-guide-card{padding:14px 16px;border-radius:10px;background:var(--surface);border:1px solid var(--line);display:flex;flex-direction:column;gap:10px;box-shadow:0 2px 8px var(--shadow)}
+.jala-guide-card-header{display:flex;align-items:center;gap:10px}
+.jala-guide-card-title{margin:0;font-size:14px;font-weight:700;color:var(--text)}
+.jala-guide-card-body{display:flex;flex-direction:column;gap:9px}
+.jala-guide-card-summary{margin:0;font-size:12.5px;line-height:1.5;color:var(--text-2)}
+.jala-guide-pills{display:flex;flex-wrap:wrap;gap:6px}
+.jala-guide-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:7px;background:var(--bar);border:1px solid var(--line);font-size:12px}
+.jala-kbd{padding:1px 6px;border-radius:5px;background:var(--surface);border:1px solid var(--line-input);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;font-weight:650;color:var(--text)}
+.jala-guide-pill-detail{font-size:12px;color:var(--muted)}
+.jala-guide-bullets{display:flex;flex-direction:column;gap:7px}
+.jala-guide-bullet{display:flex;flex-direction:column;gap:2px;padding-top:6px;border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent)}
+.jala-guide-bullet-title{font-size:12.5px;font-weight:650;color:var(--text)}
+.jala-guide-bullet-text{margin:0;font-size:12.5px;line-height:1.5;color:var(--muted)}
+
 @media(max-width:950px){
+  .jala-guide-grid,.jala-form-grid-2{grid-template-columns:1fr}
   .layout{grid-template-columns:224px 1fr}
   .overview-proto-grid{grid-template-columns:repeat(2,minmax(160px,1fr))}
   .dialog-grid-2{grid-template-columns:1fr}

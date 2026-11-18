@@ -29,6 +29,588 @@ export function ipToUint32(ip: string): number | null {
   return val >>> 0;
 }
 
+export const DIRECT_NO_JUMP_OVERRIDE = '__direct__' as const;
+
+export type DisplaySizingMode = 'fit' | 'fill' | 'actual';
+
+export interface ProportionalDisplayBox {
+  readonly mode: DisplaySizingMode;
+  readonly cssWidth: number;
+  readonly cssHeight: number;
+  readonly offsetX: number;
+  readonly offsetY: number;
+  readonly overflowX: number;
+  readonly overflowY: number;
+  readonly scaleX: number;
+  readonly scaleY: number;
+  readonly aspectRatioPreserved: boolean;
+}
+
+/** Computes proportional Fit (contain + letterbox/pillarbox), Fill (cover + pan), or 1:1 box without ever stretching remote aspect ratio. */
+export function computeProportionalDisplayBox(
+  viewportWidth: number,
+  viewportHeight: number,
+  remoteWidth: number,
+  remoteHeight: number,
+  mode: DisplaySizingMode,
+): ProportionalDisplayBox {
+  const vw = Math.max(1, Math.round(Number.isFinite(viewportWidth) ? viewportWidth : 1));
+  const vh = Math.max(1, Math.round(Number.isFinite(viewportHeight) ? viewportHeight : 1));
+  const rw = Math.max(1, Math.round(Number.isFinite(remoteWidth) ? remoteWidth : 1));
+  const rh = Math.max(1, Math.round(Number.isFinite(remoteHeight) ? remoteHeight : 1));
+
+  const uniformScale =
+    mode === 'actual' ? 1 : mode === 'fill' ? Math.max(vw / rw, vh / rh) : Math.min(vw / rw, vh / rh);
+
+  const cssWidth = Math.max(1, Math.round(rw * uniformScale));
+  const cssHeight = Math.max(1, Math.round(rh * uniformScale));
+  const offsetX = Math.max(0, Math.floor((vw - cssWidth) / 2));
+  const offsetY = Math.max(0, Math.floor((vh - cssHeight) / 2));
+  const overflowX = Math.max(0, cssWidth - vw);
+  const overflowY = Math.max(0, cssHeight - vh);
+  const nativeRatio = rw / rh;
+  const renderedRatio = cssWidth / cssHeight;
+
+  return {
+    mode,
+    cssWidth,
+    cssHeight,
+    offsetX,
+    offsetY,
+    overflowX,
+    overflowY,
+    scaleX: cssWidth / rw,
+    scaleY: cssHeight / rh,
+    aspectRatioPreserved: Math.abs(renderedRatio - nativeRatio) <= Math.max(0.015, 2 / Math.min(rw, rh)),
+  };
+}
+
+/** Maps a client pointer coordinate on a proportionally sized canvas to clamped remote framebuffer pixel coordinates. */
+export function mapProportionalCanvasPoint(
+  clientX: number,
+  clientY: number,
+  rect: { readonly left: number; readonly top: number; readonly width: number; readonly height: number },
+  remoteWidth: number,
+  remoteHeight: number,
+): { x: number; y: number } {
+  const rw = Math.max(1, Math.round(remoteWidth));
+  const rh = Math.max(1, Math.round(remoteHeight));
+  const rawX = ((clientX - rect.left) / Math.max(1, rect.width)) * rw;
+  const rawY = ((clientY - rect.top) / Math.max(1, rect.height)) * rh;
+  return {
+    x: Math.max(0, Math.min(rw - 1, Math.round(rawX))),
+    y: Math.max(0, Math.min(rh - 1, Math.round(rawY))),
+  };
+}
+
+export interface JumpRouteSpec {
+  readonly jumpHost?: string;
+  readonly gateway?: string;
+  readonly sshKey?: string;
+  readonly defaultUser?: string;
+  readonly notes?: string;
+}
+
+export function extractPluginExtrasFromNotes(notes: string | undefined): {
+  pluginType: string;
+  jumpHost?: string;
+  sshKey?: string;
+  defaultUser?: string;
+  mobileId?: string;
+} {
+  if (typeof notes !== 'string' || !notes) return { pluginType: 'Remote Desktop' };
+  const m = notes.match(/^\[Plugin:\s*([^\]]+)\]/);
+  if (!m) return { pluginType: 'Remote Desktop' };
+  const parts = m[1]!.split('|').map((s) => s.trim());
+  const out: { pluginType: string; jumpHost?: string; sshKey?: string; defaultUser?: string; mobileId?: string } = {
+    pluginType: parts[0] || 'Remote Desktop',
+  };
+  for (let i = 1; i < parts.length; i++) {
+    const kv = parts[i]!;
+    const eq = kv.indexOf('=');
+    if (eq > 0) {
+      const k = kv.slice(0, eq).trim();
+      const v = kv.slice(eq + 1).trim();
+      if (k === 'jump' && v) out.jumpHost = v;
+      else if (k === 'key' && v) out.sshKey = v;
+      else if (k === 'user' && v) out.defaultUser = v;
+      else if (k === 'mid' && v) out.mobileId = v;
+    }
+  }
+  return out;
+}
+
+export interface ResolvedJumpRoute {
+  readonly jumpHost: string;
+  readonly sshKey: string;
+  readonly defaultUser: string;
+  readonly source: 'connection' | 'connection-direct' | 'folder' | 'folder-direct' | 'document' | 'direct';
+}
+
+function readRawJumpValue(spec: JumpRouteSpec | undefined): string {
+  if (!spec) return '';
+  const fromProp = (spec.jumpHost ?? spec.gateway ?? '').trim();
+  if (fromProp) return fromProp;
+  const fromNotes = extractPluginExtrasFromNotes(spec.notes).jumpHost?.trim() ?? '';
+  return fromNotes;
+}
+
+/**
+ * Resolves effective Jump Host for a connection:
+ * - Explicit per-connection Jump Host ALWAYS wins even when parent folder is unconfigured (`''`) or `__direct__`.
+ * - Explicit per-connection `__direct__` bypasses any folder/document Jump Host.
+ * - Unconfigured connection (`''` / `undefined`) walks ancestor folders nearest-first, then document defaults.
+ */
+export function resolveConnectionJumpRoute(
+  connection: JumpRouteSpec,
+  ancestorFolders: readonly JumpRouteSpec[] = [],
+  docDefaults?: JumpRouteSpec,
+): ResolvedJumpRoute {
+  const connNotes = extractPluginExtrasFromNotes(connection.notes);
+  let sshKey = (connection.sshKey ?? connNotes.sshKey ?? '').trim();
+  let defaultUser = (connection.defaultUser ?? connNotes.defaultUser ?? '').trim();
+
+  for (const folder of ancestorFolders) {
+    const fNotes = extractPluginExtrasFromNotes(folder.notes);
+    if (!sshKey) sshKey = (folder.sshKey ?? fNotes.sshKey ?? '').trim();
+    if (!defaultUser) defaultUser = (folder.defaultUser ?? fNotes.defaultUser ?? '').trim();
+  }
+  if (docDefaults) {
+    const dNotes = extractPluginExtrasFromNotes(docDefaults.notes);
+    if (!sshKey) sshKey = (docDefaults.sshKey ?? dNotes.sshKey ?? '').trim();
+    if (!defaultUser) defaultUser = (docDefaults.defaultUser ?? dNotes.defaultUser ?? '').trim();
+  }
+
+  const connJump = readRawJumpValue(connection);
+  if (connJump === DIRECT_NO_JUMP_OVERRIDE) {
+    return { jumpHost: '', sshKey, defaultUser, source: 'connection-direct' };
+  }
+  if (connJump) {
+    return { jumpHost: connJump, sshKey, defaultUser, source: 'connection' };
+  }
+
+  for (const folder of ancestorFolders) {
+    const folderJump = readRawJumpValue(folder);
+    if (folderJump === DIRECT_NO_JUMP_OVERRIDE) {
+      return { jumpHost: '', sshKey, defaultUser, source: 'folder-direct' };
+    }
+    if (folderJump) {
+      return { jumpHost: folderJump, sshKey, defaultUser, source: 'folder' };
+    }
+  }
+
+  const docJump = readRawJumpValue(docDefaults);
+  if (docJump && docJump !== DIRECT_NO_JUMP_OVERRIDE) {
+    return { jumpHost: docJump, sshKey, defaultUser, source: 'document' };
+  }
+  return { jumpHost: '', sshKey, defaultUser, source: 'direct' };
+}
+
+export function resolveDocumentNodeJumpRoute(
+  doc: { readonly objects: Readonly<Record<string, { readonly id: string; readonly parentId: string | null; readonly props: Readonly<Record<string, unknown>> }>> },
+  objectId: string,
+  docDefaults?: JumpRouteSpec,
+): ResolvedJumpRoute {
+  const node = Object.hasOwn(doc.objects, objectId) ? doc.objects[objectId] : undefined;
+  if (!node) return { jumpHost: '', sshKey: '', defaultUser: '', source: 'direct' };
+  const toSpec = (props: Readonly<Record<string, unknown>>): JumpRouteSpec => ({
+    jumpHost: typeof props.jumpHost === 'string' ? props.jumpHost : undefined,
+    gateway: typeof props.gateway === 'string' ? props.gateway : undefined,
+    sshKey: typeof props.sshKey === 'string' ? props.sshKey : undefined,
+    defaultUser: typeof props.defaultUser === 'string' ? props.defaultUser : undefined,
+    notes: typeof props.notes === 'string' ? props.notes : undefined,
+  });
+
+  const ancestors: JumpRouteSpec[] = [];
+  const visited = new Set<string>([node.id]);
+  let curParent = node.parentId;
+  while (curParent && !visited.has(curParent)) {
+    visited.add(curParent);
+    const parentNode = Object.hasOwn(doc.objects, curParent) ? doc.objects[curParent] : undefined;
+    if (!parentNode) break;
+    ancestors.push(toSpec(parentNode.props));
+    curParent = parentNode.parentId;
+  }
+
+  return resolveConnectionJumpRoute(toSpec(node.props), ancestors, docDefaults);
+}
+
+export interface SyncExportDocInput {
+  readonly doc: {
+    readonly id: string;
+    readonly name: string;
+    readonly objects: Readonly<Record<string, {
+      readonly id: string;
+      readonly parentId: string | null;
+      readonly type: string;
+      readonly name: string;
+      readonly props: Readonly<Record<string, unknown>>;
+    }>>;
+    readonly secrets?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  };
+  readonly favorites?: ReadonlySet<string>;
+}
+
+function desktopPluginToMobileProto(pluginType: string): { protocol: string; isJumpHost: boolean } {
+  const p = pluginType.trim();
+  if (p === 'Secure Gateway' || p === 'Royal Server' || p === 'Remote Desktop Gateway') {
+    return { protocol: 'ssh', isJumpHost: true };
+  }
+  if (p === 'Terminal' || p === 'Command Task' || p === 'PowerShell') return { protocol: 'ssh', isJumpHost: false };
+  if (p === 'VNC' || p === 'TeamViewer') return { protocol: 'vnc', isJumpHost: false };
+  if (p === 'File Transfer') return { protocol: 'sftp', isJumpHost: false };
+  if (p === 'VMware' || p === 'Hyper-V') return { protocol: 'hypervisor', isJumpHost: false };
+  return { protocol: 'rdp', isJumpHost: false };
+}
+
+function mobileProtoToDesktopPlugin(protocol: string, isJumpHost: boolean): { pluginType: string; defaultPort: number; icon: string; color: string } {
+  if (isJumpHost) return { pluginType: 'Secure Gateway', defaultPort: 22, icon: 'shield', color: 'green' };
+  const p = protocol.trim().toLowerCase();
+  if (p === 'ssh') return { pluginType: 'Terminal', defaultPort: 22, icon: 'terminal', color: 'purple' };
+  if (p === 'vnc') return { pluginType: 'VNC', defaultPort: 5900, icon: 'laptop', color: 'teal' };
+  if (p === 'sftp') return { pluginType: 'File Transfer', defaultPort: 22, icon: 'cloud', color: 'teal' };
+  if (p === 'hypervisor') return { pluginType: 'VMware', defaultPort: 8006, icon: 'server', color: 'blue' };
+  return { pluginType: 'Remote Desktop', defaultPort: 3389, icon: 'desktop', color: 'blue' };
+}
+
+export function buildDesktopVaultSyncPayload(input: {
+  readonly documents: readonly SyncExportDocInput[];
+  readonly totpItems?: readonly Record<string, unknown>[];
+  readonly sshJumpHosts?: readonly { alias: string; hostName: string; port: number; user: string }[];
+  readonly tombstones?: Readonly<Record<string, number>>;
+  readonly nowMs?: number;
+}): Record<string, unknown> {
+  const ts = input.nowMs ?? Date.now();
+  const hosts: Record<string, unknown>[] = [];
+  const credentials: Record<string, unknown>[] = [];
+  const rawFolderEntries: { name: string; rawJump: string | undefined; accentTint: string }[] = [];
+  const seenFolderNames = new Set<string>();
+  const seenHostIds = new Set<string>();
+  const gatewayIdByAlias = new Map<string, string>();
+  const registerGatewayAlias = (alias: string, id: string) => {
+    const clean = alias.trim();
+    if (!clean || !id) return;
+    if (!gatewayIdByAlias.has(clean)) gatewayIdByAlias.set(clean, id);
+    const dash = clean.replace(/\|/g, '-').trim();
+    if (dash && !gatewayIdByAlias.has(dash)) gatewayIdByAlias.set(dash, id);
+  };
+
+  for (const { doc, favorites } of input.documents) {
+    const secrets = doc.secrets ?? {};
+    for (const node of Object.values(doc.objects)) {
+      if (node.type === 'folder') {
+        const ex = extractPluginExtrasFromNotes(typeof node.props.notes === 'string' ? node.props.notes : undefined);
+        const rawColor = typeof node.props.color === 'string' ? node.props.color : 'gold';
+        if (!seenFolderNames.has(node.name)) {
+          seenFolderNames.add(node.name);
+          rawFolderEntries.push({ name: node.name, rawJump: ex.jumpHost, accentTint: rawColor });
+        }
+      } else if (node.type === 'credential') {
+        const sec = secrets[node.id] ?? {};
+        credentials.push({
+          id: node.id,
+          label: node.name,
+          domain: typeof sec.domain === 'string' ? sec.domain : '',
+          username: typeof sec.username === 'string' ? sec.username : 'root',
+          password: typeof sec.password === 'string' ? sec.password : '',
+          privateKeyPem: typeof sec.privateKey === 'string' ? sec.privateKey : '',
+          notes: typeof node.props.notes === 'string' ? node.props.notes : '',
+          updatedAtMs: ts,
+        });
+      } else if (node.type === 'connection') {
+        const rawNotes = typeof node.props.notes === 'string' ? node.props.notes : '';
+        const ex = extractPluginExtrasFromNotes(rawNotes);
+        const { protocol, isJumpHost } = desktopPluginToMobileProto(ex.pluginType);
+        const parentNode = node.parentId ? doc.objects[node.parentId] : undefined;
+        const folderName = parentNode?.type === 'folder' ? parentNode.name : 'General';
+        const rawUser = typeof node.props.username === 'string' ? node.props.username : 'root';
+        const bsIdx = rawUser.indexOf('\\');
+        const domain = bsIdx > 0 ? rawUser.slice(0, bsIdx) : '';
+        const username = bsIdx > 0 ? rawUser.slice(bsIdx + 1) : rawUser;
+        const exportedId = ex.mobileId || node.id;
+        seenHostIds.add(exportedId);
+        if (isJumpHost) registerGatewayAlias(node.name, exportedId);
+        hosts.push({
+          id: exportedId,
+          name: node.name,
+          address: typeof node.props.host === 'string' ? node.props.host : '127.0.0.1',
+          port: typeof node.props.port === 'number' ? node.props.port : 3389,
+          protocol,
+          folder: folderName,
+          osLabel: ex.pluginType,
+          domain,
+          username: username || 'root',
+          password: '',
+          privateKeyPem: ex.sshKey ?? '',
+          jumpHostId: ex.jumpHost ?? null,
+          credentialId: null,
+          isJumpHost,
+          isFavorite: favorites?.has(node.id) === true,
+          accentTint: typeof node.props.color === 'string' ? node.props.color : 'sapphire',
+          updatedAtMs: ts,
+        });
+      }
+    }
+  }
+
+  for (const jh of input.sshJumpHosts ?? []) {
+    const gwId = `gw-${jh.alias}`;
+    if (!seenHostIds.has(gwId) && !hosts.some((h) => h.isJumpHost === true && h.name === jh.alias)) {
+      registerGatewayAlias(jh.alias, gwId);
+      hosts.push({
+        id: gwId,
+        name: jh.alias,
+        address: jh.hostName,
+        port: jh.port || 22,
+        protocol: 'ssh',
+        folder: 'Gateways',
+        osLabel: 'SSH Bastion',
+        domain: '',
+        username: jh.user || 'root',
+        password: '',
+        privateKeyPem: '',
+        jumpHostId: null,
+        credentialId: null,
+        isJumpHost: true,
+        isFavorite: false,
+        accentTint: 'emerald',
+        updatedAtMs: ts,
+      });
+    }
+  }
+
+  const resolveOutgoingJumpId = (rawAlias: unknown): string | null => {
+    const raw = typeof rawAlias === 'string' ? rawAlias.trim() : '';
+    if (!raw) return null;
+    if (raw === DIRECT_NO_JUMP_OVERRIDE) return DIRECT_NO_JUMP_OVERRIDE;
+    return gatewayIdByAlias.get(raw) ?? gatewayIdByAlias.get(raw.replace(/\|/g, '-').trim()) ?? raw;
+  };
+
+  for (const h of hosts) {
+    h.jumpHostId = resolveOutgoingJumpId(h.jumpHostId);
+  }
+  const folders = rawFolderEntries.map((f) => ({
+    name: f.name,
+    jumpHostId: resolveOutgoingJumpId(f.rawJump),
+    credentialId: null,
+    accentTint: f.accentTint,
+    updatedAtMs: ts,
+  }));
+
+  return {
+    syncSchema: 2,
+    updatedAtMs: ts,
+    hosts,
+    credentials,
+    folders,
+    totp: [...(input.totpItems ?? [])],
+    snippets: [],
+    tombstones: { ...(input.tombstones ?? {}) },
+  };
+}
+
+function mapMobileTintToColorId(tint: unknown, fallback: string): string {
+  const raw = typeof tint === 'string' ? tint.trim().toLowerCase() : '';
+  const valid = new Set(['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'pink', 'gray']);
+  if (valid.has(raw)) return raw;
+  const aliases: Readonly<Record<string, string>> = {
+    sapphire: 'blue',
+    gold: 'yellow',
+    emerald: 'green',
+    coral: 'red',
+    crimson: 'red',
+    amber: 'orange',
+    indigo: 'purple',
+    rose: 'pink',
+    slate: 'gray',
+    cyan: 'teal',
+  };
+  return aliases[raw] ?? fallback;
+}
+
+export function encodeSyncedPluginTag(
+  pluginType: string,
+  extras: { jumpHost?: string | null; sshKey?: string; mobileId?: string },
+): string {
+  const parts: string[] = [];
+  const jh = typeof extras.jumpHost === 'string' ? extras.jumpHost.replace(/\|/g, '-').trim() : '';
+  const key = typeof extras.sshKey === 'string' ? extras.sshKey.replace(/\|/g, '').trim() : '';
+  const mid = typeof extras.mobileId === 'string' ? extras.mobileId.replace(/\|/g, '').trim() : '';
+  if (jh) parts.push(`jump=${jh}`);
+  if (key) parts.push(`key=${key}`);
+  if (mid) parts.push(`mid=${mid}`);
+  if ((!pluginType || pluginType === 'Remote Desktop' || pluginType === 'Folder') && parts.length === 0) return '';
+  return `[Plugin: ${[pluginType || 'Remote Desktop', ...parts].join(' | ')}]`;
+}
+
+export interface SyncMutableLibrary {
+  privateDocument(id: string): {
+    doc: {
+      id: string;
+      name: string;
+      objects: Record<string, { id: string; parentId: string | null; type: string; name: string; props: Record<string, unknown> }>;
+    };
+  };
+  add(id: string, input: { parentId: string | null; type: 'folder' | 'connection'; name: string; props?: Record<string, any> }): { objectId: string };
+  update(id: string, objectId: string, change: { name?: string; props?: Record<string, any> }): unknown;
+  writeCredential(id: string, input: { objectId?: string; name: string; parentId?: string | null; record: any }): { objectId: string };
+}
+
+export function applyMobileSyncPayloadToLibrary(input: {
+  readonly library: SyncMutableLibrary;
+  readonly docHandle: string;
+  readonly payload: {
+    readonly folders?: readonly Record<string, unknown>[];
+    readonly hosts?: readonly Record<string, unknown>[];
+    readonly credentials?: readonly Record<string, unknown>[];
+  };
+  readonly onGatewayUpsert?: (gw: { alias: string; hostName: string; port: number; user: string }) => Promise<unknown> | unknown;
+}): { folders: number; connections: number; gateways: number; credentials: number } {
+  const { library, docHandle, payload } = input;
+  const folderIdsByName = new Map<string, string>();
+  const currentObjects = () => library.privateDocument(docHandle).doc.objects;
+
+  // Pre-pass: map Mobile gateway `id` -> sanitized Desktop SSH Jump Host `alias` (`name`)
+  const gatewayAliasById = new Map<string, string>();
+  for (const node of Object.values(currentObjects())) {
+    if (node.type === 'folder') folderIdsByName.set(node.name, node.id);
+    else if (node.type === 'connection') {
+      const ex = extractPluginExtrasFromNotes(typeof node.props.notes === 'string' ? node.props.notes : undefined);
+      if (['Secure Gateway', 'Royal Server', 'Remote Desktop Gateway'].includes(ex.pluginType)) {
+        const alias = node.name.replace(/\|/g, '-').trim();
+        if (alias) {
+          gatewayAliasById.set(node.id, alias);
+          if (ex.mobileId) gatewayAliasById.set(ex.mobileId, alias);
+          gatewayAliasById.set(alias, alias);
+        }
+      }
+    }
+  }
+  for (const h of payload.hosts ?? []) {
+    if (h.isJumpHost === true) {
+      const rawName = (typeof h.name === 'string' ? h.name : '') || 'Gateway';
+      const sanitizedAlias = rawName.replace(/\|/g, '-').trim() || 'Gateway';
+      const rawGwId = typeof h.id === 'string' ? h.id.trim() : '';
+      if (rawGwId) gatewayAliasById.set(rawGwId, sanitizedAlias);
+      gatewayAliasById.set(sanitizedAlias, sanitizedAlias);
+    }
+  }
+  const resolveIncomingJumpAlias = (rawJumpId: unknown): string => {
+    const raw = typeof rawJumpId === 'string' ? rawJumpId.trim() : '';
+    if (!raw) return '';
+    if (raw === DIRECT_NO_JUMP_OVERRIDE) return DIRECT_NO_JUMP_OVERRIDE;
+    return (gatewayAliasById.get(raw) ?? raw).replace(/\|/g, '-').trim();
+  };
+
+  let folderCount = 0;
+  for (const f of payload.folders ?? []) {
+    const name = typeof f.name === 'string' ? f.name.trim().slice(0, 256) : '';
+    if (!name) continue;
+    const jh = resolveIncomingJumpAlias(f.jumpHostId);
+    const notes = encodeSyncedPluginTag('Folder', { jumpHost: jh });
+    const props = { color: mapMobileTintToColorId(f.accentTint, 'yellow'), icon: 'box', ...(notes ? { notes } : {}) };
+    const existingId = folderIdsByName.get(name);
+    if (existingId) {
+      library.update(docHandle, existingId, { name, props });
+    } else {
+      const added = library.add(docHandle, { parentId: null, type: 'folder', name, props });
+      folderIdsByName.set(name, added.objectId);
+    }
+    folderCount++;
+  }
+
+  let connCount = 0;
+  let gwCount = 0;
+  for (const h of payload.hosts ?? []) {
+    const isJumpHost = h.isJumpHost === true;
+    const rawName = (typeof h.name === 'string' ? h.name.trim() : '') || (isJumpHost ? 'Gateway' : 'Synced Host');
+    const name = isJumpHost ? rawName.replace(/\|/g, '-').trim() || 'Gateway' : rawName;
+    const address = (typeof h.address === 'string' && h.address.trim() ? h.address.trim() : '127.0.0.1').replace(/\s+/g, '');
+    const protoInfo = mobileProtoToDesktopPlugin(typeof h.protocol === 'string' ? h.protocol : 'rdp', isJumpHost);
+    const rawPort = typeof h.port === 'number' && Number.isInteger(h.port) && h.port >= 1 && h.port <= 65535 ? h.port : protoInfo.defaultPort;
+    const dom = typeof h.domain === 'string' ? h.domain.trim() : '';
+    const usr = (typeof h.username === 'string' && h.username.trim() ? h.username.trim() : 'root').slice(0, 200);
+    const fullUser = dom && !usr.includes('\\') ? `${dom}\\${usr}` : usr;
+    const folderName = typeof h.folder === 'string' ? h.folder.trim() : '';
+    let parentId: string | null = null;
+    if (folderName && folderName !== 'General') {
+      parentId = folderIdsByName.get(folderName) ?? null;
+      if (!parentId) {
+        const createdFolder = library.add(docHandle, { parentId: null, type: 'folder', name: folderName.slice(0, 256), props: { color: 'blue', icon: 'box' } });
+        parentId = createdFolder.objectId;
+        folderIdsByName.set(folderName, parentId);
+      }
+    } else if (folderName === 'General' && folderIdsByName.has('General')) {
+      parentId = folderIdsByName.get('General') ?? null;
+    }
+
+    const rawId = typeof h.id === 'string' ? h.id.trim() : '';
+    const jh = resolveIncomingJumpAlias(h.jumpHostId);
+    const notes = encodeSyncedPluginTag(protoInfo.pluginType, { jumpHost: jh, ...(rawId ? { mobileId: rawId } : {}) });
+    const props: Record<string, any> = {
+      protocol: 'rdp',
+      host: address,
+      port: rawPort,
+      username: fullUser,
+      clipboardToRemote: false,
+      clipboardFromRemote: false,
+      color: mapMobileTintToColorId(h.accentTint, protoInfo.color),
+      icon: protoInfo.icon,
+      ...(notes ? { notes } : {}),
+    };
+
+    const objs = currentObjects();
+    const match =
+      (rawId && objs[rawId]?.type === 'connection' ? objs[rawId] : undefined) ??
+      (rawId
+        ? Object.values(objs).find(
+            (o) =>
+              o.type === 'connection' &&
+              extractPluginExtrasFromNotes(typeof o.props.notes === 'string' ? o.props.notes : undefined).mobileId === rawId,
+          )
+        : undefined) ??
+      Object.values(objs).find((o) => o.type === 'connection' && o.name === name && o.props.host === address && o.props.port === rawPort);
+
+    if (match) {
+      library.update(docHandle, match.id, { name: name.slice(0, 256), props });
+    } else {
+      library.add(docHandle, { parentId, type: 'connection', name: name.slice(0, 256), props });
+    }
+    if (isJumpHost) {
+      gwCount++;
+      void input.onGatewayUpsert?.({ alias: name, hostName: address, port: rawPort, user: usr });
+    } else {
+      connCount++;
+    }
+  }
+
+  let credCount = 0;
+  for (const c of payload.credentials ?? []) {
+    const label = (typeof c.label === 'string' && c.label.trim() ? c.label.trim() : 'Synced Credential').slice(0, 256);
+    const objs = currentObjects();
+    const rawId = typeof c.id === 'string' ? c.id : '';
+    const existingCred =
+      (rawId && objs[rawId]?.type === 'credential' ? objs[rawId] : undefined) ??
+      Object.values(objs).find((o) => o.type === 'credential' && o.name === label);
+    const record: Record<string, any> = {
+      kind: 'credential',
+      username: typeof c.username === 'string' && c.username.trim() ? c.username.trim() : 'root',
+      domain: typeof c.domain === 'string' ? c.domain.trim() : '',
+      ...(typeof c.password === 'string' && c.password ? { password: c.password } : {}),
+      ...(typeof c.privateKeyPem === 'string' && c.privateKeyPem.trim() ? { privateKey: c.privateKeyPem } : {}),
+    };
+    library.writeCredential(docHandle, {
+      ...(existingCred ? { objectId: existingCred.id } : {}),
+      name: label,
+      parentId: null,
+      record,
+    });
+    credCount++;
+  }
+
+  return { folders: folderCount, connections: connCount, gateways: gwCount, credentials: credCount };
+}
+
 export function bindSreStudioDocuments(
   docBridge: typeof documents,
   guardFn?: typeof checkProductionSafetyGuard,

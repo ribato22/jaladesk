@@ -26,3 +26,33 @@ contextBridge.exposeInMainWorld('shell',{
 });
 
 contextBridge.exposeInMainWorld('workspace',{run:(action,input)=>ipcRenderer.invoke('workspace:run',action,input)});
+
+contextBridge.exposeInMainWorld('cloudSync',{
+  getState:()=>ipcRenderer.invoke('cloudSync:getState'),
+  saveDraft:draft=>ipcRenderer.invoke('cloudSync:saveDraft',draft),
+  signInGoogle:params=>ipcRenderer.invoke('cloudSync:signInGoogle',params),
+  signOutUnbind:()=>ipcRenderer.invoke('cloudSync:signOutUnbind'),
+  executeSync:(mode,draft)=>ipcRenderer.invoke('cloudSync:executeSync',{mode,draft}),
+  exportJvault:passphrase=>ipcRenderer.invoke('cloudSync:exportJvault',{passphrase}),
+  importJvault:(passphrase,mode)=>ipcRenderer.invoke('cloudSync:importJvault',{passphrase,mode}),
+});
+
+contextBridge.exposeInMainWorld('totpVault',{
+  list:nowMs=>ipcRenderer.invoke('totpVault:list',{nowMs}),
+  add:input=>ipcRenderer.invoke('totpVault:add',input),
+  addUri:uri=>ipcRenderer.invoke('totpVault:addUri',{uri}),
+  parseUri:uri=>ipcRenderer.invoke('totpVault:parseUri',{uri}),
+  remove:id=>ipcRenderer.invoke('totpVault:remove',{id}),
+  copy:code=>ipcRenderer.invoke('totpVault:copy',{code}),
+});
+
+contextBridge.exposeInMainWorld('appLock',{
+  getStatus:()=>ipcRenderer.invoke('appLock:getStatus'),
+  verifyPin:pin=>ipcRenderer.invoke('appLock:verifyPin',{pin}),
+  setPin:(newPin,currentPin)=>ipcRenderer.invoke('appLock:setPin',{newPin,currentPin}),
+  removePin:currentPin=>ipcRenderer.invoke('appLock:removePin',{currentPin}),
+  setAutoLockSeconds:seconds=>ipcRenderer.invoke('appLock:setAutoLockSeconds',{seconds}),
+  lockNow:()=>ipcRenderer.invoke('appLock:lockNow'),
+  recordActivity:()=>ipcRenderer.send('appLock:activity'),
+  onStateChanged:callback=>listen('appLock:state',callback),
+});

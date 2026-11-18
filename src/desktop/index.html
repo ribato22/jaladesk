@@ -37,8 +37,11 @@
       <div id="toolbar" role="toolbar" aria-label="Toolbar" hidden></div>
 
       <div class="topbar-right">
+        <button id="cloud-sync-btn" type="button" class="quiet topbar-studio-pill" title="Zero-Knowledge Cloud Sync &amp; .jvault Backup" data-tooltip="Cloud Sync &amp; .jvault">Cloud Sync</button>
+        <button id="vault-2fa-btn" type="button" class="quiet topbar-studio-pill" title="2FA Authenticator Vault (RFC 6238)" data-tooltip="Authenticator (2FA)">2FA Vault</button>
+        <button id="user-guide-btn" type="button" class="quiet topbar-studio-pill" title="JalaDesk Built-In User Guide" data-tooltip="JalaDesk Guide">Guide</button>
         <button id="cmd-palette-btn" type="button" class="quiet quick-opt-btn" title="Quick Switcher &amp; Command Palette (⌘K)" data-tooltip="Quick Switcher &amp; Command Palette (⌘K)">⌘K</button>
-        <button id="lock-workspace-btn" type="button" class="quiet quick-opt-btn" title="Privacy Curtain Lock Screen (⌃⌘L)" data-tooltip="Privacy Curtain Lock Screen (⌃⌘L)">🔒</button>
+        <button id="lock-workspace-btn" type="button" class="quiet quick-opt-btn" title="App Lock PIN &amp; Workspace Lock (⌃⌘L)" data-tooltip="Lock Workspace (⌃⌘L)">Lock</button>
         <div class="topbar-search" role="search">
           <input id="tree-search" type="search" placeholder="Search" aria-label="Search connections, folders, or hosts" autocomplete="off" maxlength="200">
           <details class="search-filter-menu">
@@ -112,9 +115,13 @@
             <span class="nav-group-title">Application</span>
           </div>
           <ul id="app-tree" class="app-tree" role="list">
+            <li><button type="button" class="app-tree-row" data-app-action="cloud-sync"><span class="app-tree-icon">☁</span><span>Cloud Sync &amp; Backup</span></button></li>
+            <li><button type="button" class="app-tree-row" data-app-action="authenticator-2fa"><span class="app-tree-icon">🛡</span><span>Authenticator (2FA)</span></button></li>
+            <li><button type="button" class="app-tree-row" data-app-action="app-lock-pin"><span class="app-tree-icon">🔒</span><span>App Lock PIN</span></button></li>
             <li><button type="button" class="app-tree-row" data-app-action="credentials"><span class="app-tree-icon">🔑</span><span>Credentials</span></button></li>
             <li><button type="button" class="app-tree-row" data-app-action="tasks"><span class="app-tree-icon">⚡</span><span>Tasks</span></button></li>
             <li><button type="button" class="app-tree-row" data-app-action="templates"><span class="app-tree-icon">📋</span><span>Templates</span></button></li>
+            <li><button type="button" class="app-tree-row" data-app-action="user-guide"><span class="app-tree-icon">📖</span><span>JalaDesk Guide</span></button></li>
             <li class="app-tree-group">
               <details open>
                 <summary class="app-tree-row"><span class="app-tree-icon">📁</span><span>Default Settings</span></summary>
@@ -195,6 +202,7 @@
           </details>
         </div>
         <div class="sidebar-bottom-right">
+          <button id="conn-actions-btn" type="button" class="icon-bar-btn" title="Connection Actions, SSH/SFTP &amp; Port Forward Sheet" disabled>Actions ▾</button>
           <button id="obj-favorite" type="button" class="icon-bar-btn" aria-pressed="false" data-en="☆" title="Toggle Favorite (⌘B)" disabled>Favorit</button>
           <button id="obj-connect" type="button" class="icon-bar-btn" data-en="▷" title="Connect Selected (↩)" disabled>Hubungkan</button>
         </div>
@@ -260,7 +268,12 @@
             <button id="rdp-view-only" type="button" class="quiet" title="Jump Desktop: View-Only (Observe) Mode — block accidental mouse &amp; keyboard input on remote screen">👁 View-Only</button>
             <button id="rdp-hud-toggle" type="button" class="quiet" title="Jump Desktop: Toggle Live FPS, Resolution &amp; Uptime Telemetry HUD">📊 HUD</button>
             <button id="rdp-type-clipboard" type="button" class="quiet" title="Jump Desktop / Royal TSX: Type local clipboard text as hardware keystrokes (works on login screens)">⌨ Type Clipboard</button>
-            <button id="rdp-scale-toggle" type="button" class="quiet" title="Jump Desktop: Toggle Display Scaling (Fit / Stretch / 1:1)">⊡ Scale: Fit</button>
+            <div id="rdp-scale-segmented" class="segmented-bar segmented-bar-compact" role="group" aria-label="Display Sizing">
+              <button type="button" class="segmented-item active" data-rdp-scale-mode="fit" aria-pressed="true" title="Proportional Fit (contain with letterbox/pillarbox, never stretched)">Fit</button>
+              <button type="button" class="segmented-item" data-rdp-scale-mode="fill" aria-pressed="false" title="Proportional Fill (cover viewport + pan, never stretched)">Fill</button>
+              <button type="button" class="segmented-item" data-rdp-scale-mode="actual" aria-pressed="false" title="1:1 Native Pixel Mapping">1:1</button>
+            </div>
+            <button id="rdp-scale-toggle" type="button" class="quiet" hidden title="Toggle Display Scaling (Fit / Fill / 1:1)">⊡ Scale: Fit</button>
             <button id="rdp-snapshot" type="button" class="quiet" title="Capture PNG Screenshot of Active Remote Screen">📷 Snapshot</button>
             <button id="auto-reconnect-toggle" type="button" class="quiet" title="Royal TSX / Jump Desktop: Automatically reconnect dropped RDP/SSH sessions">🔄 Auto-Retry: ON</button>
             <button id="window-full" type="button" class="quiet" title="Maximize session inside window — hide sidebar &amp; toolbars">⛶ Window Full</button>
@@ -299,6 +312,13 @@
               </div>
               <div class="overview-brand-name">JalaDesk</div>
               <div class="overview-brand-tagline muted">Unified Remote Desktop, SSH Terminal &amp; Secure Gateway</div>
+            </div>
+            <div class="overview-studio-strip" role="toolbar" aria-label="Security, Sync &amp; Documentation Studios">
+              <button type="button" class="overview-studio-chip primary" data-overview-action="cloud-sync" title="Zero-Knowledge Cloud Sync &amp; .jvault Backup">Cloud Sync</button>
+              <button type="button" class="overview-studio-chip quiet" data-overview-action="authenticator-2fa" title="RFC 6238 2FA Authenticator Vault">Authenticator (2FA)</button>
+              <button type="button" class="overview-studio-chip quiet" data-overview-action="app-lock-pin" title="App Lock PIN &amp; Auto-Lock Security">App Lock PIN</button>
+              <button type="button" class="overview-studio-chip quiet" data-overview-action="credentials" title="Encrypted Credentials &amp; Inheritance Vault">Credentials Vault</button>
+              <button type="button" class="overview-studio-chip quiet" data-overview-action="user-guide" title="Built-In English User Guide">JalaDesk Guide</button>
             </div>
             <div class="overview-actions-bar" role="toolbar" aria-label="Workspace Quick Actions">
               <button type="button" class="overview-pill primary" data-overview-action="new-doc" title="New Document… (⌘N)" data-tooltip="New Document… (⌘N)">➕<span class="sr-only">New Document</span></button>
@@ -447,6 +467,14 @@
       <p id="props-error" role="alert"></p>
       <label>Display Name<input id="p-name" maxlength="256" autocomplete="off"></label>
       <div id="p-rdp">
+        <div id="p-proto-segmented" class="segmented-bar" role="group" aria-label="Protocol Family">
+          <button type="button" class="segmented-item active" data-proto-pick="Remote Desktop" aria-pressed="true">RDP</button>
+          <button type="button" class="segmented-item" data-proto-pick="Terminal" aria-pressed="false">SSH</button>
+          <button type="button" class="segmented-item" data-proto-pick="VNC" aria-pressed="false">VNC</button>
+          <button type="button" class="segmented-item" data-proto-pick="File Transfer" aria-pressed="false">SFTP</button>
+          <button type="button" class="segmented-item" data-proto-pick="Web Page" aria-pressed="false">HTTPS</button>
+          <button type="button" class="segmented-item" data-proto-pick="VMware" aria-pressed="false">Hypervisor</button>
+        </div>
         <div class="pair">
           <label>Connection Type
             <select id="p-plugin-type">
@@ -511,6 +539,11 @@
 
         <!-- Protocol Section: SSH Terminal & SFTP File Transfer -->
         <div id="p-section-ssh" class="proto-section" hidden>
+          <div id="p-ssh-auth-segmented" class="segmented-bar" role="group" aria-label="SSH &amp; Bastion Authentication">
+            <button type="button" class="segmented-item active" data-ssh-auth-pick="auto" aria-pressed="true">SSH Agent / Auto</button>
+            <button type="button" class="segmented-item" data-ssh-auth-pick="password" aria-pressed="false">Password</button>
+            <button type="button" class="segmented-item" data-ssh-auth-pick="key" aria-pressed="false">Private Key</button>
+          </div>
           <div class="pair-equal">
             <label>Authentication Method
               <select id="p-ssh-auth">
@@ -562,6 +595,10 @@
 
         <!-- Protocol Section: VNC & TeamViewer -->
         <div id="p-section-vnc" class="proto-section" hidden>
+          <div id="p-vnc-mode-segmented" class="segmented-bar" role="group" aria-label="VNC Session Mode">
+            <button type="button" class="segmented-item active" data-vnc-mode-pick="interactive" aria-pressed="true">Interactive Desktop</button>
+            <button type="button" class="segmented-item" data-vnc-mode-pick="viewonly" aria-pressed="false">View-Only Monitor</button>
+          </div>
           <div class="pair-equal">
             <label>Framebuffer Session Mode
               <select id="p-vnc-mode">
@@ -1097,6 +1134,12 @@
       </div>
     </div>
   </div>
+
+  <div id="conn-action-sheet" class="conn-action-sheet" role="menu" aria-label="Connection Actions" hidden></div>
+  <div id="cloud-sync-root"></div>
+  <div id="vault-2fa-root"></div>
+  <div id="user-guide-root"></div>
+  <div id="app-lock-pin-root"></div>
 
   <script type="module" src="../../dist/src/desktop/renderer.js"></script>
 </body>

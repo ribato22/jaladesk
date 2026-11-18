@@ -31,7 +31,14 @@ import {
   buildDbBackupStudioView,
   buildFimAuditdStudioView,
   buildChangeRfcStudioView,
+  computeProportionalDisplayBox,
+  mapProportionalCanvasPoint,
+  type DisplaySizingMode,
 } from './studios-sre-ha.js';
+import {buildConnectionActionSections, type ConnectionActionId, type ConnectionActionTarget} from './context-menu.js';
+import {createCloudSyncStudio} from './cloud-sync-ui.js';
+import {createAppLockPinUi, createVault2faStudio} from './vault-2fa-ui.js';
+import {createUserGuideModal} from './user-guide-ui.js';
 import type {IconId} from '../documents/meta.js';
 import type { OpenStored, StoredOpened } from './connections.js';
 import {mapPointer,type Frame,type Input,type State} from '../protocols/rdp/wire.js';import {initialDesktop,makeInputState,makeResizeScheduler,reasonText,reconnectable,tabAfterClose,tabLabel,takeoverHint,type Size,type TabInfo} from '../protocols/rdp/view.js';
@@ -39,7 +46,7 @@ type StoredReply={ok:true;value:StoredOpened}|{ok:false;code:string;message:stri
 declare global {interface Window {rdp:{info():Promise<{fixture:boolean;platform:string;arch:string}>;open(target:unknown):Promise<string>;openStored(ref:OpenStored):Promise<StoredReply>;reconnectStored(id:string):Promise<StoredReply>;forgetStored(id:string):Promise<unknown>;input(id:string,input:Input):Promise<void>;close(id:string):Promise<void>;activate(id:string):Promise<void>;clipboardSync(id:string):Promise<string>;onFrame(fn:(frame:Frame&{id:string})=>void):()=>void;onStoredOpened(fn:(value:StoredOpened)=>void):()=>void;onState(fn:(value:{id:string;state:State;reason?:string;lastError?:number})=>void):()=>void}}}
 // Everything needed to reopen a session except the password, which is asked for again every time.
 type Request={host:string;port:number;username:string;certificateSha256:string;clipboard:{toRemote:boolean;fromRemote:boolean}};
-type Tab={canvas:HTMLCanvasElement;panel?:HTMLElement;pluginSpec?:PluginSessionSpec;ptyCleanup?:()=>void;button:HTMLButtonElement;state:State;reason?:string;lastError?:number;started:number;hint?:string;width:number;height:number;input:ReturnType<typeof makeInputState>;resizer:ReturnType<typeof makeResizeScheduler>;request?:Request;storedSessionId?:string;name?:string;color?:string};
+type Tab={canvas:HTMLCanvasElement;panel?:HTMLElement;pluginSpec?:PluginSessionSpec;ptyCleanup?:()=>void;autoTypeText?:(text:string)=>Promise<boolean>|boolean;button:HTMLButtonElement;state:State;reason?:string;lastError?:number;started:number;hint?:string;width:number;height:number;input:ReturnType<typeof makeInputState>;resizer:ReturnType<typeof makeResizeScheduler>;request?:Request;storedSessionId?:string;name?:string;color?:string};
 const el=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 const tabs=new Map<string,Tab>();
 const tabInfo=(t:Tab,r:Request):TabInfo=>({label:t.button.textContent??'',host:r.host,port:r.port,username:r.username,state:t.state,started:t.started});
@@ -584,7 +591,12 @@ function buildJumpVncDesktopView(spec: PluginSessionSpec, id: string): HTMLEleme
   wrap.dataset.scale = 'fit';
 
   const passKey = `${spec.host}:${spec.port}`;
-  const initialJump = spec.jumpHost || sessionJumpHosts.get(passKey) || getSelectedQuickJumpHost().jumpHost || '';
+  const initialJump =
+    spec.jumpHost !== undefined
+      ? spec.jumpHost === '__direct__'
+        ? ''
+        : spec.jumpHost
+      : sessionJumpHosts.get(passKey) || getSelectedQuickJumpHost().jumpHost || '';
   if (initialJump) sessionJumpHosts.set(passKey, initialJump);
 
   // Top Control Bar (Jump Desktop Style)
@@ -659,16 +671,38 @@ function buildJumpVncDesktopView(spec: PluginSessionSpec, id: string): HTMLEleme
   connectBtn.textContent = '▶ Connect In-Tab';
   connectBtn.title = 'Connect live Remote Mac / VNC desktop inside this tab (Jump Desktop style)';
 
-  const scaleBtn = document.createElement('button');
-  scaleBtn.type = 'button';
-  scaleBtn.className = 'quiet';
-  scaleBtn.textContent = '⛶ Scale: Fit';
-  scaleBtn.title = 'Toggle between Fit-to-Window scaling and 1:1 Pixel mapping';
-  scaleBtn.onclick = () => {
-    const next = wrap.dataset.scale === 'fit' ? 'actual' : 'fit';
-    wrap.dataset.scale = next;
-    scaleBtn.textContent = next === 'fit' ? '⛶ Scale: Fit' : '🔍 Scale: 1:1';
-  };
+  let currentScaleMode: DisplaySizingMode = 'fit';
+  let syncVncScaleGeometry = () => {};
+
+  const scaleBar = document.createElement('div');
+  scaleBar.className = 'segmented-bar segmented-bar-compact';
+  scaleBar.setAttribute('role', 'group');
+  scaleBar.setAttribute('aria-label', 'VNC Display Sizing');
+  const scaleButtons = new Map<DisplaySizingMode, HTMLButtonElement>();
+  for (const [mode, label, tip] of [
+    ['fit', 'Fit', 'Proportional Fit (contain with letterbox/pillarbox, never stretched)'],
+    ['fill', 'Fill', 'Proportional Fill (cover viewport + pan, never stretched)'],
+    ['actual', '1:1', '1:1 Native Remote Pixel Mapping'],
+  ] as const) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = mode === 'fit' ? 'segmented-item active' : 'segmented-item';
+    b.textContent = label;
+    b.title = tip;
+    b.setAttribute('aria-pressed', String(mode === 'fit'));
+    b.onclick = () => {
+      currentScaleMode = mode;
+      wrap.dataset.scale = mode;
+      for (const [m, btn] of scaleButtons.entries()) {
+        const active = m === mode;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', String(active));
+      }
+      syncVncScaleGeometry();
+    };
+    scaleButtons.set(mode, b);
+    scaleBar.append(b);
+  }
 
   const typeClipVncBtn = document.createElement('button');
   typeClipVncBtn.type = 'button';
@@ -711,7 +745,7 @@ function buildJumpVncDesktopView(spec: PluginSessionSpec, id: string): HTMLEleme
   closeBtn.className = 'quiet';
   closeBtn.textContent = '✕ Close';
 
-  rightGroup.append(jumpSel, userInput, passInput, connectBtn, scaleBtn, typeClipVncBtn, snapVncBtn, nativeBtn, sshBtn, closeBtn);
+  rightGroup.append(jumpSel, userInput, passInput, connectBtn, scaleBar, typeClipVncBtn, snapVncBtn, nativeBtn, sshBtn, closeBtn);
   topbar.append(leftGroup, rightGroup);
 
   // Viewport + Canvas + Status Overlay
@@ -747,6 +781,37 @@ function buildJumpVncDesktopView(spec: PluginSessionSpec, id: string): HTMLEleme
 
   stage.append(canvas, overlay);
   wrap.append(topbar, stage);
+
+  syncVncScaleGeometry = () => {
+    const vw = stage.clientWidth || 1280;
+    const vh = stage.clientHeight || 800;
+    const box = computeProportionalDisplayBox(vw, vh, canvas.width || 1280, canvas.height || 800, currentScaleMode);
+    canvas.style.width = `${box.cssWidth}px`;
+    canvas.style.height = `${box.cssHeight}px`;
+  };
+  const stageResizeObs = new ResizeObserver(() => syncVncScaleGeometry());
+  stageResizeObs.observe(stage);
+  const tabRef = tabs.get(id);
+  if (tabRef) {
+    tabRef.ptyCleanup = () => {
+      unmounted = true;
+      stageResizeObs.disconnect();
+      void stopActiveVnc();
+    };
+    tabRef.autoTypeText = async (text: string) => {
+      if (!activeVncSessionId || !text) return false;
+      canvas.focus();
+      for (const ch of text) {
+        if (!activeVncSessionId) break;
+        const ks = ch.charCodeAt(0);
+        if (ks >= 32 && ks <= 126) {
+          await (window as any).workspace.run('vnc.input', { sessionId: activeVncSessionId, kind: 'key', down: true, keysym: ks });
+          await (window as any).workspace.run('vnc.input', { sessionId: activeVncSessionId, kind: 'key', down: false, keysym: ks });
+        }
+      }
+      return true;
+    };
+  }
 
   let activeVncSessionId = '';
   let unmounted = false;
@@ -835,6 +900,7 @@ function buildJumpVncDesktopView(spec: PluginSessionSpec, id: string): HTMLEleme
       const h = info.height || 800;
       canvas.width = w;
       canvas.height = h;
+      syncVncScaleGeometry();
       canvas.hidden = false;
       overlay.hidden = true;
       canvas.focus();
@@ -878,6 +944,7 @@ function buildJumpVncDesktopView(spec: PluginSessionSpec, id: string): HTMLEleme
         if (f.width > 0 && f.height > 0 && (canvas.width !== f.width || canvas.height !== f.height)) {
           canvas.width = f.width;
           canvas.height = f.height;
+          syncVncScaleGeometry();
         }
         if (f.rgbaBase64 && f.seq > lastSeq && ctx) {
           lastSeq = f.seq;
@@ -919,15 +986,8 @@ function buildJumpVncDesktopView(spec: PluginSessionSpec, id: string): HTMLEleme
   });
 
   // Pointer & Keyboard events on the live VNC canvas
-  const mapCanvasCoords = (e: MouseEvent): { x: number; y: number } => {
-    const rect = canvas.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / Math.max(1, rect.width)) * canvas.width;
-    const y = ((e.clientY - rect.top) / Math.max(1, rect.height)) * canvas.height;
-    return {
-      x: Math.max(0, Math.min(canvas.width - 1, Math.round(x))),
-      y: Math.max(0, Math.min(canvas.height - 1, Math.round(y))),
-    };
-  };
+  const mapCanvasCoords = (e: MouseEvent): { x: number; y: number } =>
+    mapProportionalCanvasPoint(e.clientX, e.clientY, canvas.getBoundingClientRect(), canvas.width, canvas.height);
 
   const sendPointer = (x: number, y: number, mask: number) => {
     if (!activeVncSessionId) return;
@@ -1317,7 +1377,12 @@ function buildPluginView(spec: PluginSessionSpec, id: string): HTMLElement {
   actionsWrap.className = 'plugin-row-inline';
 
   const passKey = `${spec.username}@${spec.host}:${spec.port}`;
-  const initialJump = spec.jumpHost || sessionJumpHosts.get(passKey) || getSelectedQuickJumpHost().jumpHost || '';
+  const initialJump =
+    spec.jumpHost !== undefined
+      ? spec.jumpHost === '__direct__'
+        ? ''
+        : spec.jumpHost
+      : sessionJumpHosts.get(passKey) || getSelectedQuickJumpHost().jumpHost || '';
   if (initialJump) sessionJumpHosts.set(passKey, initialJump);
 
   const jumpSel = document.createElement('select');
@@ -1953,7 +2018,12 @@ function buildTermiusTerminalView(spec: PluginSessionSpec, id: string): HTMLElem
   const passKey = `${spec.host}:${spec.port}`;
   let currentPassword = sessionPasswords.get(passKey) ?? '';
   let currentAuthMode = spec.authMode || 'auto';
-  let currentJumpHost = spec.jumpHost || sessionJumpHosts.get(passKey) || getSelectedQuickJumpHost().jumpHost;
+  let currentJumpHost =
+    spec.jumpHost !== undefined
+      ? spec.jumpHost === '__direct__'
+        ? ''
+        : spec.jumpHost
+      : sessionJumpHosts.get(passKey) || getSelectedQuickJumpHost().jumpHost;
   let currentJumpPassword = sessionJumpPasswords.get(passKey) ?? getSelectedQuickJumpHost().jumpPassword;
   let currentKeyFile = spec.sshKey || sessionKeys.get(passKey) || '';
 
@@ -2667,6 +2737,12 @@ function buildTermiusTerminalView(spec: PluginSessionSpec, id: string): HTMLElem
         ptySessionId = '';
       }
     };
+    t.autoTypeText = (text: string) => {
+      if (!ptySessionId || !text) return false;
+      sendToPty(text);
+      screenEl.focus();
+      return true;
+    };
   }
 
   void startPtyConnection();
@@ -3152,6 +3228,7 @@ function openPluginTab(spec: PluginSessionSpec, replace?: string) {
   const id = replace ?? `plugin-${pluginSeq++}`;
   const t = tab(id);
   t.panel?.remove();
+  t.autoTypeText = undefined;
   t.pluginSpec = spec;
   t.state = 'connected';
   t.started = Date.now();
@@ -3510,19 +3587,35 @@ if (rdpTypeClipBtn) {
 }
 
 const rdpScaleBtn = document.getElementById('rdp-scale-toggle') as HTMLButtonElement | null;
+const rdpScaleSeg = document.getElementById('rdp-scale-segmented');
+function applyRdpScaleMode(mode: DisplaySizingMode): void {
+  if (mode === 'fit') delete document.body.dataset.rdpScale;
+  else document.body.dataset.rdpScale = mode;
+  if (rdpScaleBtn) {
+    rdpScaleBtn.textContent = mode === 'fit' ? '⊡ Scale: Fit' : mode === 'fill' ? '⊡ Scale: Fill' : '⊡ Scale: 1:1';
+  }
+  if (rdpScaleSeg) {
+    for (const item of rdpScaleSeg.querySelectorAll<HTMLButtonElement>('[data-rdp-scale-mode]')) {
+      const isAct = item.dataset.rdpScaleMode === mode;
+      item.classList.toggle('active', isAct);
+      item.setAttribute('aria-pressed', String(isAct));
+    }
+  }
+}
+if (rdpScaleSeg) {
+  for (const item of rdpScaleSeg.querySelectorAll<HTMLButtonElement>('[data-rdp-scale-mode]')) {
+    item.onclick = () => {
+      const m = (item.dataset.rdpScaleMode || 'fit') as DisplaySizingMode;
+      applyRdpScaleMode(m);
+    };
+  }
+}
 if (rdpScaleBtn) {
-  const scales: { mode: string; label: string }[] = [
-    { mode: 'fit', label: '⊡ Scale: Fit' },
-    { mode: 'stretch', label: '⊡ Scale: Stretch' },
-    { mode: 'actual', label: '⊡ Scale: 1:1' },
-  ];
+  const scales: DisplaySizingMode[] = ['fit', 'fill', 'actual'];
   let idx = 0;
   rdpScaleBtn.onclick = () => {
     idx = (idx + 1) % scales.length;
-    const next = scales[idx]!;
-    if (next.mode === 'fit') delete document.body.dataset.rdpScale;
-    else document.body.dataset.rdpScale = next.mode;
-    rdpScaleBtn.textContent = next.label;
+    applyRdpScaleMode(scales[idx]!);
   };
 }
 
@@ -12500,10 +12593,133 @@ if (rdpHudBtn) {
   };
 }
 
+const cloudSyncBridge = (window as any).cloudSync;
+const totpVaultBridge = (window as any).totpVault;
+const appLockBridge = (window as any).appLock;
+
+const cloudSyncStudio = createCloudSyncStudio({
+  getState: async () => (cloudSyncBridge ? await cloudSyncBridge.getState() : {}),
+  saveDraft: async (draft) => (cloudSyncBridge ? await cloudSyncBridge.saveDraft(draft) : {}),
+  signInGoogle: async (params) =>
+    cloudSyncBridge ? await cloudSyncBridge.signInGoogle(params) : { ok: false, error: 'Cloud Sync bridge unavailable.' },
+  signOutUnbind: async () =>
+    cloudSyncBridge ? await cloudSyncBridge.signOutUnbind() : { ok: false, error: 'Cloud Sync bridge unavailable.' },
+  executeSync: async (mode, draft) =>
+    cloudSyncBridge ? await cloudSyncBridge.executeSync(mode, draft) : { ok: false, error: 'Cloud Sync bridge unavailable.' },
+  exportJvault: async (passphrase) =>
+    cloudSyncBridge ? await cloudSyncBridge.exportJvault(passphrase) : { ok: false, error: 'Backup bridge unavailable.' },
+  importJvault: async (passphrase, mode) =>
+    cloudSyncBridge ? await cloudSyncBridge.importJvault(passphrase, mode) : { ok: false, error: 'Backup bridge unavailable.' },
+  onSyncApplied: async () => {
+    await documents.refresh().catch(() => {});
+  },
+});
+
+const appLockPinUi = createAppLockPinUi({
+  getStatus: async () =>
+    appLockBridge ? await appLockBridge.getStatus() : { isPinConfigured: false, isLocked: false, failedAttempts: 0, cooldownRemainingMs: 0 },
+  verifyPin: async (pin) =>
+    appLockBridge ? await appLockBridge.verifyPin(pin) : { verified: false, failedAttempts: 0, cooldownRemainingMs: 0 },
+  setPin: async (newPin, currentPin) =>
+    appLockBridge ? await appLockBridge.setPin(newPin, currentPin) : { ok: false, message: 'PIN service unavailable.' },
+  removePin: async (currentPin) =>
+    appLockBridge ? await appLockBridge.removePin(currentPin) : { ok: false, message: 'PIN service unavailable.' },
+  setAutoLockSeconds: async (seconds) => {
+    await appLockBridge?.setAutoLockSeconds(seconds);
+  },
+  lockNow: async () => {
+    await appLockBridge?.lockNow();
+  },
+  onLocked: () => {
+    for (const t of tabs.values()) t.input.release();
+  },
+});
+
+const vault2faStudio = createVault2faStudio({
+  listTokens: async () => (totpVaultBridge ? await totpVaultBridge.list() : []),
+  addToken: async (input) => (totpVaultBridge ? await totpVaultBridge.add(input) : { id: 'local', ...input }),
+  deleteToken: async (id) => {
+    await totpVaultBridge?.remove(id);
+  },
+  parseOtpAuthUri: async (uri) => (totpVaultBridge ? await totpVaultBridge.parseUri(uri) : undefined),
+  copyCode: async (code) => {
+    await totpVaultBridge?.copy(code);
+  },
+  autoTypeToActiveSession: async (code) => {
+    const digits = code.replace(/\s+/g, '');
+    const t = tabs.get(active);
+    if (!t || !digits) return { ok: false, message: 'Open an active remote session tab first.' };
+    if (!t.panel) {
+      vault2faStudio.close();
+      for (const ch of digits) {
+        if (ch >= '0' && ch <= '9') {
+          t.input.key(`Digit${ch}`, true);
+          t.input.key(`Digit${ch}`, false);
+        }
+      }
+      t.canvas.focus();
+      return { ok: true, targetLabel: t.name || 'RDP Session', message: `Typed ${digits.length} digits into ${t.name || 'RDP Session'}.` };
+    }
+    if (t.autoTypeText) {
+      vault2faStudio.close();
+      const sent = await t.autoTypeText(digits);
+      if (sent) {
+        return { ok: true, targetLabel: t.name || 'Session', message: `Typed ${digits.length} digits into ${t.name || 'Session'}.` };
+      }
+    }
+    await totpVaultBridge?.copy(digits);
+    return { ok: true, targetLabel: t.name || 'Session', message: `Copied ${digits.length}-digit code for ${t.name || 'Session'}.` };
+  },
+  onOpenPinSettings: () => {
+    void appLockPinUi.openSettings();
+  },
+});
+
+const userGuideModal = createUserGuideModal();
+
+(document.getElementById('cloud-sync-root') ?? document.body).append(cloudSyncStudio.dialog);
+(document.getElementById('vault-2fa-root') ?? document.body).append(vault2faStudio.dialog);
+(document.getElementById('user-guide-root') ?? document.body).append(userGuideModal.dialog);
+(document.getElementById('app-lock-pin-root') ?? document.body).append(appLockPinUi.overlay, appLockPinUi.settingsDialog);
+
+document.getElementById('cloud-sync-btn')?.addEventListener('click', (e) => void cloudSyncStudio.open(e.currentTarget as HTMLElement));
+document.getElementById('vault-2fa-btn')?.addEventListener('click', (e) => void vault2faStudio.open(e.currentTarget as HTMLElement));
+document.getElementById('user-guide-btn')?.addEventListener('click', (e) => void userGuideModal.open(e.currentTarget as HTMLElement));
+
+void appLockPinUi.syncLockState();
+appLockBridge?.onStateChanged?.(() => {
+  void appLockPinUi.syncLockState();
+});
+let lastPinActivitySentAt = 0;
+const reportUserActivityForPin = () => {
+  const now = Date.now();
+  if (now - lastPinActivitySentAt > 3000) {
+    lastPinActivitySentAt = now;
+    appLockBridge?.recordActivity?.();
+  }
+};
+window.addEventListener('pointerdown', reportUserActivityForPin, { passive: true });
+window.addEventListener('keydown', reportUserActivityForPin, { passive: true });
+
 const privacyCurtain = document.getElementById('privacy-curtain');
 const lockWorkspaceBtn = document.getElementById('lock-workspace-btn');
 const privacyUnlockBtn = document.getElementById('privacy-unlock-btn');
 function setPrivacyLock(locked: boolean): void {
+  if (locked && appLockBridge) {
+    void (async () => {
+      const st = await appLockBridge.getStatus().catch(() => null);
+      if (st?.isPinConfigured) {
+        await appLockPinUi.lockScreen();
+        return;
+      }
+      if (privacyCurtain) {
+        privacyCurtain.hidden = false;
+        for (const t of tabs.values()) t.input.release();
+        privacyUnlockBtn?.focus();
+      }
+    })();
+    return;
+  }
   if (!privacyCurtain) return;
   privacyCurtain.hidden = !locked;
   if (locked) {
@@ -12569,6 +12785,10 @@ function renderCommandPaletteItems(query: string): void {
   }
 
   const quickCommands: [string, string, () => void][] = [
+    ['Open Zero-Knowledge Cloud Sync & .jvault Backup Studio', 'Cloud Sync', () => void cloudSyncStudio.open()],
+    ['Open RFC 6238 2FA Authenticator Vault (SHA1/SHA256/SHA512)', '2FA Vault', () => void vault2faStudio.open()],
+    ['Configure App Lock PIN & Auto-Lock Timeout', 'App Lock PIN', () => void appLockPinUi.openSettings()],
+    ['Open JalaDesk Built-In User Guide', 'User Guide', () => void userGuideModal.open()],
     ['Open Team Vault Encrypted Git & S3 / MinIO Document Sync Studio', 'Team Vault Sync', () => openPluginTab({ pluginType: 'Team Vault Sync', name: 'Team Vault Sync', host: 'localhost', port: 0, username: 'ops', notes: '' })],
     ['Open Session Cast Player (Asciicast v2 Terminal & RDP Audit Replay)', 'Session Cast', () => openPluginTab({ pluginType: 'Session Cast Studio', name: 'Session Cast Replay', host: '10.28.0.154', port: 22, username: 'root', notes: '' })],
     ['Open Kubernetes Manifest (kubectl / Helm) & Pod YAML Live Studio', 'K8s & Helm', () => openPluginTab({ pluginType: 'K8s Manifest Studio', name: 'K8s Manifest Studio', host: '10.28.0.154', port: 6443, username: 'root', notes: '' })],
@@ -12724,7 +12944,11 @@ if (appTree) {
   for (const row of appTree.querySelectorAll<HTMLElement>('[data-app-action]')) {
     row.onclick = () => {
       const act = row.dataset.appAction;
-      if (act === 'credentials') el('credentials-open').click();
+      if (act === 'cloud-sync') void cloudSyncStudio.open(row);
+      else if (act === 'authenticator-2fa') void vault2faStudio.open(row);
+      else if (act === 'app-lock-pin') void appLockPinUi.openSettings(row);
+      else if (act === 'user-guide') void userGuideModal.open(row);
+      else if (act === 'credentials') el('credentials-open').click();
       else if (act === 'tasks')
         openPluginTab({
           pluginType: 'Tasks Manager',
@@ -12750,6 +12974,10 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-overview-a
     const act = btn.dataset.overviewAction;
     if (act === 'new-doc') el('doc-new').click();
     else if (act === 'open-doc') el('doc-open').click();
+    else if (act === 'cloud-sync') void cloudSyncStudio.open(btn);
+    else if (act === 'authenticator-2fa') void vault2faStudio.open(btn);
+    else if (act === 'app-lock-pin') void appLockPinUi.openSettings(btn);
+    else if (act === 'user-guide') void userGuideModal.open(btn);
     else if (act === 'credentials') el('credentials-open').click();
     else if (act === 'templates') el('templates-open').click();
   };
@@ -12965,6 +13193,10 @@ if (overviewStudioSearchBtn) {
 
 // Upgrade sidebar, add-menu, and overview icons to crisp vector SVGs with semantic color tints.
 const PLUGIN_VISUAL: Record<string, { icon: IconId; tint: string }> = {
+  'cloud-sync': { icon: 'cloud', tint: 'blue' },
+  'authenticator-2fa': { icon: 'shield', tint: 'green' },
+  'app-lock-pin': { icon: 'key', tint: 'yellow' },
+  'user-guide': { icon: 'globe', tint: 'teal' },
   credentials: { icon: 'key', tint: 'yellow' },
   tasks: { icon: 'wrench', tint: 'orange' },
   templates: { icon: 'box', tint: 'purple' },
@@ -13005,6 +13237,249 @@ for (const badge of document.querySelectorAll<HTMLElement>('.overview-tile-icon[
   const id = badge.dataset.iconId as IconId | undefined;
   if (id) badge.replaceChildren(iconElement(id));
 }
+
+// ---- Wire 1-Row Segmented Bars in Properties Dialog (#props) ----
+function bindSegmentedToSelect(barId: string, attrName: string, selectId: string): () => void {
+  const bar = document.getElementById(barId);
+  const sel = document.getElementById(selectId) as HTMLSelectElement | null;
+  if (!bar || !sel) return () => {};
+  const syncFromSelect = () => {
+    const val = sel.value;
+    for (const btn of bar.querySelectorAll<HTMLButtonElement>(`[${attrName}]`)) {
+      const targetVal = btn.getAttribute(attrName) ?? '';
+      const active =
+        targetVal === val ||
+        (barId === 'p-proto-segmented' && targetVal === 'VMware' && (val === 'Hyper-V' || val === 'VMware')) ||
+        (barId === 'p-proto-segmented' && targetVal === 'Remote Desktop' && val === 'Terminal Services');
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    }
+  };
+  for (const btn of bar.querySelectorAll<HTMLButtonElement>(`[${attrName}]`)) {
+    btn.onclick = () => {
+      const targetVal = btn.getAttribute(attrName);
+      if (targetVal) {
+        sel.value = targetVal;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        syncFromSelect();
+      }
+    };
+  }
+  sel.addEventListener('change', syncFromSelect);
+  return syncFromSelect;
+}
+const syncPropsProtoSeg = bindSegmentedToSelect('p-proto-segmented', 'data-proto-pick', 'p-plugin-type');
+const syncPropsSshAuthSeg = bindSegmentedToSelect('p-ssh-auth-segmented', 'data-ssh-auth-pick', 'p-ssh-auth');
+const syncPropsVncModeSeg = bindSegmentedToSelect('p-vnc-mode-segmented', 'data-vnc-mode-pick', 'p-vnc-mode');
+const propsDialogEl = document.getElementById('props');
+if (propsDialogEl) {
+  new MutationObserver(() => {
+    syncPropsProtoSeg();
+    syncPropsSshAuthSeg();
+    syncPropsVncModeSeg();
+  }).observe(propsDialogEl, { attributes: true, attributeFilter: ['open'] });
+}
+
+// ---- Wire Connection Action Context Sheet (#conn-action-sheet) ----
+const connActionSheet = document.getElementById('conn-action-sheet');
+const connActionsBtn = document.getElementById('conn-actions-btn') as HTMLButtonElement | null;
+
+function syncConnActionsBtnState(): void {
+  if (!connActionsBtn) return;
+  const sel = documents.selected();
+  connActionsBtn.disabled = sel?.type !== 'connection';
+}
+const treeContainerEl = document.getElementById('tree');
+if (treeContainerEl) {
+  treeContainerEl.addEventListener('click', () => queueMicrotask(syncConnActionsBtnState));
+  treeContainerEl.addEventListener('keyup', () => queueMicrotask(syncConnActionsBtnState));
+  new MutationObserver(() => syncConnActionsBtnState()).observe(treeContainerEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-selected'] });
+}
+
+function closeConnectionActionSheet(): void {
+  if (connActionSheet) connActionSheet.hidden = true;
+}
+
+function runConnectionSheetAction(actionId: ConnectionActionId, target: ConnectionActionTarget): void {
+  closeConnectionActionSheet();
+  if (actionId === 'connect-primary') {
+    documents.connectByKey?.(target.key);
+  } else if (actionId === 'launch-ssh') {
+    openPluginTab({
+      pluginType: 'Terminal',
+      name: `${target.name} (SSH)`,
+      host: target.host,
+      port: 22,
+      username: target.username || 'root',
+      notes: 'Interactive SSH Terminal',
+      jumpHost: target.jumpHost,
+      sshKey: target.sshKey || '',
+    });
+  } else if (actionId === 'launch-sftp') {
+    openPluginTab({
+      pluginType: 'SFTP Commander',
+      name: `${target.name} (SFTP)`,
+      host: target.host,
+      port: 22,
+      username: target.username || 'root',
+      notes: 'Dual-Pane SFTP Commander',
+      jumpHost: target.jumpHost,
+      sshKey: target.sshKey || '',
+    });
+  } else if (actionId === 'launch-port-forward') {
+    openPluginTab({
+      pluginType: 'Port Forward Studio',
+      name: `${target.name} (ssh -L)`,
+      host: target.host,
+      port: target.port,
+      username: target.username || 'root',
+      notes: `Local tunnel to ${target.host}:${target.port}`,
+      jumpHost: target.jumpHost,
+      sshKey: target.sshKey || '',
+    });
+  } else if (actionId === 'toggle-favorite') {
+    el('obj-favorite').click();
+  } else if (actionId === 'edit-properties') {
+    el('obj-edit').click();
+  } else if (actionId === 'duplicate') {
+    el('obj-duplicate').click();
+  } else if (actionId === 'copy-endpoint') {
+    void totpVaultBridge?.copy(`${target.host}:${target.port}`);
+  } else if (actionId === 'delete-connection') {
+    el('obj-remove').click();
+  }
+}
+
+function openConnectionActionSheet(target: ConnectionActionTarget, clientX: number, clientY: number): void {
+  if (!connActionSheet) return;
+  connActionSheet.replaceChildren();
+  const head = document.createElement('div');
+  head.className = 'conn-sheet-head';
+  const title = document.createElement('div');
+  title.className = 'conn-sheet-title';
+  title.textContent = target.name;
+  const sub = document.createElement('div');
+  sub.className = 'conn-sheet-sub';
+  sub.textContent = `${target.protocol} · ${target.host}:${target.port}${target.jumpHost ? ` · via ${target.jumpHost}` : ' · Direct'}`;
+  head.append(title, sub);
+  connActionSheet.append(head);
+
+  for (const section of buildConnectionActionSections(target)) {
+    const secEl = document.createElement('div');
+    secEl.className = section.separatedDanger ? 'conn-sheet-section conn-sheet-danger' : 'conn-sheet-section';
+    if (section.title) {
+      const lbl = document.createElement('div');
+      lbl.className = 'conn-sheet-section-label';
+      lbl.textContent = section.title;
+      secEl.append(lbl);
+    }
+    for (const item of section.items) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'conn-sheet-item';
+      btn.setAttribute('role', 'menuitem');
+      if (item.primary) btn.dataset.primary = 'true';
+      if (item.active) btn.dataset.active = 'true';
+      if (item.destructive) btn.dataset.destructive = 'true';
+      const mainCol = document.createElement('span');
+      mainCol.className = 'conn-sheet-item-main';
+      const mainLbl = document.createElement('span');
+      mainLbl.textContent = item.label;
+      mainCol.append(mainLbl);
+      if (item.hint) {
+        const hintEl = document.createElement('span');
+        hintEl.className = 'conn-sheet-item-hint';
+        hintEl.textContent = item.hint;
+        mainCol.append(hintEl);
+      }
+      btn.append(mainCol);
+      if (item.shortcut) {
+        const kbd = document.createElement('span');
+        kbd.className = 'conn-sheet-kbd';
+        kbd.textContent = item.shortcut;
+        btn.append(kbd);
+      }
+      btn.onclick = () => runConnectionSheetAction(item.id, target);
+      secEl.append(btn);
+    }
+    connActionSheet.append(secEl);
+  }
+
+  connActionSheet.hidden = false;
+  const maxLeft = Math.max(12, window.innerWidth - 320);
+  const maxTop = Math.max(12, window.innerHeight - Math.min(420, connActionSheet.offsetHeight + 16));
+  connActionSheet.style.left = `${Math.max(12, Math.min(maxLeft, Math.round(clientX)))}px`;
+  connActionSheet.style.top = `${Math.max(12, Math.min(maxTop, Math.round(clientY)))}px`;
+}
+
+  if (connActionsBtn) {
+    connActionsBtn.onclick = (e) => {
+      e.stopPropagation();
+      const sel = documents.selected();
+      if (!sel?.objectId || sel.type !== 'connection') return;
+      const all = documents.listAllConnections?.() ?? [];
+      const found = all.find((c) => c.key === `o:${sel.id}:${sel.objectId}`);
+      if (!found) return;
+    const isFav = el('obj-favorite').getAttribute('aria-pressed') === 'true';
+    const box = connActionsBtn.getBoundingClientRect();
+    openConnectionActionSheet(
+      {
+        key: found.key,
+        name: found.name,
+        protocol: found.protocol,
+        pluginType: found.pluginType,
+        host: found.host,
+        port: found.port,
+        username: found.username,
+        jumpHost: found.jumpHost,
+        sshKey: found.sshKey,
+        isFavorite: isFav,
+        folderName: found.folderName,
+      },
+      box.left,
+      Math.max(16, box.top - 360),
+    );
+    };
+  }
+
+document.getElementById('folder-dashboard')?.addEventListener('contextmenu', (e) => {
+  const card = (e.target as Element | null)?.closest<HTMLElement>('.folder-dash-card');
+  if (!card) return;
+  const cardName = card.querySelector('.folder-dash-card-name')?.textContent?.trim();
+  if (!cardName) return;
+  const all = documents.listAllConnections?.() ?? [];
+  const found = all.find((c) => c.name === cardName);
+  if (!found) return;
+  e.preventDefault();
+  openConnectionActionSheet(
+    {
+      key: found.key,
+      name: found.name,
+      protocol: found.protocol,
+      pluginType: found.pluginType,
+      host: found.host,
+      port: found.port,
+      username: found.username,
+      jumpHost: found.jumpHost,
+      sshKey: found.sshKey,
+      isFavorite: false,
+      folderName: found.folderName,
+    },
+    e.clientX,
+    e.clientY,
+  );
+});
+
+document.addEventListener('click', (e) => {
+  if (connActionSheet && !connActionSheet.hidden && !connActionSheet.contains(e.target as Node) && e.target !== connActionsBtn) {
+    closeConnectionActionSheet();
+  }
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && connActionSheet && !connActionSheet.hidden) {
+    closeConnectionActionSheet();
+  }
+});
 
 void initShell(documents).catch((error: unknown) => {
   console.error('[shell]', error);

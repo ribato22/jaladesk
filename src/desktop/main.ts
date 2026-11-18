@@ -7,10 +7,14 @@ import {BulkScheduler} from './bulk-scheduler.js';
 import {ConnectFifo,StoredBeginAdapter} from './stored-begin.js';
 import {DocumentWatcher} from '../documents/watch.js';
 import {DocumentPropertiesService} from './document-properties-service.js';
-import {app,BrowserWindow,clipboard,dialog,ipcMain,Menu,nativeImage,nativeTheme,safeStorage,session as electronSession} from 'electron';
+import {app,BrowserWindow,clipboard,dialog,ipcMain,Menu,nativeImage,nativeTheme,safeStorage,session as electronSession,shell as electronShell} from 'electron';
 import {initCertCache,warmRdpCert,prepareRdpTarget,splitDomainUser,probeProtocol,execProtocol,launchExternalProtocol,discoverSshEnvironment,upsertCustomJumpHost,removeCustomJumpHost,configureRdpGateway,startSshTunnel,stopSshTunnel,listSshTunnels,openPtySession,readPtySession,writePtySession,resizePtySession,closePtySession,openVncSession,readVncFrame,sendVncInput,closeVncSession,listKnownHostsAndCerts,removeKnownHostOrCertPin,sendWakeOnLan,runPortKnock,scanNetworkRange,readSshConfigFile,upsertSshConfigBlock,deleteSshConfigBlock,listLocalDirectory,localFileAction,remoteFileAction,listSshKeyPairs,generateSshKeyPair,deploySshPublicKey,auditTlsCertificateEndpoint,runNetworkPathAndDnsDiag,runHttpEndpointHealthProbe,runFleetTimeSyncAudit,manageSshCertificateAuthority,runPrometheusScrape,generateWireGuardPeerBundle,sendAlertRelayTest,runIpWhoisAndAsnLookup,runHttpLoadBenchmark,runTeamVaultGitSync} from './protocol-engine.js';
-import {spawn} from 'node:child_process';import {randomUUID} from 'node:crypto';
-import {join,resolve} from 'node:path';import {pathToFileURL} from 'node:url';import {mkdirSync} from 'node:fs';
+import {spawn} from 'node:child_process';import {randomBytes,randomUUID} from 'node:crypto';
+import {join,resolve} from 'node:path';import {pathToFileURL} from 'node:url';import {mkdirSync} from 'node:fs';import {readFile,writeFile} from 'node:fs/promises';
+import {DesktopCloudSyncService,type VaultSyncConfig,type VaultSyncOperationMode} from './cloud-sync-service.js';
+import {DesktopTotpVaultStore,parseOtpAuthUri} from '../credentials/totp.js';
+import {AppLockPinManager} from './app-lock-pin.js';
+import {applyMobileSyncPayloadToLibrary,buildDesktopVaultSyncPayload,resolveDocumentNodeJumpRoute} from './studios-sre-ha.js';
 import {makeOwner,ipcAllowed,type Session} from '../protocols/rdp/owner.js';
 import {createProfiledOwner,closeProfiledSessions} from '../protocols/rdp/profiled-owner.js';
 import {makeFrameDelivery} from '../protocols/rdp/delivery.js';
@@ -412,8 +416,34 @@ app.whenReady().then(async()=>{
     approveScope:async request=>(await native.showMessageBox(window,{type:'question',buttons:['Batal','Izinkan sumber'],defaultId:0,cancelId:0,signal:connectQueue.activeSignal,message:`Izinkan kredensial untuk “${request.connection}”?`,detail:`Target: ${request.target.host}:${request.target.port}\nSertifikat: ${request.target.certificateSha256||'Validasi CA sistem'}\nClipboard lokal ke remote: ${request.target.clipboard?.toRemote?'ya':'tidak'}\n\nSumber:\n${request.sources.map(s=>s.name).join('\n')}\n\nIzin terikat pada target, koneksi dan sumber yang sedang terbuka.`})).response===1,
     promptCode:async()=>{const answer=await storedCredential({host:'mfa.invalid',port:3389,username:'MFA'},{id:randomUUID(),generation:0,currentGeneration:()=>0},'Masukkan kode MFA (6 atau 8 digit) pada kolom Password.');return answer?.password;},
   });
-  registerStoredIpc({ipc:ipcMain,check,service:{openStored:value=>connectQueue.run(()=>stored.openStored(value),connectLifetime.signal),reconnectStored:id=>connectQueue.run(()=>stored.reconnectStored(id),connectLifetime.signal),forget:id=>stored.forget(id)}});
-  begin=new StoredBeginAdapter({queue:connectQueue,openStored:async ref=>{const opened=await stored.openStored(ref);if(!window.isDestroyed())window.webContents.send('rdp:bulk-opened',opened);return opened;},close:closeEngine});
+  const storedSessionRefs=new Map<string,{documentHandle:string;objectId:string}>();
+  const applyStoredNodeJumpGateway=(ref:{documentHandle:string;objectId:string})=>{
+    try{
+      const st=library.privateDocument(ref.documentHandle);
+      if(st.doc.schemaVersion===2){
+        const route=resolveDocumentNodeJumpRoute(st.doc,ref.objectId);
+        configureRdpGateway({jumpHost:route.jumpHost,identityFile:route.sshKey});
+      }
+    }catch{}
+  };
+  const openStoredWithJump=async(value:unknown)=>{
+    if(typeof value==='object'&&value!==null){
+      const rec=value as Record<string,unknown>;
+      if(typeof rec.documentHandle==='string'&&typeof rec.objectId==='string'){
+        applyStoredNodeJumpGateway({documentHandle:rec.documentHandle,objectId:rec.objectId});
+      }
+    }
+    const opened=await stored.openStored(value);
+    if(typeof value==='object'&&value!==null){
+      const rec=value as Record<string,unknown>;
+      if(typeof rec.documentHandle==='string'&&typeof rec.objectId==='string'){
+        storedSessionRefs.set(opened.sessionId,{documentHandle:rec.documentHandle,objectId:rec.objectId});
+      }
+    }
+    return opened;
+  };
+  registerStoredIpc({ipc:ipcMain,check,service:{openStored:value=>connectQueue.run(()=>openStoredWithJump(value),connectLifetime.signal),reconnectStored:id=>connectQueue.run(async()=>{const ref=storedSessionRefs.get(id);if(ref)applyStoredNodeJumpGateway(ref);const reopened=await stored.reconnectStored(id);if(ref)storedSessionRefs.set(reopened.sessionId,ref);return reopened;},connectLifetime.signal),forget:id=>{storedSessionRefs.delete(id);stored.forget(id);}}});
+  begin=new StoredBeginAdapter({queue:connectQueue,openStored:async ref=>{const opened=await openStoredWithJump(ref);if(!window.isDestroyed())window.webContents.send('rdp:bulk-opened',opened);return opened;},close:closeEngine});
   const connects=new BulkScheduler({library,beginStored:(ref,signal)=>begin!.beginStored(ref,signal)});
   const templatesService=new TemplateService(library,{layers:overlayLayers,confirmPrivateValues:request=>question('Salin nilai privat ke template bersama?',`${request.count} objek memakai nilai efektif dari override privat. Nilai publik tersebut akan ikut berkas template bersama. Password, seed, key dan nilai terlindungi tetap tidak disalin.`),openAdHoc:node=>connectQueue.run(()=>stored.openTemporary(node),connectLifetime.signal),confirmReferences:request=>question('Salin referensi kredensial ke template?',`Sumber yang diminta: ${request.sourceDocumentIds.map(id=>library.privateDocuments().find(d=>d.doc.id===id)?.doc.name??id).join(', ')}. Secret tidak disalin; koneksi tetap meminta izin pemakaian sumber.`)});
   const bulk=new BulkService(library,plans,{prepareTemplate:ref=>templatesService.prepareBulk(ref),confirmReferences:m=>question('Salin referensi kredensial pada batch ini?',`${m.documents.map(document=>`${document.name}: ${document.count} koneksi`).join('\n')}\nSecret tidak disalin. Penggunaan identitas pada target baru tetap memerlukan persetujuan sumber saat menghubungkan.`)});
@@ -510,14 +540,143 @@ app.whenReady().then(async()=>{
     'vault.sync':{keys:['action','repoPath','payload'],run:p=>runTeamVaultGitSync(p)},
   }});
 
+  const totpVaultStore=await DesktopTotpVaultStore.open(app.getPath('userData'));
+  const appLockPin=await AppLockPinManager.open(app.getPath('userData'));
+  const stopPinWatcher=fixture?()=>{}:appLockPin.startInactivityWatcher(5000);
+  appLockPin.subscribe(st=>{if(!window.isDestroyed())window.webContents.send('appLock:state',st);});
+  window.on('blur',()=>{if(!fixture)appLockPin.evaluateInactivity(Date.now(),{backgrounded:true});});
+
+  const ensureCloudSyncWorkspace=async():Promise<string>=>{
+    const existing=library.privateDocuments().find(d=>d.doc.schemaVersion===2&&d.doc.kind==='workspace');
+    if(existing)return existing.handle;
+    const syncDocPath=join(app.getPath('userData'),'jaladesk-cloud-sync.rwdoc');
+    const syncKeyPath=join(app.getPath('userData'),'jaladesk-cloud-sync.wkey');
+    let pw='';
+    try{pw=(await readFile(syncKeyPath,'utf8')).trim();}catch{}
+    if(pw.length<12){pw=randomBytes(24).toString('hex');await writeFile(syncKeyPath,pw,{mode:0o600});}
+    try{
+      const opened=await library.open(syncDocPath,pw);
+      return opened.id;
+    }catch{
+      const created=await library.create(syncDocPath,'JalaDesk Cloud Workspace',pw,'workspace');
+      return created.id;
+    }
+  };
+
+  let lastAppliedSyncCounts={connections:0,folders:0,gateways:0,credentials:0,totpItems:0};
+  const cloudSyncService=new DesktopCloudSyncService({
+    userDataDir:app.getPath('userData'),
+    openExternal:url=>electronShell.openExternal(url),
+    vaultBridge:{
+      exportLocalPayload:async tombstones=>{
+        const env=await discoverSshEnvironment().catch(()=>({jumpHosts:[] as {alias:string;hostName:string;port:number;user:string}[]}));
+        const docs=library.privateDocuments().filter(d=>d.doc.schemaVersion===2&&d.doc.kind!=='overrides').map(d=>({
+          doc:d.doc as any,
+          favorites:preferences?new Set(preferences.favoritesOf(d.doc.id)):undefined,
+        }));
+        return buildDesktopVaultSyncPayload({
+          documents:docs,
+          totpItems:totpVaultStore.exportCloudSyncItems() as unknown as Record<string,unknown>[],
+          sshJumpHosts:env.jumpHosts,
+          tombstones:{...totpVaultStore.getTombstones(),...tombstones},
+        });
+      },
+      applySyncedPayload:async payload=>{
+        await totpVaultStore.replaceFromCloudSync(payload.totp as any[],payload.tombstones);
+        const docHandle=await ensureCloudSyncWorkspace();
+        const counts=applyMobileSyncPayloadToLibrary({
+          library:library as any,
+          docHandle,
+          payload,
+          onGatewayUpsert:gw=>upsertCustomJumpHost(gw),
+        });
+        lastAppliedSyncCounts={...counts,totpItems:payload.totp.length};
+        await library.save(docHandle,{auto:true}).catch(()=>{});
+        if(!window.isDestroyed())window.webContents.send('documents:refresh');
+      },
+    },
+  });
+
   ipcMain.handle('rdp:open',async(event,value)=>{check(event);const target=validateTarget(value);return connectQueue.run(async()=>{const secret=await credential(target);return openEngine(target,secret);},connectLifetime.signal);});
   ipcMain.handle('rdp:input',(event,id,value)=>{check(event);if(typeof id!=='string')throw new Error('Invalid session');sessions.get(id)?.send(validateInput(value));});
   ipcMain.on('rdp:frame-ack',(event,id,sequence)=>{try{check(event);}catch{return;}if(typeof id==='string'&&Number.isSafeInteger(sequence)&&sequence>0)deliveries.get(id)?.ack(sequence);});
   ipcMain.handle('rdp:activate',(event,id)=>{check(event);if(typeof id!=='string')throw new Error('Invalid session');gate.activate(id);});
   // Only a status word goes back to the renderer; clipboard text never does.
   ipcMain.handle('rdp:clipboard-sync',async(event,id)=>{check(event);if(typeof id!=='string')throw new Error('Invalid session');const s=sessions.get(id);return s?await gate.local(id,s):'closed';});
+  const toUiSyncState=(cfg:VaultSyncConfig)=>({
+    provider:cfg.provider,
+    autoSync:cfg.autoSyncEnabled,
+    isBound:cfg.isBound,
+    googleAccountEmail:cfg.googleAccountEmail,
+    googleAccountName:cfg.googleDisplayName,
+    oauthClientId:cfg.googleClientId,
+    oauthClientSecret:cfg.googleClientSecret,
+    useCustomPassphrase:cfg.useCustomPassphrase,
+    syncPassphrase:cfg.syncPassphrase,
+    sftpHost:cfg.sftpHost,
+    sftpPort:cfg.sftpPort,
+    sftpUsername:cfg.sftpUsername,
+    sftpPassword:cfg.sftpPassword,
+    sftpPrivateKeyPath:cfg.sftpPrivateKeyPem,
+    sftpRemotePath:cfg.sftpRemotePath,
+    webdavUrl:cfg.webdavUrl,
+    webdavUsername:cfg.webdavUsername,
+    webdavPassword:cfg.webdavPassword,
+    githubToken:cfg.githubToken,
+    githubGistId:cfg.githubGistId,
+    githubFilename:'jaladesk-vault.jvault',
+    lastSyncAtMs:cfg.lastSyncedAtMs>0?cfg.lastSyncedAtMs:null,
+    lastSyncError:cfg.lastSyncError||null,
+  });
+  const fromUiSyncDraft=(raw:unknown):Partial<VaultSyncConfig>=>{
+    if(typeof raw!=='object'||raw===null)return {};
+    const d=raw as Record<string,unknown>;
+    return{
+      ...(typeof d.provider==='string'?{provider:d.provider as any}:{}),
+      ...(typeof d.autoSync==='boolean'?{autoSyncEnabled:d.autoSync}:{}),
+      ...(typeof d.oauthClientId==='string'?{googleClientId:d.oauthClientId.trim()}:{}),
+      ...(typeof d.oauthClientSecret==='string'?{googleClientSecret:d.oauthClientSecret.trim()}:{}),
+      ...(typeof d.useCustomPassphrase==='boolean'?{useCustomPassphrase:d.useCustomPassphrase}:{}),
+      ...(typeof d.syncPassphrase==='string'?{syncPassphrase:d.syncPassphrase}:{}),
+      ...(typeof d.sftpHost==='string'?{sftpHost:d.sftpHost.trim()}:{}),
+      ...(typeof d.sftpPort==='number'?{sftpPort:d.sftpPort}:{}),
+      ...(typeof d.sftpUsername==='string'?{sftpUsername:d.sftpUsername.trim()}:{}),
+      ...(typeof d.sftpPassword==='string'?{sftpPassword:d.sftpPassword}:{}),
+      ...(typeof d.sftpPrivateKeyPath==='string'?{sftpPrivateKeyPem:d.sftpPrivateKeyPath}:{}),
+      ...(typeof d.sftpRemotePath==='string'?{sftpRemotePath:d.sftpRemotePath.trim()}:{}),
+      ...(typeof d.webdavUrl==='string'?{webdavUrl:d.webdavUrl.trim()}:{}),
+      ...(typeof d.webdavUsername==='string'?{webdavUsername:d.webdavUsername.trim()}:{}),
+      ...(typeof d.webdavPassword==='string'?{webdavPassword:d.webdavPassword}:{}),
+      ...(typeof d.githubToken==='string'?{githubToken:d.githubToken.trim()}:{}),
+      ...(typeof d.githubGistId==='string'?{githubGistId:d.githubGistId.trim()}:{}),
+    };
+  };
+
+  ipcMain.handle('cloudSync:getState',async event=>{check(event);const st=await cloudSyncService.getState();return toUiSyncState(st.config);});
+  ipcMain.handle('cloudSync:saveDraft',async(event,draft)=>{check(event);const st=await cloudSyncService.saveDraft(fromUiSyncDraft(draft));return toUiSyncState(st.config);});
+  ipcMain.handle('cloudSync:signInGoogle',async(event,params)=>{check(event);try{const res=await cloudSyncService.signInGoogle(fromUiSyncDraft(params));return{ok:true,state:toUiSyncState(res.updatedConfig),message:res.initialSyncError?`Connected as ${res.account.email}. Initial sync note: ${res.initialSyncError}`:(res.syncSummary?.message??`Connected as ${res.account.email}`),...(res.initialSyncError?{error:res.initialSyncError}:{})};}catch(e){const st=await cloudSyncService.getState();return{ok:false,error:e instanceof Error?e.message:String(e),state:toUiSyncState(st.config)};}});
+  ipcMain.handle('cloudSync:signOutUnbind',async event=>{check(event);const st=await cloudSyncService.signOutUnbind();return{ok:true,state:toUiSyncState(st.config),message:'Cloud Sync unbound on this device.'};});
+  ipcMain.handle('cloudSync:executeSync',async(event,payload)=>{check(event);const rec=(typeof payload==='object'&&payload!==null?payload:{}) as Record<string,unknown>;const mode=(typeof rec.mode==='string'?rec.mode:'smartMerge') as VaultSyncOperationMode;try{const saved=await cloudSyncService.saveDraft(fromUiSyncDraft(rec.draft));const sum=await cloudSyncService.executeSync(saved.config,mode);return{ok:true,message:sum.message,state:toUiSyncState(sum.updatedConfig),mergedCounts:{connections:sum.connectionCount,folders:lastAppliedSyncCounts.folders,gateways:sum.gatewayCount,credentials:sum.credentialCount,totpItems:sum.totpCount}};}catch(e){const st=await cloudSyncService.getState();return{ok:false,error:e instanceof Error?e.message:String(e),state:toUiSyncState(st.config)};}});
+  ipcMain.handle('cloudSync:exportJvault',async(event,payload)=>{check(event);const pass=typeof(payload as any)?.passphrase==='string'?(payload as any).passphrase:'';try{const raw=await cloudSyncService.exportJvault(pass);const save=await native.showSaveDialog(window,{title:'Export Encrypted JalaDesk Vault (.jvault)',defaultPath:'jaladesk-backup.jvault',filters:[{name:'JalaDesk Encrypted Vault',extensions:['jvault']}],properties:['createDirectory']});if(save.canceled||!save.filePath)return{ok:false,cancelled:true};await writeFile(save.filePath,raw,{mode:0o600});return{ok:true,filePath:save.filePath,message:`Encrypted backup saved to ${save.filePath}`};}catch(e){return{ok:false,error:e instanceof Error?e.message:String(e)};}});
+  ipcMain.handle('cloudSync:importJvault',async(event,payload)=>{check(event);const pass=typeof(payload as any)?.passphrase==='string'?(payload as any).passphrase:'';const mode=(payload as any)?.mode==='replace'?'replace':'merge';try{const pick=await native.showOpenDialog(window,{title:'Import Encrypted JalaDesk Vault (.jvault)',filters:[{name:'JalaDesk Encrypted Vault',extensions:['jvault','jdesk','json']}],properties:['openFile']});if(pick.canceled||!pick.filePaths[0])return{ok:false,cancelled:true};const raw=await readFile(pick.filePaths[0],'utf8');const res=await cloudSyncService.importJvault(raw,pass,mode);return{ok:true,filePath:pick.filePaths[0],message:`Imported ${res.hostCount} hosts, ${res.credentialCount} credentials, and ${res.totpCount} 2FA tokens.`,importedCounts:{connections:res.hostCount,credentials:res.credentialCount,totpItems:res.totpCount}};}catch(e){return{ok:false,error:e instanceof Error?e.message:String(e)};}});
+
+  ipcMain.handle('totpVault:list',(event,payload)=>{check(event);const nowMs=typeof(payload as any)?.nowMs==='number'?(payload as any).nowMs:undefined;return totpVaultStore.listWithCodes(nowMs);});
+  ipcMain.handle('totpVault:add',async(event,input)=>{check(event);const added=await totpVaultStore.upsert(input as any);return added;});
+  ipcMain.handle('totpVault:addUri',async(event,payload)=>{check(event);return totpVaultStore.addFromOtpAuthUri(String((payload as any)?.uri??''));});
+  ipcMain.handle('totpVault:parseUri',(event,payload)=>{check(event);const parsed=parseOtpAuthUri(String((payload as any)?.uri??''));return{issuer:parsed.issuer,accountName:parsed.accountName,secretBase32:parsed.secretBase32,algorithm:parsed.algorithm,digits:parsed.digits,period:parsed.period};});
+  ipcMain.handle('totpVault:remove',async(event,payload)=>{check(event);const id=String((payload as any)?.id??'');await totpVaultStore.remove(id);await cloudSyncService.recordTombstone(`totp:${id}`).catch(()=>{});return{ok:true};});
+  ipcMain.handle('totpVault:copy',(event,payload)=>{check(event);const code=String((payload as any)?.code??'').replace(/\s+/g,'');if(code)clipboard.writeText(code);return{ok:true};});
+
+  ipcMain.handle('appLock:getStatus',event=>{check(event);return appLockPin.getState();});
+  ipcMain.handle('appLock:verifyPin',async(event,payload)=>{check(event);return appLockPin.verifyPin(String((payload as any)?.pin??''));});
+  ipcMain.handle('appLock:setPin',async(event,payload)=>{check(event);try{const p=(payload??{}) as Record<string,unknown>;const st=await appLockPin.setPin(String(p.newPin??''),typeof p.currentPin==='string'&&p.currentPin?p.currentPin:undefined);return{ok:true,state:st,status:st};}catch(e){return{ok:false,message:e instanceof Error?e.message:String(e)};}});
+  ipcMain.handle('appLock:removePin',async(event,payload)=>{check(event);try{const st=await appLockPin.removePin(String((payload as any)?.currentPin??''));return{ok:true,state:st,status:st};}catch(e){return{ok:false,message:e instanceof Error?e.message:String(e)};}});
+  ipcMain.handle('appLock:setAutoLockSeconds',async(event,payload)=>{check(event);return appLockPin.setAutoLockTimeout((payload as any)?.seconds);});
+  ipcMain.handle('appLock:lockNow',event=>{check(event);return appLockPin.lockNow();});
+  ipcMain.on('appLock:activity',event=>{try{check(event);appLockPin.recordActivity();}catch{}});
+
   ipcMain.handle('rdp:close',async(event,id)=>{check(event);if(typeof id!=='string')throw new Error('Invalid session');await closeEngine(id);});
-  window.on('closed',()=>{connectLifetime.abort();for(const id of starting.keys())void closeEngine(id).catch(()=>reportProfileCleanup('RDP profile cleanup incomplete'));connects.close(operationOwner);bulk.close(operationOwner);transfer.close(operationOwner);plans.close();maintenance.close();if(settingsWindow&&!settingsWindow.isDestroyed())settingsWindow.close();shell?.stop();followed.stop();for(const d of deliveries.values())d.close();deliveries.clear();void closeProfiledSessions(sessions.values(),reportProfileCleanup);library.closeAll();});
+  window.on('closed',()=>{stopPinWatcher();connectLifetime.abort();for(const id of starting.keys())void closeEngine(id).catch(()=>reportProfileCleanup('RDP profile cleanup incomplete'));connects.close(operationOwner);bulk.close(operationOwner);transfer.close(operationOwner);plans.close();maintenance.close();if(settingsWindow&&!settingsWindow.isDestroyed())settingsWindow.close();shell?.stop();followed.stop();for(const d of deliveries.values())d.close();deliveries.clear();void closeProfiledSessions(sessions.values(),reportProfileCleanup);library.closeAll();});
   try{shell.start();}catch(error){console.error('[shell]',error);}   // whatever goes wrong with the menu, the page still loads
   await window.loadURL(localUrl);
 });
