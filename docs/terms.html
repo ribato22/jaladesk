@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Terms of Service — JalaDesk</title>
+  <meta name="description" content="Official Terms of Service for JalaDesk (com.jaladesk.app) across macOS, Windows, Android, iOS, and iPadOS.">
+  <link rel="icon" type="image/png" sizes="120x120" href="./assets/jaladesk-oauth-logo-120.png">
+  <link rel="apple-touch-icon" href="./assets/jaladesk-logo.png">
+  <link rel="canonical" href="https://ribato22.github.io/jaladesk/terms.html">
+  <link rel="stylesheet" href="./site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand-link" href="./index.html">
+        <img class="brand-mark" src="./assets/jaladesk-logo.png" width="38" height="38" alt="JalaDesk official logo">
+        <span>JalaDesk</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="./index.html">Home</a>
+        <a href="./index.html#capabilities">Capabilities</a>
+        <a href="./index.html#security">Security &amp; Sync</a>
+        <a href="./privacy.html">Privacy Policy</a>
+        <a href="./terms.html" aria-current="page">Terms of Service</a>
+        <a class="nav-repo" href="https://github.com/ribato22/jaladesk">GitHub Repository</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="legal-main" id="main-content">
+    <div class="container legal-layout">
+      <aside class="legal-toc" aria-label="Table of contents">
+        <p class="toc-title">Terms Contents</p>
+        <ul>
+          <li><a href="#acceptance">Acceptance &amp; Scope</a></li>
+          <li><a href="#licensing">Software Licensing</a></li>
+          <li><a href="#authorized-use">Authorized Infrastructure Use</a></li>
+          <li><a href="#vault-security">Zero-Knowledge Vault &amp; Passphrases</a></li>
+          <li><a href="#cloud-sync">Optional Cloud Sync Services</a></li>
+          <li><a href="#warranties-liability">Disclaimers &amp; Liability</a></li>
+          <li><a href="#contact">Governing Law &amp; Contact</a></li>
+        </ul>
+      </aside>
+
+      <article class="legal-article">
+        <h1>JalaDesk Terms of Service</h1>
+
+        <div class="legal-meta">
+          <p><strong>Effective Date:</strong> November 18, 2026</p>
+          <p><strong>Application Name:</strong> JalaDesk (<code>com.jaladesk.app</code>) for macOS, Windows, Android, iOS, and iPadOS</p>
+          <p><strong>Developer / Licensor:</strong> Rizky Bachtiar Irwanto — <a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></p>
+          <p><strong>Companion Policy:</strong> <a href="./privacy.html">JalaDesk Privacy Policy</a></p>
+        </div>
+
+        <section class="legal-section" id="acceptance">
+          <h2>Acceptance of Terms &amp; Scope</h2>
+          <p>
+            These Terms of Service govern your installation and use of <strong>JalaDesk</strong> (<code>com.jaladesk.app</code>), including its desktop applications for macOS and Windows, mobile applications for Android, iOS, and iPadOS, documentation, and official web properties at <a href="./index.html">https://ribato22.github.io/jaladesk/</a>. By downloading, installing, or using JalaDesk, you agree to be bound by these Terms and our <a href="./privacy.html">Privacy Policy</a>.
+          </p>
+        </section>
+
+        <section class="legal-section" id="licensing">
+          <h2>Software Licensing</h2>
+          <p>
+            JalaDesk is distributed under an Open-Core licensing model maintained by Rizky Bachtiar Irwanto (<code>@ribato22</code>):
+          </p>
+          <ul>
+            <li><strong>Open-Core Components:</strong> Core source code components published in the public repository (<a href="https://github.com/ribato22/jaladesk">github.com/ribato22/jaladesk</a>) are licensed under the Apache License, Version 2.0, except where designated otherwise.</li>
+            <li><strong>Enterprise Commercial Capabilities:</strong> Designated multi-user team synchronization, SIEM compliance streaming, and managed enterprise relay modules are governed by the JalaDesk Enterprise Commercial License. Personal evaluation and single-operator use are permitted free of charge; commercial redistribution as a managed SaaS offering or removal of JalaDesk brand attribution requires written authorization from the copyright holder.</li>
+          </ul>
+        </section>
+
+        <section class="legal-section" id="authorized-use">
+          <h2>Authorized Infrastructure &amp; Network Use</h2>
+          <p>
+            JalaDesk provides client-side network connectivity and diagnostic tools (<code>RDP</code>, <code>VNC</code>, <code>SSH</code>, <code>SFTP</code>, <code>Jump Host</code> bastion routing, port forwarding, and network inspection studios). You agree that you will use JalaDesk strictly on servers, virtual machines, network devices, and cloud environments that you own or have explicit authorization to administer.
+          </p>
+          <p>
+            You are solely responsible for all commands executed, files transferred, configurations modified, and network traffic generated from your devices using JalaDesk. Using JalaDesk for unauthorized access, credential stuffing, network disruption, or violation of applicable computer security laws is strictly prohibited.
+          </p>
+        </section>
+
+        <section class="legal-section" id="vault-security">
+          <h2>Zero-Knowledge Encryption &amp; Master Passphrase Responsibility</h2>
+          <p>
+            JalaDesk encrypts your connection documents and synced vaults locally on your device using authenticated <code>AES-256-GCM</code> encryption with keys derived from your chosen Master Passphrase.
+          </p>
+          <div class="notice-box">
+            <p>
+              <strong>Important Passphrase Notice:</strong> Because Rizky Bachtiar Irwanto operates zero backend servers and never receives or stores your Master Passphrase or encryption keys, <strong>we cannot recover, reset, or decrypt your vault if you lose or forget your Master Passphrase</strong>. You are responsible for maintaining secure backups of your passphrases and vault files.
+            </p>
+          </div>
+        </section>
+
+        <section class="legal-section" id="cloud-sync">
+          <h2>Optional Third-Party Cloud Sync Providers</h2>
+          <p>
+            JalaDesk allows you to optionally synchronize client-side encrypted vault files using third-party storage accounts you control, including <strong>Google Drive Application Data (<code>drive.appdata</code>)</strong>, SFTP servers, WebDAV endpoints, or GitHub Gists.
+          </p>
+          <ul>
+            <li>Your use of Google Sign-In and Google Drive is additionally subject to Google's applicable Terms of Service and Privacy Policy, while JalaDesk's handling of Google API data is strictly bound by our <a href="./privacy.html">Privacy Policy</a> and the Google API Services User Data Policy (including Limited Use).</li>
+            <li>JalaDesk does not guarantee the uptime, quota availability, or data retention policies of external cloud storage providers or self-hosted SFTP/WebDAV servers you configure.</li>
+            <li>You may disconnect Cloud Sync in JalaDesk or revoke OAuth permissions at <a href="https://myaccount.google.com/permissions">https://myaccount.google.com/permissions</a> at any time.</li>
+          </ul>
+        </section>
+
+        <section class="legal-section" id="warranties-liability">
+          <h2>Disclaimer of Warranties &amp; Limitation of Liability</h2>
+          <p>
+            TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, JALADESK IS PROVIDED ON AN "AS IS" AND "AS AVAILABLE" BASIS WITHOUT WARRANTIES OF ANY KIND, WHETHER EXPRESS, IMPLIED, OR STATUTORY, INCLUDING IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
+          </p>
+          <p>
+            IN NO EVENT SHALL RIZKY BACHTIAR IRWANTO OR CONTRIBUTORS BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF DATA, CREDENTIALS, PRODUCTION UPTIME, REVENUE, OR PROFITS ARISING OUT OF OR RELATED TO YOUR USE OF OR INABILITY TO USE JALADESK, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+          </p>
+        </section>
+
+        <section class="legal-section" id="contact">
+          <h2>Changes to Terms, Governing Law &amp; Contact</h2>
+          <p>
+            We may update these Terms of Service to reflect new JalaDesk capabilities, security standards, or regulatory requirements by updating the Effective Date at the top of this page. These Terms are governed by the laws of the Republic of Indonesia, without regard to conflict-of-law principles.
+          </p>
+          <ul>
+            <li><strong>Developer / Licensor:</strong> Rizky Bachtiar Irwanto</li>
+            <li><strong>Email:</strong> <a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></li>
+            <li><strong>Home Page:</strong> <a href="./index.html">JalaDesk Official Website</a> &middot; <a href="./privacy.html">Privacy Policy</a></li>
+          </ul>
+        </section>
+      </article>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-grid">
+      <div class="footer-identity">
+        <p><strong>JalaDesk</strong> (<code>com.jaladesk.app</code>) — Multi-Protocol Remote Desktop &amp; Zero-Trust Workspace</p>
+        <p>Developer &amp; Data Controller: Rizky Bachtiar Irwanto — <a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></p>
+      </div>
+      <ul class="footer-links" aria-label="Legal and project links">
+        <li><a href="./index.html">Home</a></li>
+        <li><a href="./privacy.html">Privacy Policy</a></li>
+        <li><a href="./terms.html" aria-current="page">Terms of Service</a></li>
+        <li><a href="https://github.com/ribato22/jaladesk">GitHub Repository</a></li>
+      </ul>
+    </div>
+  </footer>
+</body>
+</html>

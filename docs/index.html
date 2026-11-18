@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JalaDesk — Multi-Protocol Remote Desktop &amp; Zero-Trust Infrastructure Workspace</title>
+  <meta name="description" content="JalaDesk unifies native RDP, VNC, SSH, SFTP, Jump Host bastion routing, RFC 6238 2FA authentication, and client-side AES-256-GCM vault sync across macOS, Windows, Android, and iOS.">
+  <link rel="icon" type="image/png" sizes="120x120" href="./assets/jaladesk-oauth-logo-120.png">
+  <link rel="apple-touch-icon" href="./assets/jaladesk-logo.png">
+  <link rel="canonical" href="https://ribato22.github.io/jaladesk/">
+  <link rel="stylesheet" href="./site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand-link" href="./index.html">
+        <img class="brand-mark" src="./assets/jaladesk-logo.png" width="38" height="38" alt="JalaDesk official logo">
+        <span>JalaDesk</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="#capabilities">Capabilities</a>
+        <a href="#security">Security &amp; Sync</a>
+        <a href="./privacy.html">Privacy Policy</a>
+        <a href="./terms.html">Terms of Service</a>
+        <a class="nav-repo" href="https://github.com/ribato22/jaladesk">GitHub Repository</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main-content">
+    <section class="hero-section">
+      <div class="container hero-layout">
+        <div>
+          <h1>JalaDesk unifies remote desktop, SSH bastions, and zero-knowledge vaults across desktop and mobile.</h1>
+          <p class="hero-lead">
+            Built for system administrators, SREs, and infrastructure teams on <strong>macOS, Windows, Android, and iOS</strong>, JalaDesk brings native <code>RDP</code>, <code>VNC</code>, interactive <code>SSH</code>, dual-pane <code>SFTP</code>, multi-hop <code>Jump Host</code> bastion routing, a built-in <code>RFC 6238</code> 2FA Authenticator, and optional client-side encrypted Cloud Sync into one local-first workspace.
+          </p>
+          <div class="cta-row">
+            <a class="btn-primary" href="https://github.com/ribato22/jaladesk">Explore JalaDesk on GitHub</a>
+            <a class="btn-secondary" href="#security">Google Drive AppData Security</a>
+          </div>
+          <p class="hero-legal-links">
+            Official Governance:
+            <a href="./privacy.html">Privacy Policy</a>
+            <span class="link-sep" aria-hidden="true">/</span>
+            <a href="./terms.html">Terms of Service</a>
+            <span class="link-sep" aria-hidden="true">/</span>
+            <span>Package ID <code>com.jaladesk.app</code></span>
+          </p>
+        </div>
+
+        <figure class="stage-figure">
+          <img src="./assets/desktop-overview.jpg" width="1024" height="639" alt="JalaDesk Desktop workspace showing hierarchical connection sidebar, quick-connect toolbar, and built-in SRE diagnostic studios on macOS and Windows">
+          <figcaption class="stage-caption">
+            <strong>JalaDesk Desktop (macOS &amp; Windows):</strong> Multi-tab remote sessions, folder credential inheritance, quick-connect bar, and 46 built-in network, compliance, and SRE studios.
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="page-section" id="capabilities">
+      <div class="container">
+        <div class="section-intro">
+          <h2>Multi-protocol operations engineered for production fleets</h2>
+          <p>
+            Instead of scattering plaintext connection files, standalone terminal windows, and separate 2FA apps across workstations, JalaDesk consolidates every daily infrastructure protocol inside an authenticated <code>AES-256-GCM</code> vault.
+          </p>
+        </div>
+
+        <div class="capabilities-split">
+          <div class="table-wrap">
+            <table class="spec-table">
+              <thead>
+                <tr>
+                  <th scope="col">Subsystem</th>
+                  <th scope="col">Protocols &amp; Standards</th>
+                  <th scope="col">Operational Capabilities</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Remote Graphical Sessions</strong></td>
+                  <td><code>RDP</code> (FreeRDP 3.x), <code>VNC</code> (RFB)</td>
+                  <td>NLA / CredSSP authentication, explicit TLS <code>SHA-256</code> certificate pinning, live dynamic display resizing, fit-to-window scaling, and opt-in UTF-8 clipboard controls.</td>
+                </tr>
+                <tr>
+                  <td><strong>Shell, Bastions &amp; File Transfer</strong></td>
+                  <td><code>SSH</code>, <code>SFTP</code>, <code>Jump Host</code></td>
+                  <td>Interactive xterm shell, multi-hop <code>ProxyJump</code> bastion chaining, local/remote/SOCKS5 port forwarding, broadcast input, and dual-pane SFTP file management.</td>
+                </tr>
+                <tr>
+                  <td><strong>Vault &amp; 2FA Authenticator</strong></td>
+                  <td><code>AES-256-GCM</code>, <code>RFC 6238</code> TOTP</td>
+                  <td>Hardened <code>scrypt</code> &amp; <code>PBKDF2-HMAC-SHA256</code> key derivation, <code>SHA-1</code>/<code>SHA-256</code>/<code>SHA-512</code> 2FA codes, App Lock PIN, OS Keychain/Biometrics, and 30-second clipboard scrubbing.</td>
+                </tr>
+                <tr>
+                  <td><strong>Fleet Diagnostics &amp; SRE Studios</strong></td>
+                  <td>46 Integrated Studios</td>
+                  <td>Built-in DNS/MTR path diagnostics, TLS certificate chain auditing, CIS benchmark checks, SSH CA workflows, hypervisor controls, and Prometheus metrics inspection.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <dl class="spec-list">
+            <dt>Hierarchical Credential Inheritance</dt>
+            <dd>Organize hundreds of hosts into nested folders where credentials, jump hosts, and security policies inherit cleanly without duplicating secrets.</dd>
+
+            <dt>Deterministic Smart Merge</dt>
+            <dd>Field-level conflict resolution preserves workspace integrity when updating host inventories across desktop workstations and mobile devices.</dd>
+
+            <dt>Strict Local-First Execution</dt>
+            <dd>Every connection opens directly from your device to the target server you configure. JalaDesk never routes sessions through developer-operated relays.</dd>
+          </dl>
+        </div>
+
+        <div class="mobile-showcase">
+          <div>
+            <h3>Native touch precision on Android, iOS, and iPadOS</h3>
+            <p>
+              The JalaDesk Mobile companion (<code>com.jaladesk.app</code>) brings full remote desktop control, SSH/SFTP terminal operations, and hardware-backed credential security to phones and tablets.
+            </p>
+            <ul>
+              <li><strong>Dual Input Modes for Remote Desktop:</strong> Switch instantaneously between relative Virtual Trackpad mode with live coordinate telemetry and Direct Touch mode with pinch-to-zoom and sticky <code>Ctrl</code>, <code>Alt</code>, <code>Win/Cmd</code>, and <code>F1–F12</code> modifier keys.</li>
+              <li><strong>Hardware-Backed Enclave &amp; 2FA:</strong> Unlock vaults with Android <code>BiometricPrompt</code> or Apple <code>Face ID</code> / <code>Touch ID</code>, generate live 30-second <code>RFC 6238</code> TOTP codes offline, and auto-scrub copied secrets.</li>
+              <li><strong>Flexible Vault Synchronization:</strong> Pair directly over local network QR sync or synchronize encrypted vaults via optional Google Drive AppData, SFTP, WebDAV, or GitHub Gist.</li>
+            </ul>
+          </div>
+
+          <div class="phone-pair">
+            <figure class="phone-figure">
+              <img src="./assets/mobile-android-rdp.png" width="1080" height="2400" loading="lazy" alt="JalaDesk Mobile Android touch RDP session showing virtual trackpad mode and modifier toolbar">
+              <figcaption>
+                <strong>Mobile RDP &amp; VNC Canvas:</strong> Virtual trackpad precision, zoom controls, and sticky workstation modifiers on Android and iOS.
+              </figcaption>
+            </figure>
+            <figure class="phone-figure">
+              <img src="./assets/mobile-android-vault.png" width="1080" height="2400" loading="lazy" alt="JalaDesk Mobile Android encrypted vault showing AES-256-GCM enclave status and RFC 6238 TOTP 2FA codes">
+              <figcaption>
+                <strong>Encrypted Enclave &amp; 2FA:</strong> Hardware-locked <code>AES-256-GCM</code> vault and live <code>RFC 6238</code> TOTP tokens with 30s clipboard scrubber.
+              </figcaption>
+            </figure>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page-section" id="security">
+      <div class="container">
+        <div class="section-intro">
+          <h2>Security &amp; Google Drive AppData Sync</h2>
+          <p>
+            JalaDesk requires no user account and works completely offline by default. When you choose to enable optional <strong>Google Drive Cloud Sync</strong>, your vault is encrypted on your device before leaving JalaDesk and stored solely inside your own Google Account's private Application Data container.
+          </p>
+        </div>
+
+        <div class="security-grid">
+          <div>
+            <h3>How optional Sign in with Google works in JalaDesk</h3>
+            <ul>
+              <li><strong>Client-Side Zero-Knowledge Encryption:</strong> Prior to upload, JalaDesk derives an encryption key locally from your Vault Master Passphrase via <code>PBKDF2-HMAC-SHA256</code> (<code>100,000</code> iterations) and encrypts the vault blob using authenticated <code>AES-256-GCM</code> (<code>jaladesk-vault-v1.jvault</code>). Your master passphrase never leaves your device.</li>
+              <li><strong>Isolated <code>drive.appdata</code> Scope Only:</strong> JalaDesk requests <code>https://www.googleapis.com/auth/drive.appdata</code> alongside basic Sign-In identity (<code>openid</code>, <code>userinfo.email</code>, <code>userinfo.profile</code>). JalaDesk can access only its own hidden configuration folder and has <strong>zero access</strong> to your personal Google Drive files, folders, documents, or photos.</li>
+              <li><strong>Zero Developer Servers:</strong> OAuth 2.0 PKCE authentication and Drive API requests occur directly over HTTPS between your device and Google APIs. Developer Rizky Bachtiar Irwanto operates zero backend servers that receive your OAuth tokens, email address, or vault data.</li>
+              <li><strong>Full User Control &amp; Instant Revocation:</strong> Disconnect your Google account inside JalaDesk at any time, delete hidden app data in Google Drive settings, or revoke access at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li>
+            </ul>
+
+            <div class="notice-box">
+              <p>
+                <strong>Google API Services User Data Policy Compliance:</strong> JalaDesk's use and transfer to any other app of information received from Google APIs adheres strictly to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. Read the complete disclosures in our <a href="./privacy.html">Privacy Policy</a> and <a href="./terms.html">Terms of Service</a>.
+              </p>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="spec-table">
+              <thead>
+                <tr>
+                  <th scope="col">Requested OAuth Scope</th>
+                  <th scope="col">Exact On-Device Purpose</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>https://www.googleapis.com/auth/drive.appdata</code></td>
+                  <td>Reads, writes, and deletes only JalaDesk's client-side <code>AES-256-GCM</code> encrypted vault container inside your private Google Drive <code>appDataFolder</code>. Cannot access personal Drive files.</td>
+                </tr>
+                <tr>
+                  <td><code>openid</code></td>
+                  <td>Completes standard OpenID Connect OAuth 2.0 PKCE authentication directly between your device and Google.</td>
+                </tr>
+                <tr>
+                  <td><code>userinfo.email</code></td>
+                  <td>Displays the connected Google account email locally inside JalaDesk's Cloud Sync status panel so you know which account is linked.</td>
+                </tr>
+                <tr>
+                  <td><code>userinfo.profile</code></td>
+                  <td>Displays your basic Google account display name locally inside JalaDesk's Cloud Sync settings view.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-grid">
+      <div class="footer-identity">
+        <p><strong>JalaDesk</strong> (<code>com.jaladesk.app</code>) — Multi-Protocol Remote Desktop &amp; Zero-Trust Workspace</p>
+        <p>Developer &amp; Data Controller: Rizky Bachtiar Irwanto — <a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></p>
+      </div>
+      <ul class="footer-links" aria-label="Legal and project links">
+        <li><a href="./privacy.html">Privacy Policy</a></li>
+        <li><a href="./terms.html">Terms of Service</a></li>
+        <li><a href="https://github.com/ribato22/jaladesk">GitHub Repository</a></li>
+      </ul>
+    </div>
+  </footer>
+</body>
+</html>
