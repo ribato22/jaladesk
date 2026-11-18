@@ -18,9 +18,9 @@
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="scroll-laser-bar" id="jala-scroll-progress" aria-hidden="true"></div>
 
   <header class="site-header">
-    <div class="scroll-laser-bar" id="jala-scroll-progress" aria-hidden="true"></div>
     <div class="container header-inner">
       <div class="brand-cluster">
         <a class="brand-link" href="./index.html">
@@ -69,6 +69,14 @@
         <div class="trust-hero-top">
           <div class="trust-hero-copy">
             <h1>JalaDesk Terms of Service</h1>
+            <div class="hero-telemetry-pill mono" role="status" aria-label="Trust Center licensing status">
+              <span class="signal-beacon" aria-hidden="true"></span>
+              <span class="telemetry-node-ok">SYS.ONLINE</span>
+              <span class="telemetry-sep" aria-hidden="true">&middot;</span>
+              <span>ZERO-KNOWLEDGE CUSTODY</span>
+              <span class="telemetry-sep" aria-hidden="true">&middot;</span>
+              <span class="telemetry-arch">DESKTOP &amp; MOBILE ENCLAVE</span>
+            </div>
             <p class="hero-lead">
               Licensing terms, authorized infrastructure usage rules, zero-knowledge passphrase responsibilities, and optional Cloud Sync governance for JalaDesk across desktop and mobile platforms.
             </p>
@@ -103,7 +111,7 @@
     </div>
   </section>
 
-  <main class="arch-band" id="main-content">
+  <main class="arch-band trust-sticky-band" id="main-content">
     <div class="container">
       <div class="arch-rail arch-junction trust-three-col">
         <aside class="legal-toc-rail" aria-label="Table of contents">
@@ -177,6 +185,7 @@
                 JalaDesk encrypts your connection documents and synced vaults locally on your device using authenticated <span class="mono">AES-256-GCM</span> encryption with cryptographic keys derived from your chosen Master Passphrase via <span class="mono">scrypt</span> and <span class="mono">PBKDF2-HMAC-SHA256</span>.
               </p>
               <div class="compliance-callout" data-spotlight-card>
+                <span class="cyber-reticle" aria-hidden="true"></span>
                 <h3>Zero-Knowledge Passphrase Custody Notice</h3>
                 <p>
                   Because Rizky Bachtiar Irwanto operates zero backend servers and never receives or stores your Master Passphrase or encryption keys, <strong>we cannot recover, reset, or decrypt your vault if you lose or forget your Master Passphrase</strong>. You are responsible for maintaining secure backups of your passphrases and vault files.

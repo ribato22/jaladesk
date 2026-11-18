@@ -76,37 +76,134 @@
   }
 
   /* ------------------------------------------------------------------------
+   * 0. Shared Active-Scroll Gate (Suppresses Synthetic Pointer Jitter)
+   * ---------------------------------------------------------------------- */
+  var SCROLL_IDLE_MS = 150;
+  var isActivelyScrolling = false;
+  var scrollIdleTimer = 0;
+  var scrollStartListeners = [];
+  var scrollEndListeners = [];
+
+  function onScrollActivityStart(fn) {
+    scrollStartListeners.push(fn);
+  }
+
+  function onScrollActivityEnd(fn) {
+    scrollEndListeners.push(fn);
+  }
+
+  function finishScrollActivity() {
+    scrollIdleTimer = 0;
+    if (!isActivelyScrolling) return;
+    isActivelyScrolling = false;
+    for (var i = 0; i < scrollEndListeners.length; i += 1) {
+      scrollEndListeners[i]();
+    }
+  }
+
+  function markScrollActivity() {
+    if (!isActivelyScrolling) {
+      isActivelyScrolling = true;
+      for (var i = 0; i < scrollStartListeners.length; i += 1) {
+        scrollStartListeners[i]();
+      }
+    }
+    if (scrollIdleTimer) {
+      window.clearTimeout(scrollIdleTimer);
+    }
+    scrollIdleTimer = window.setTimeout(finishScrollActivity, SCROLL_IDLE_MS);
+  }
+
+  function initActiveScrollTracker() {
+    window.addEventListener("scroll", markScrollActivity, { passive: true });
+    window.addEventListener("wheel", markScrollActivity, { passive: true });
+  }
+
+  function getEventPageX(event) {
+    if (typeof event.pageX === "number" && (event.pageX !== 0 || event.clientX === 0)) {
+      return event.pageX;
+    }
+    return event.clientX + (window.scrollX || window.pageXOffset || 0);
+  }
+
+  function getEventPageY(event) {
+    if (typeof event.pageY === "number" && (event.pageY !== 0 || event.clientY === 0)) {
+      return event.pageY;
+    }
+    return event.clientY + (window.scrollY || window.pageYOffset || 0);
+  }
+
+  /* ------------------------------------------------------------------------
    * 1. Top Scroll-Progress Laser Bar (#jala-scroll-progress)
+   *    Zero :root style mutations · Zero layout reads inside scroll rAF
    * ---------------------------------------------------------------------- */
   function initScrollProgressLaser() {
     var bar = document.getElementById("jala-scroll-progress");
     var root = document.documentElement;
+    if (root && root.style) {
+      root.style.removeProperty("--scroll-ratio");
+    }
+    if (!bar) return;
+
+    var cachedMaxScroll = 0;
+    var lastTransform = "";
     var ticking = false;
+    var resizeTimer = 0;
 
-    function computeAndApply() {
+    function applyTransformFromCachedBounds() {
       ticking = false;
-      var scrollTop = window.scrollY || root.scrollTop || 0;
-      var maxScroll = Math.max(0, root.scrollHeight - window.innerHeight);
-      var ratio = maxScroll > 0 ? clamp(scrollTop / maxScroll, 0, 1) : 0;
-      var formatted = ratio.toFixed(4);
-
-      root.style.setProperty("--scroll-ratio", formatted);
-      if (bar) {
-        bar.style.setProperty("--scroll-ratio", formatted);
-        bar.style.transform = "scaleX(" + formatted + ")";
+      var scrollTop = window.scrollY || window.pageYOffset || 0;
+      var ratio = cachedMaxScroll > 0 ? clamp(scrollTop / cachedMaxScroll, 0, 1) : 0;
+      var nextTransform = "scaleX(" + ratio.toFixed(4) + ")";
+      if (nextTransform !== lastTransform) {
+        lastTransform = nextTransform;
+        bar.style.transform = nextTransform;
       }
+    }
+
+    function refreshMaxScroll() {
+      var docHeight = Math.max(
+        root ? root.scrollHeight : 0,
+        document.body ? document.body.scrollHeight : 0
+      );
+      var viewportHeight = window.innerHeight || (root ? root.clientHeight : 0) || 0;
+      cachedMaxScroll = Math.max(0, docHeight - viewportHeight);
+      requestUpdate();
     }
 
     function requestUpdate() {
       if (!ticking) {
         ticking = true;
-        window.requestAnimationFrame(computeAndApply);
+        window.requestAnimationFrame(applyTransformFromCachedBounds);
       }
     }
 
+    function scheduleResizeRefresh() {
+      if (resizeTimer) {
+        window.clearTimeout(resizeTimer);
+      }
+      resizeTimer = window.setTimeout(function () {
+        resizeTimer = 0;
+        refreshMaxScroll();
+      }, 100);
+    }
+
     window.addEventListener("scroll", requestUpdate, { passive: true });
-    window.addEventListener("resize", requestUpdate, { passive: true });
-    computeAndApply();
+    window.addEventListener("resize", scheduleResizeRefresh, { passive: true });
+    window.addEventListener("load", refreshMaxScroll, { once: true, passive: true });
+
+    if (typeof window.ResizeObserver === "function") {
+      var docRo = new window.ResizeObserver(function () {
+        refreshMaxScroll();
+      });
+      if (document.body) {
+        docRo.observe(document.body);
+      } else if (root) {
+        docRo.observe(root);
+      }
+    }
+
+    refreshMaxScroll();
   }
 
   /* ------------------------------------------------------------------------
@@ -117,13 +214,87 @@
     var canvas = document.getElementById("jala-kinetic-canvas");
     if (!canvas || typeof canvas.getContext !== "function") return null;
 
-    var ctx = canvas.getContext("2d");
+    var ctx = null;
+    var desynchronizedSupported = false;
+    try {
+      ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
+      if (ctx) {
+        desynchronizedSupported = true;
+      }
+    } catch (_err) {
+      ctx = null;
+    }
+    if (!ctx) {
+      ctx = canvas.getContext("2d");
+    }
     if (!ctx) return null;
+
+    function createRadialSprite(size, stops) {
+      var off = document.createElement("canvas");
+      off.width = size;
+      off.height = size;
+      var octx = off.getContext("2d");
+      if (!octx) return null;
+      var half = size * 0.5;
+      var grad = octx.createRadialGradient(half, half, 0, half, half, half);
+      for (var i = 0; i < stops.length; i += 1) {
+        grad.addColorStop(stops[i][0], stops[i][1]);
+      }
+      octx.fillStyle = grad;
+      octx.fillRect(0, 0, size, size);
+      return off;
+    }
+
+    var sprites = {
+      pktGold: createRadialSprite(48, [
+        [0, "rgba(255, 244, 214, 0.95)"],
+        [0.4, "rgba(243, 198, 111, 0.45)"],
+        [1, "rgba(243, 198, 111, 0)"]
+      ]),
+      pktCyan: createRadialSprite(48, [
+        [0, "rgba(242, 248, 255, 0.95)"],
+        [0.4, "rgba(56, 189, 248, 0.45)"],
+        [1, "rgba(37, 99, 235, 0)"]
+      ]),
+      pktEmerald: createRadialSprite(48, [
+        [0, "rgba(236, 253, 245, 0.95)"],
+        [0.4, "rgba(110, 231, 183, 0.45)"],
+        [1, "rgba(16, 185, 129, 0)"]
+      ]),
+      haloWarm: createRadialSprite(64, [
+        [0, "rgba(243, 198, 111, 1)"],
+        [0.55, "rgba(37, 99, 235, 0.24)"],
+        [1, "rgba(37, 99, 235, 0)"]
+      ]),
+      haloCool: createRadialSprite(64, [
+        [0, "rgba(56, 189, 248, 1)"],
+        [0.6, "rgba(37, 99, 235, 0.22)"],
+        [1, "rgba(37, 99, 235, 0)"]
+      ]),
+      pointerField: createRadialSprite(128, [
+        [0, "rgba(56, 189, 248, 0.09)"],
+        [0.55, "rgba(37, 99, 235, 0.04)"],
+        [1, "rgba(5, 8, 15, 0)"]
+      ])
+    };
+
+    var COLOR_GOLD = "#F3C66F";
+    var COLOR_CYAN = "#38BDF8";
+    var COLOR_EMERALD = "#6EE7B7";
+    var COLOR_BASTION = "#BAE6FD";
+    var DASH_PATTERN = [4, 4];
+    var EMPTY_DASH = [];
+    var headScratch = { x: 0, y: 0 };
+    var midScratch = { x: 0, y: 0 };
+    var tailScratch = { x: 0, y: 0 };
 
     var state = {
       width: 0,
       height: 0,
+      docLeft: 0,
+      docTop: 0,
       dpr: 1,
+      desynchronized: desynchronizedSupported,
       nodes: [],
       links: [],
       packets: [],
@@ -143,66 +314,110 @@
       }
     };
 
+    var publicSnapshot = {
+      width: 0,
+      height: 0,
+      dpr: 1,
+      desynchronized: desynchronizedSupported,
+      nodesCount: 0,
+      linksCount: 0,
+      packetsCount: 0,
+      frameCount: 0,
+      running: false,
+      reducedMotion: reducedMotion.matches
+    };
+    canvas.__jalaKineticState = publicSnapshot;
+
     function seededUnit(seed) {
       var x = Math.sin(seed * 127.1 + 311.7) * 43758.5453123;
       return x - Math.floor(x);
     }
 
-    function buildRoutePoints(a, b, mode, bendSign) {
+    function updateLinkGeometry(link, a, b) {
       var dx = b.x - a.x;
       var dy = b.y - a.y;
-      if (mode === 0 || Math.abs(dx) < 36 || Math.abs(dy) < 24) {
-        return [
-          { x: a.x, y: a.y },
-          { x: b.x, y: b.y }
-        ];
+      var ptsX = link.ptsX;
+      var ptsY = link.ptsY;
+      var count = 2;
+
+      if (link.mode === 0 || Math.abs(dx) < 36 || Math.abs(dy) < 24) {
+        ptsX[0] = a.x;
+        ptsY[0] = a.y;
+        ptsX[1] = b.x;
+        ptsY[1] = b.y;
+        count = 2;
+      } else {
+        var chamfer = Math.min(Math.abs(dx) * 0.34, Math.abs(dy) * 0.65, 44);
+        var midX = a.x + dx * (link.bendSign > 0 ? 0.54 : 0.46);
+        var dirX = dx >= 0 ? 1 : -1;
+        var dirY = dy >= 0 ? 1 : -1;
+        var halfChamfer = dirX * chamfer * 0.5;
+
+        ptsX[0] = a.x;
+        ptsY[0] = a.y;
+        ptsX[1] = midX - halfChamfer;
+        ptsY[1] = a.y;
+        ptsX[2] = midX + halfChamfer;
+        ptsY[2] = a.y + dirY * chamfer;
+        ptsX[3] = midX + halfChamfer;
+        ptsY[3] = b.y;
+        ptsX[4] = b.x;
+        ptsY[4] = b.y;
+        count = 5;
       }
-      var chamfer = Math.min(Math.abs(dx) * 0.34, Math.abs(dy) * 0.65, 44);
-      var midX = a.x + dx * (bendSign > 0 ? 0.54 : 0.46);
-      var dirX = dx >= 0 ? 1 : -1;
-      var dirY = dy >= 0 ? 1 : -1;
 
-      return [
-        { x: a.x, y: a.y },
-        { x: midX - dirX * chamfer * 0.5, y: a.y },
-        { x: midX + dirX * chamfer * 0.5, y: a.y + dirY * chamfer },
-        { x: midX + dirX * chamfer * 0.5, y: b.y },
-        { x: b.x, y: b.y }
-      ];
-    }
-
-    function computeRouteMetrics(points) {
-      var segments = [];
+      link.ptCount = count;
+      var segStart = link.segStart;
+      var segLen = link.segLen;
+      var segOriginIdx = link.segOriginIdx;
       var total = 0;
-      for (var i = 0; i < points.length - 1; i += 1) {
-        var p0 = points[i];
-        var p1 = points[i + 1];
-        var len = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+      var sCount = 0;
+
+      for (var i = 0; i < count - 1; i += 1) {
+        var sx = ptsX[i + 1] - ptsX[i];
+        var sy = ptsY[i + 1] - ptsY[i];
+        var len = Math.hypot(sx, sy);
         if (len > 0.01) {
-          segments.push({ p0: p0, p1: p1, len: len, start: total });
+          segOriginIdx[sCount] = i;
+          segStart[sCount] = total;
+          segLen[sCount] = len;
+          sCount += 1;
           total += len;
         }
       }
-      return { segments: segments, totalLength: Math.max(1, total) };
+
+      link.segCount = sCount;
+      link.totalLength = total > 1 ? total : 1;
     }
 
-    function sampleRoute(route, progress) {
-      var targetDist = clamp(progress, 0, 1) * route.totalLength;
-      var segs = route.segments;
-      if (!segs.length) return { x: 0, y: 0 };
+    function sampleLinkInto(link, progress, out) {
+      var sCount = link.segCount;
+      if (sCount <= 0) {
+        out.x = link.ptsX[0] || 0;
+        out.y = link.ptsY[0] || 0;
+        return;
+      }
 
-      for (var i = 0; i < segs.length; i += 1) {
-        var seg = segs[i];
-        if (targetDist <= seg.start + seg.len || i === segs.length - 1) {
-          var localT = clamp((targetDist - seg.start) / seg.len, 0, 1);
-          return {
-            x: seg.p0.x + (seg.p1.x - seg.p0.x) * localT,
-            y: seg.p0.y + (seg.p1.y - seg.p0.y) * localT
-          };
+      var targetDist = clamp(progress, 0, 1) * link.totalLength;
+      var segStart = link.segStart;
+      var segLen = link.segLen;
+      var segOriginIdx = link.segOriginIdx;
+      var ptsX = link.ptsX;
+      var ptsY = link.ptsY;
+
+      for (var i = 0; i < sCount; i += 1) {
+        var start = segStart[i];
+        var len = segLen[i];
+        if (targetDist <= start + len || i === sCount - 1) {
+          var localT = clamp((targetDist - start) / len, 0, 1);
+          var idx0 = segOriginIdx[i];
+          var x0 = ptsX[idx0];
+          var y0 = ptsY[idx0];
+          out.x = x0 + (ptsX[idx0 + 1] - x0) * localT;
+          out.y = y0 + (ptsY[idx0 + 1] - y0) * localT;
+          return;
         }
       }
-      var last = segs[segs.length - 1].p1;
-      return { x: last.x, y: last.y };
     }
 
     function rebuildTopology() {
@@ -239,6 +454,15 @@
             role = "bastion";
           }
 
+          var coreColor =
+            role === "vault"
+              ? COLOR_GOLD
+              : role === "enclave"
+                ? COLOR_EMERALD
+                : role === "bastion"
+                  ? COLOR_BASTION
+                  : COLOR_CYAN;
+
           nodes.push({
             id: idx - 1,
             col: c,
@@ -247,7 +471,10 @@
             baseY: clamp(baseY, 24, h - 24),
             x: clamp(baseX, 24, w - 24),
             y: clamp(baseY, 24, h - 24),
+            boost: 0,
             role: role,
+            isWarm: role === "vault" || role === "bastion",
+            coreColor: coreColor,
             radius: role === "bastion" ? 3.5 : role === "vault" ? 3.8 : 2.5,
             phase: seededUnit(idx * 5.43) * Math.PI * 2,
             driftAmp: 2.2 + seededUnit(idx * 9.13) * 3.6,
@@ -257,7 +484,7 @@
       }
 
       var links = [];
-      var linkSet = {};
+      var linkSet = Object.create(null);
 
       function addLink(i, j, styleSeed) {
         if (i === j) return;
@@ -271,7 +498,15 @@
           target: j,
           mode: styleSeed > 0.32 ? 1 : 0,
           bendSign: styleSeed > 0.66 ? 1 : -1,
-          goldAccent: nodes[i].role === "vault" || nodes[j].role === "vault" || styleSeed > 0.78
+          goldAccent: nodes[i].role === "vault" || nodes[j].role === "vault" || styleSeed > 0.78,
+          ptsX: new Float32Array(5),
+          ptsY: new Float32Array(5),
+          segStart: new Float32Array(4),
+          segLen: new Float32Array(4),
+          segOriginIdx: new Uint8Array(4),
+          ptCount: 0,
+          segCount: 0,
+          totalLength: 1
         });
       }
 
@@ -301,11 +536,25 @@
       for (var p = 0; p < packetCount; p += 1) {
         var linkIndex = (p * 3 + 1) % Math.max(1, links.length);
         var isGold = links[linkIndex] && links[linkIndex].goldAccent;
+        var palette = isGold ? "gold" : p % 4 === 0 ? "emerald" : "sapphire";
         packets.push({
           linkIndex: linkIndex,
           t: seededUnit((p + 1) * 19.31),
           speed: 0.14 + seededUnit((p + 1) * 8.17) * 0.16,
-          palette: isGold ? "gold" : p % 4 === 0 ? "emerald" : "sapphire"
+          palette: palette,
+          color:
+            palette === "gold"
+              ? COLOR_GOLD
+              : palette === "emerald"
+                ? COLOR_EMERALD
+                : COLOR_CYAN,
+          glowRadius: palette === "gold" ? 7.5 : 6.5,
+          sprite:
+            palette === "gold"
+              ? sprites.pktGold
+              : palette === "emerald"
+                ? sprites.pktEmerald
+                : sprites.pktCyan
         });
       }
 
@@ -316,6 +565,11 @@
 
     function syncCanvasSize() {
       var rect = canvas.getBoundingClientRect();
+      var scrollX = window.scrollX || window.pageXOffset || 0;
+      var scrollY = window.scrollY || window.pageYOffset || 0;
+      state.docLeft = rect.left + scrollX;
+      state.docTop = rect.top + scrollY;
+
       var parent = canvas.parentElement;
       var w = rect.width || (parent ? parent.clientWidth : 0) || window.innerWidth || 1280;
       var h = rect.height || (parent ? parent.clientHeight : 0) || 620;
@@ -344,8 +598,10 @@
     function renderFrame(timeSec, dtSec, isStaticFrame) {
       var w = state.width;
       var h = state.height;
-      if (w <= 0 || h <= 0 || !state.nodes.length) return;
+      var nodes = state.nodes;
+      if (w <= 0 || h <= 0 || !nodes.length) return;
 
+      ctx.globalAlpha = 1;
       ctx.clearRect(0, 0, w, h);
 
       var ptr = state.pointer;
@@ -354,11 +610,10 @@
       } else {
         ptr.x = lerp(ptr.x, ptr.targetX, 0.12);
         ptr.y = lerp(ptr.y, ptr.targetY, 0.12);
-        ptr.energy = lerp(ptr.energy, ptr.active ? 1 : 0, 0.08);
+        ptr.energy = lerp(ptr.energy, ptr.active && !isActivelyScrolling ? 1 : 0, 0.08);
       }
 
       var proximityRadius = Math.min(260, Math.max(180, w * 0.18));
-      var nodes = state.nodes;
 
       for (var i = 0; i < nodes.length; i += 1) {
         var node = nodes[i];
@@ -390,179 +645,146 @@
         node.boost = boost;
       }
 
-      var linkRoutes = new Array(state.links.length);
+      var links = state.links;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
 
-      for (var l = 0; l < state.links.length; l += 1) {
-        var link = state.links[l];
+      for (var l = 0; l < links.length; l += 1) {
+        var link = links[l];
         var a = nodes[link.source];
         var b = nodes[link.target];
-        var pts = buildRoutePoints(a, b, link.mode, link.bendSign);
-        var route = computeRouteMetrics(pts);
-        linkRoutes[l] = route;
+        updateLinkGeometry(link, a, b);
 
-        var edgeBoost = Math.max(a.boost || 0, b.boost || 0);
+        var edgeBoost = a.boost > b.boost ? a.boost : b.boost;
         var baseAlpha = link.goldAccent ? 0.13 : 0.11;
         var alpha = clamp(baseAlpha + edgeBoost * 0.28, 0.08, 0.46);
 
         ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (var pIdx = 1; pIdx < pts.length; pIdx += 1) {
-          ctx.lineTo(pts[pIdx].x, pts[pIdx].y);
+        ctx.moveTo(link.ptsX[0], link.ptsY[0]);
+        for (var pIdx = 1; pIdx < link.ptCount; pIdx += 1) {
+          ctx.lineTo(link.ptsX[pIdx], link.ptsY[pIdx]);
         }
 
         ctx.lineWidth = edgeBoost > 0.2 ? 1.25 : 1;
-        ctx.strokeStyle = link.goldAccent
-          ? "rgba(243, 198, 111, " + alpha.toFixed(3) + ")"
-          : "rgba(56, 189, 248, " + alpha.toFixed(3) + ")";
+        ctx.strokeStyle = link.goldAccent ? COLOR_GOLD : COLOR_CYAN;
+        ctx.globalAlpha = alpha;
         ctx.stroke();
       }
 
-      for (var pk = 0; pk < state.packets.length; pk += 1) {
-        var packet = state.packets[pk];
-        var pRoute = linkRoutes[packet.linkIndex];
-        if (!pRoute) continue;
+      var packets = state.packets;
+      ctx.lineWidth = 1.85;
+
+      for (var pk = 0; pk < packets.length; pk += 1) {
+        var packet = packets[pk];
+        var pLink = links[packet.linkIndex];
+        if (!pLink) continue;
 
         if (!isStaticFrame) {
           packet.t = (packet.t + dtSec * packet.speed) % 1;
         }
 
-        var headPos = sampleRoute(pRoute, packet.t);
-        var tailPos = sampleRoute(pRoute, Math.max(0, packet.t - 0.085));
+        var tHead = packet.t;
+        var tMid = Math.max(0, tHead - 0.042);
+        var tTail = Math.max(0, tHead - 0.085);
 
-        var tailGrad = ctx.createLinearGradient(tailPos.x, tailPos.y, headPos.x, headPos.y);
-        if (packet.palette === "gold") {
-          tailGrad.addColorStop(0, "rgba(243, 198, 111, 0)");
-          tailGrad.addColorStop(1, "rgba(243, 198, 111, 0.88)");
-        } else if (packet.palette === "emerald") {
-          tailGrad.addColorStop(0, "rgba(110, 231, 183, 0)");
-          tailGrad.addColorStop(1, "rgba(110, 231, 183, 0.84)");
-        } else {
-          tailGrad.addColorStop(0, "rgba(56, 189, 248, 0)");
-          tailGrad.addColorStop(1, "rgba(56, 189, 248, 0.9)");
-        }
+        sampleLinkInto(pLink, tHead, headScratch);
+        sampleLinkInto(pLink, tMid, midScratch);
+        sampleLinkInto(pLink, tTail, tailScratch);
 
+        ctx.strokeStyle = packet.color;
+        ctx.globalAlpha = 0.34;
         ctx.beginPath();
-        ctx.moveTo(tailPos.x, tailPos.y);
-        ctx.lineTo(headPos.x, headPos.y);
-        ctx.lineWidth = 1.85;
-        ctx.strokeStyle = tailGrad;
+        ctx.moveTo(tailScratch.x, tailScratch.y);
+        ctx.lineTo(midScratch.x, midScratch.y);
         ctx.stroke();
 
-        var glowRadius = packet.palette === "gold" ? 7.5 : 6.5;
-        var pktGlow = ctx.createRadialGradient(
-          headPos.x,
-          headPos.y,
-          0,
-          headPos.x,
-          headPos.y,
-          glowRadius
-        );
-        if (packet.palette === "gold") {
-          pktGlow.addColorStop(0, "rgba(255, 244, 214, 0.95)");
-          pktGlow.addColorStop(0.4, "rgba(243, 198, 111, 0.45)");
-          pktGlow.addColorStop(1, "rgba(243, 198, 111, 0)");
-        } else {
-          pktGlow.addColorStop(0, "rgba(242, 248, 255, 0.95)");
-          pktGlow.addColorStop(0.4, "rgba(56, 189, 248, 0.45)");
-          pktGlow.addColorStop(1, "rgba(37, 99, 235, 0)");
-        }
-
-        ctx.fillStyle = pktGlow;
+        ctx.globalAlpha = 0.88;
         ctx.beginPath();
-        ctx.arc(headPos.x, headPos.y, glowRadius, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.moveTo(midScratch.x, midScratch.y);
+        ctx.lineTo(headScratch.x, headScratch.y);
+        ctx.stroke();
+
+        var gRadius = packet.glowRadius;
+        if (packet.sprite) {
+          ctx.globalAlpha = 1;
+          ctx.drawImage(
+            packet.sprite,
+            headScratch.x - gRadius,
+            headScratch.y - gRadius,
+            gRadius * 2,
+            gRadius * 2
+          );
+        }
       }
 
       if (ptr.energy > 0.03 && !isStaticFrame) {
-        var fieldGrad = ctx.createRadialGradient(ptr.x, ptr.y, 0, ptr.x, ptr.y, proximityRadius * 0.72);
-        fieldGrad.addColorStop(0, "rgba(56, 189, 248, " + (0.09 * ptr.energy).toFixed(3) + ")");
-        fieldGrad.addColorStop(0.55, "rgba(37, 99, 235, " + (0.04 * ptr.energy).toFixed(3) + ")");
-        fieldGrad.addColorStop(1, "rgba(5, 8, 15, 0)");
-        ctx.fillStyle = fieldGrad;
-        ctx.beginPath();
-        ctx.arc(ptr.x, ptr.y, proximityRadius * 0.72, 0, Math.PI * 2);
-        ctx.fill();
+        var fieldRadius = proximityRadius * 0.72;
+        if (sprites.pointerField) {
+          ctx.globalAlpha = ptr.energy;
+          ctx.drawImage(
+            sprites.pointerField,
+            ptr.x - fieldRadius,
+            ptr.y - fieldRadius,
+            fieldRadius * 2,
+            fieldRadius * 2
+          );
+        }
 
-        ctx.save();
-        ctx.setLineDash([4, 4]);
+        ctx.setLineDash(DASH_PATTERN);
+        ctx.lineWidth = 1;
         var connected = 0;
         for (var v = 0; v < nodes.length && connected < 4; v += 1) {
           var targetNode = nodes[v];
-          if ((targetNode.boost || 0) <= 0.16) continue;
+          if (targetNode.boost <= 0.16) continue;
           connected += 1;
-          var vecAlpha = clamp(targetNode.boost * 0.55, 0.06, 0.45);
+          ctx.globalAlpha = clamp(targetNode.boost * 0.55, 0.06, 0.45);
+          ctx.strokeStyle = targetNode.isWarm ? COLOR_GOLD : COLOR_CYAN;
           ctx.beginPath();
           ctx.moveTo(ptr.x, ptr.y);
           ctx.lineTo(targetNode.x, targetNode.y);
-          ctx.lineWidth = 1;
-          ctx.strokeStyle =
-            targetNode.role === "vault" || targetNode.role === "bastion"
-              ? "rgba(243, 198, 111, " + vecAlpha.toFixed(3) + ")"
-              : "rgba(56, 189, 248, " + vecAlpha.toFixed(3) + ")";
           ctx.stroke();
         }
-        ctx.restore();
+        ctx.setLineDash(EMPTY_DASH);
       }
 
       for (var n = 0; n < nodes.length; n += 1) {
         var nd = nodes[n];
         var pulse = isStaticFrame ? 0.5 : 0.5 + 0.5 * Math.sin(timeSec * 1.9 + nd.phase);
-        var haloR = nd.radius * (3.4 + pulse * 0.9 + (nd.boost || 0) * 2.2);
-        var isWarm = nd.role === "vault" || nd.role === "bastion";
+        var haloR = nd.radius * (3.4 + pulse * 0.9 + nd.boost * 2.2);
+        var haloSprite = nd.isWarm ? sprites.haloWarm : sprites.haloCool;
 
-        var halo = ctx.createRadialGradient(nd.x, nd.y, 0, nd.x, nd.y, haloR);
-        if (isWarm) {
-          halo.addColorStop(0, "rgba(243, 198, 111, " + (0.34 + (nd.boost || 0) * 0.3).toFixed(3) + ")");
-          halo.addColorStop(0.55, "rgba(37, 99, 235, 0.12)");
-          halo.addColorStop(1, "rgba(37, 99, 235, 0)");
-        } else {
-          halo.addColorStop(0, "rgba(56, 189, 248, " + (0.32 + (nd.boost || 0) * 0.32).toFixed(3) + ")");
-          halo.addColorStop(0.6, "rgba(37, 99, 235, 0.11)");
-          halo.addColorStop(1, "rgba(37, 99, 235, 0)");
+        if (haloSprite) {
+          ctx.globalAlpha = clamp(0.33 + nd.boost * 0.31, 0, 1);
+          ctx.drawImage(haloSprite, nd.x - haloR, nd.y - haloR, haloR * 2, haloR * 2);
         }
-        ctx.fillStyle = halo;
-        ctx.beginPath();
-        ctx.arc(nd.x, nd.y, haloR, 0, Math.PI * 2);
-        ctx.fill();
 
-        if (nd.role === "bastion" || nd.role === "vault") {
-          ctx.beginPath();
-          ctx.arc(nd.x, nd.y, nd.radius + 3.2 + (nd.boost || 0) * 1.8, 0, Math.PI * 2);
+        if (nd.isWarm) {
+          ctx.globalAlpha = clamp(0.35 + nd.boost * 0.35, 0, 1);
+          ctx.strokeStyle = nd.role === "vault" ? COLOR_GOLD : COLOR_CYAN;
           ctx.lineWidth = 0.9;
-          ctx.strokeStyle =
-            nd.role === "vault"
-              ? "rgba(243, 198, 111, " + (0.36 + (nd.boost || 0) * 0.35).toFixed(3) + ")"
-              : "rgba(56, 189, 248, " + (0.34 + (nd.boost || 0) * 0.35).toFixed(3) + ")";
+          ctx.beginPath();
+          ctx.arc(nd.x, nd.y, nd.radius + 3.2 + nd.boost * 1.8, 0, Math.PI * 2);
           ctx.stroke();
         }
 
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = nd.coreColor;
         ctx.beginPath();
         ctx.arc(nd.x, nd.y, nd.radius, 0, Math.PI * 2);
-        ctx.fillStyle =
-          nd.role === "vault"
-            ? "#F3C66F"
-            : nd.role === "enclave"
-              ? "#6EE7B7"
-              : nd.role === "bastion"
-                ? "#BAE6FD"
-                : "#38BDF8";
         ctx.fill();
       }
 
+      ctx.globalAlpha = 1;
       state.frameCount += 1;
-      canvas.__jalaKineticState = {
-        width: state.width,
-        height: state.height,
-        dpr: state.dpr,
-        nodesCount: state.nodes.length,
-        linksCount: state.links.length,
-        packetsCount: state.packets.length,
-        frameCount: state.frameCount,
-        running: state.running,
-        reducedMotion: reducedMotion.matches
-      };
+      publicSnapshot.width = state.width;
+      publicSnapshot.height = state.height;
+      publicSnapshot.dpr = state.dpr;
+      publicSnapshot.nodesCount = nodes.length;
+      publicSnapshot.linksCount = links.length;
+      publicSnapshot.packetsCount = packets.length;
+      publicSnapshot.frameCount = state.frameCount;
+      publicSnapshot.running = state.running;
+      publicSnapshot.reducedMotion = reducedMotion.matches;
     }
 
     function tick(ts) {
@@ -591,32 +813,44 @@
         }
       }
 
+      publicSnapshot.running = state.running;
+      publicSnapshot.reducedMotion = reducedMotion.matches;
+
       if (reducedMotion.matches && state.width > 0) {
         renderFrame(0, 0, true);
-      } else if (canvas.__jalaKineticState) {
-        canvas.__jalaKineticState.running = state.running;
-        canvas.__jalaKineticState.reducedMotion = reducedMotion.matches;
       }
     }
+
+    onScrollActivityStart(function () {
+      state.pointer.active = false;
+    });
 
     if (!coarsePointer.matches) {
       window.addEventListener(
         "pointermove",
         function (event) {
-          if (reducedMotion.matches || !state.inViewport) return;
-          var rect = canvas.getBoundingClientRect();
+          if (
+            isActivelyScrolling ||
+            reducedMotion.matches ||
+            !state.inViewport ||
+            state.width <= 0
+          ) {
+            return;
+          }
+          var localX = getEventPageX(event) - state.docLeft;
+          var localY = getEventPageY(event) - state.docTop;
           var inside =
-            event.clientX >= rect.left - 40 &&
-            event.clientX <= rect.right + 40 &&
-            event.clientY >= rect.top - 40 &&
-            event.clientY <= rect.bottom + 40;
+            localX >= -40 &&
+            localX <= state.width + 40 &&
+            localY >= -40 &&
+            localY <= state.height + 40;
 
           if (inside) {
-            state.pointer.targetX = event.clientX - rect.left;
-            state.pointer.targetY = event.clientY - rect.top;
+            state.pointer.targetX = localX;
+            state.pointer.targetY = localY;
             if (!state.pointer.active) {
-              state.pointer.x = state.pointer.targetX;
-              state.pointer.y = state.pointer.targetY;
+              state.pointer.x = localX;
+              state.pointer.y = localY;
             }
             state.pointer.active = true;
           } else {
@@ -660,7 +894,7 @@
           }
           updateLoopState();
         },
-        { threshold: 0.01 }
+        { threshold: 0 }
       );
       io.observe(canvas);
     }
@@ -690,13 +924,28 @@
     var stages = Array.prototype.slice.call(document.querySelectorAll("[data-tilt-stage]"));
     if (!stages.length) return;
 
-    var MAX_TILT_DEG = 3.8;
-    var LERP_FACTOR = 0.085;
+    var MAX_TILT_DEG = 2.0;
+    var LERP_FACTOR = 0.095;
+    var SCROLL_DECAY_FACTOR = 0.26;
 
     stages.forEach(function (stage) {
-      var parallaxItems = Array.prototype.slice.call(
-        stage.querySelectorAll("[data-parallax-depth]")
-      );
+      var parallaxSpecs = Array.prototype.slice
+        .call(stage.querySelectorAll("[data-parallax-depth]"))
+        .map(function (el) {
+          return {
+            el: el,
+            depthScale: (parseFloat(el.getAttribute("data-parallax-depth")) || 14) * 0.42
+          };
+        });
+
+      var stageBounds = {
+        docLeft: 0,
+        docTop: 0,
+        width: 0,
+        height: 0,
+        valid: false
+      };
+
       var currentRx = 0;
       var currentRy = 0;
       var targetRx = 0;
@@ -710,27 +959,48 @@
       var hovering = false;
       var rafId = 0;
 
+      function cacheStageBounds() {
+        var rect = stage.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+          stageBounds.valid = false;
+          return;
+        }
+        stageBounds.docLeft = rect.left + (window.scrollX || window.pageXOffset || 0);
+        stageBounds.docTop = rect.top + (window.scrollY || window.pageYOffset || 0);
+        stageBounds.width = rect.width;
+        stageBounds.height = rect.height;
+        stageBounds.valid = true;
+      }
+
       function applyStageVars(rx, ry, gx, gy, glareAlpha) {
-        stage.style.setProperty("--tilt-rx", rx.toFixed(3) + "deg");
-        stage.style.setProperty("--tilt-ry", ry.toFixed(3) + "deg");
+        var isZeroTilt = Math.abs(rx) < 0.001 && Math.abs(ry) < 0.001;
+        stage.style.setProperty("--tilt-rx", isZeroTilt ? "0deg" : rx.toFixed(3) + "deg");
+        stage.style.setProperty("--tilt-ry", isZeroTilt ? "0deg" : ry.toFixed(3) + "deg");
         stage.style.setProperty("--glare-x", gx.toFixed(2) + "%");
         stage.style.setProperty("--glare-y", gy.toFixed(2) + "%");
-        stage.style.setProperty("--glare-alpha", glareAlpha.toFixed(3));
+        stage.style.setProperty(
+          "--glare-alpha",
+          Math.abs(glareAlpha) < 0.001 ? "0" : glareAlpha.toFixed(3)
+        );
 
-        var normX = MAX_TILT_DEG > 0 ? ry / MAX_TILT_DEG : 0;
-        var normY = MAX_TILT_DEG > 0 ? -rx / MAX_TILT_DEG : 0;
+        var normX = !isZeroTilt && MAX_TILT_DEG > 0 ? ry / MAX_TILT_DEG : 0;
+        var normY = !isZeroTilt && MAX_TILT_DEG > 0 ? -rx / MAX_TILT_DEG : 0;
 
-        for (var i = 0; i < parallaxItems.length; i += 1) {
-          var item = parallaxItems[i];
-          var depth = parseFloat(item.getAttribute("data-parallax-depth")) || 14;
-          var shiftX = normX * (depth * 0.42);
-          var shiftY = normY * (depth * 0.42);
-          item.style.setProperty("--parallax-x", shiftX.toFixed(2) + "px");
-          item.style.setProperty("--parallax-y", shiftY.toFixed(2) + "px");
-          if (Math.abs(shiftX) < 0.05 && Math.abs(shiftY) < 0.05) {
+        for (var i = 0; i < parallaxSpecs.length; i += 1) {
+          var spec = parallaxSpecs[i];
+          var item = spec.el;
+          var shiftX = normX * spec.depthScale;
+          var shiftY = normY * spec.depthScale;
+          if (Math.abs(shiftX) < 0.04 && Math.abs(shiftY) < 0.04) {
+            item.style.setProperty("--parallax-x", "0px");
+            item.style.setProperty("--parallax-y", "0px");
             item.style.translate = "";
           } else {
-            item.style.translate = shiftX.toFixed(2) + "px " + shiftY.toFixed(2) + "px";
+            var sx = shiftX.toFixed(2) + "px";
+            var sy = shiftY.toFixed(2) + "px";
+            item.style.setProperty("--parallax-x", sx);
+            item.style.setProperty("--parallax-y", sy);
+            item.style.translate = sx + " " + sy;
           }
         }
       }
@@ -747,25 +1017,33 @@
           return;
         }
 
-        currentRx = lerp(currentRx, targetRx, LERP_FACTOR);
-        currentRy = lerp(currentRy, targetRy, LERP_FACTOR);
-        currentGx = lerp(currentGx, targetGx, LERP_FACTOR * 1.35);
-        currentGy = lerp(currentGy, targetGy, LERP_FACTOR * 1.35);
-        currentAlpha = lerp(currentAlpha, targetAlpha, LERP_FACTOR * 1.2);
+        var factor = isActivelyScrolling ? SCROLL_DECAY_FACTOR : LERP_FACTOR;
+        currentRx = lerp(currentRx, targetRx, factor);
+        currentRy = lerp(currentRy, targetRy, factor);
+        currentGx = lerp(currentGx, targetGx, factor * 1.35);
+        currentGy = lerp(currentGy, targetGy, factor * 1.35);
+        currentAlpha = lerp(currentAlpha, targetAlpha, factor * 1.2);
+
+        var settledAtRest =
+          !hovering &&
+          targetRx === 0 &&
+          targetRy === 0 &&
+          Math.abs(currentRx) < 0.004 &&
+          Math.abs(currentRy) < 0.004 &&
+          Math.abs(currentAlpha) < 0.004;
+
+        if (settledAtRest) {
+          currentRx = 0;
+          currentRy = 0;
+          currentGx = 50;
+          currentGy = 50;
+          currentAlpha = 0;
+          applyStageVars(0, 0, 50, 50, 0);
+          return;
+        }
 
         applyStageVars(currentRx, currentRy, currentGx, currentGy, currentAlpha);
-
-        var settled =
-          !hovering &&
-          Math.abs(currentRx - targetRx) < 0.004 &&
-          Math.abs(currentRy - targetRy) < 0.004 &&
-          Math.abs(currentAlpha - targetAlpha) < 0.004;
-
-        if (!settled) {
-          rafId = window.requestAnimationFrame(step);
-        } else {
-          applyStageVars(0, 0, 50, 50, 0);
-        }
+        rafId = window.requestAnimationFrame(step);
       }
 
       function ensureAnimating() {
@@ -774,17 +1052,63 @@
         }
       }
 
+      function releaseTiltToRest() {
+        hovering = false;
+        targetRx = 0;
+        targetRy = 0;
+        targetGx = 50;
+        targetGy = 50;
+        targetAlpha = 0;
+        stage.removeAttribute("data-tilt-active");
+        if (
+          Math.abs(currentRx) >= 0.001 ||
+          Math.abs(currentRy) >= 0.001 ||
+          Math.abs(currentAlpha) >= 0.001
+        ) {
+          ensureAnimating();
+        } else if (rafId) {
+          window.cancelAnimationFrame(rafId);
+          rafId = 0;
+          applyStageVars(0, 0, 50, 50, 0);
+        }
+      }
+
+      onScrollActivityStart(releaseTiltToRest);
+
+      stage.addEventListener(
+        "pointerenter",
+        function (event) {
+          if (
+            isActivelyScrolling ||
+            reducedMotion.matches ||
+            coarsePointer.matches ||
+            event.pointerType === "touch"
+          ) {
+            return;
+          }
+          cacheStageBounds();
+        },
+        { passive: true }
+      );
+
       stage.addEventListener(
         "pointermove",
         function (event) {
-          if (reducedMotion.matches || coarsePointer.matches || event.pointerType === "touch") {
+          if (
+            isActivelyScrolling ||
+            reducedMotion.matches ||
+            coarsePointer.matches ||
+            event.pointerType === "touch"
+          ) {
             return;
           }
-          var rect = stage.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) return;
+          if (!stageBounds.valid) {
+            cacheStageBounds();
+          }
+          if (!stageBounds.valid) return;
 
-          var relX = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-          var relY = clamp((event.clientY - rect.top) / rect.height, 0, 1);
+          var relX = clamp((getEventPageX(event) - stageBounds.docLeft) / stageBounds.width, 0, 1);
+          var relY = clamp((getEventPageY(event) - stageBounds.docTop) / stageBounds.height, 0, 1);
 
           hovering = true;
           targetRy = (relX - 0.5) * 2 * MAX_TILT_DEG;
@@ -798,16 +1122,26 @@
         { passive: true }
       );
 
-      stage.addEventListener("pointerleave", function () {
-        hovering = false;
-        targetRx = 0;
-        targetRy = 0;
-        targetGx = 50;
-        targetGy = 50;
-        targetAlpha = 0;
-        stage.removeAttribute("data-tilt-active");
-        ensureAnimating();
-      });
+      stage.addEventListener("pointerleave", releaseTiltToRest);
+
+      if (typeof window.ResizeObserver === "function") {
+        var stageRo = new window.ResizeObserver(function () {
+          if (!isActivelyScrolling) {
+            cacheStageBounds();
+          } else {
+            stageBounds.valid = false;
+          }
+        });
+        stageRo.observe(stage);
+      } else {
+        window.addEventListener(
+          "resize",
+          function () {
+            stageBounds.valid = false;
+          },
+          { passive: true }
+        );
+      }
 
       applyStageVars(0, 0, 50, 50, 0);
     });
@@ -815,65 +1149,141 @@
 
   /* ------------------------------------------------------------------------
    * 4. Cursor-Tracking Specular Spotlight Cards ([data-spotlight-card])
+   *    Cached bounds on pointerenter/ResizeObserver · Frozen during scroll
    * ---------------------------------------------------------------------- */
   function initSpotlightCards() {
     var cards = Array.prototype.slice.call(document.querySelectorAll("[data-spotlight-card]"));
     if (!cards.length) return;
 
-    var pendingEvent = null;
+    var boundsByCard = new WeakMap();
     var rafId = 0;
     var activeCard = null;
+    var pendingCard = null;
+    var pendingPageX = 0;
+    var pendingPageY = 0;
 
-    for (var i = 0; i < cards.length; i += 1) {
-      cards[i].style.setProperty("--spot-alpha", "0");
+    function cacheCardBounds(card) {
+      var rect = card.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      var record = {
+        docLeft: rect.left + (window.scrollX || window.pageXOffset || 0),
+        docTop: rect.top + (window.scrollY || window.pageYOffset || 0),
+        width: rect.width,
+        height: rect.height
+      };
+      boundsByCard.set(card, record);
+      return record;
     }
 
-    function flushPointer() {
-      rafId = 0;
-      var ev = pendingEvent;
-      if (!ev) return;
-
-      var nextCard =
-        ev.target && typeof ev.target.closest === "function"
-          ? ev.target.closest("[data-spotlight-card]")
-          : null;
-
-      if (activeCard && activeCard !== nextCard) {
-        activeCard.style.setProperty("--spot-alpha", "0");
-        activeCard.removeAttribute("data-spot-active");
-      }
-
-      activeCard = nextCard;
-      if (activeCard) {
-        var rect = activeCard.getBoundingClientRect();
-        var x = ev.clientX - rect.left;
-        var y = ev.clientY - rect.top;
-        activeCard.style.setProperty("--spot-x", x.toFixed(1) + "px");
-        activeCard.style.setProperty("--spot-y", y.toFixed(1) + "px");
-        activeCard.style.setProperty("--spot-alpha", "1");
-        activeCard.setAttribute("data-spot-active", "true");
-      }
-    }
-
-    document.addEventListener(
-      "pointermove",
-      function (event) {
-        if (event.pointerType === "touch") return;
-        pendingEvent = event;
-        if (!rafId) {
-          rafId = window.requestAnimationFrame(flushPointer);
-        }
-      },
-      { passive: true }
-    );
-
-    document.addEventListener("pointerleave", function () {
+    function clearActiveCard() {
       if (activeCard) {
         activeCard.style.setProperty("--spot-alpha", "0");
         activeCard.removeAttribute("data-spot-active");
         activeCard = null;
       }
+    }
+
+    function flushPointer() {
+      rafId = 0;
+      if (isActivelyScrolling || !pendingCard) return;
+
+      var card = pendingCard;
+      var bounds = boundsByCard.get(card);
+      if (!bounds) {
+        bounds = cacheCardBounds(card);
+      }
+      if (!bounds) return;
+
+      if (activeCard && activeCard !== card) {
+        activeCard.style.setProperty("--spot-alpha", "0");
+        activeCard.removeAttribute("data-spot-active");
+      }
+
+      activeCard = card;
+      var x = clamp(pendingPageX - bounds.docLeft, -24, bounds.width + 24);
+      var y = clamp(pendingPageY - bounds.docTop, -24, bounds.height + 24);
+      card.style.setProperty("--spot-x", x.toFixed(1) + "px");
+      card.style.setProperty("--spot-y", y.toFixed(1) + "px");
+      card.style.setProperty("--spot-alpha", "1");
+      card.setAttribute("data-spot-active", "true");
+    }
+
+    onScrollActivityStart(function () {
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+      pendingCard = null;
+      clearActiveCard();
     });
+
+    var cardsRo =
+      typeof window.ResizeObserver === "function"
+        ? new window.ResizeObserver(function (entries) {
+            for (var i = 0; i < entries.length; i += 1) {
+              boundsByCard.delete(entries[i].target);
+            }
+          })
+        : null;
+
+    if (!cardsRo) {
+      window.addEventListener(
+        "resize",
+        function () {
+          for (var r = 0; r < cards.length; r += 1) {
+            boundsByCard.delete(cards[r]);
+          }
+        },
+        { passive: true }
+      );
+    }
+
+    for (var i = 0; i < cards.length; i += 1) {
+      (function (card) {
+        card.style.setProperty("--spot-alpha", "0");
+        if (cardsRo) {
+          cardsRo.observe(card);
+        }
+
+        card.addEventListener(
+          "pointerenter",
+          function (event) {
+            if (isActivelyScrolling || event.pointerType === "touch" || coarsePointer.matches) {
+              return;
+            }
+            cacheCardBounds(card);
+          },
+          { passive: true }
+        );
+
+        card.addEventListener(
+          "pointermove",
+          function (event) {
+            if (isActivelyScrolling || event.pointerType === "touch" || coarsePointer.matches) {
+              return;
+            }
+            pendingCard = card;
+            pendingPageX = getEventPageX(event);
+            pendingPageY = getEventPageY(event);
+            if (!rafId) {
+              rafId = window.requestAnimationFrame(flushPointer);
+            }
+          },
+          { passive: true }
+        );
+
+        card.addEventListener("pointerleave", function () {
+          if (pendingCard === card) {
+            pendingCard = null;
+          }
+          card.style.setProperty("--spot-alpha", "0");
+          card.removeAttribute("data-spot-active");
+          if (activeCard === card) {
+            activeCard = null;
+          }
+        });
+      })(cards[i]);
+    }
   }
 
   /* ------------------------------------------------------------------------
@@ -962,6 +1372,23 @@
       });
     }
 
+    var baseKeyPromises = Object.create(null);
+    var reusableSalt = new Uint8Array(16);
+    var reusableIv = new Uint8Array(12);
+
+    function getImportedBaseKey(subtle, modeKey, secret) {
+      if (baseKeyPromises[modeKey]) {
+        return baseKeyPromises[modeKey];
+      }
+      baseKeyPromises[modeKey] = subtle
+        .importKey("raw", encoder.encode(secret), { name: "PBKDF2" }, false, ["deriveKey"])
+        .catch(function (err) {
+          delete baseKeyPromises[modeKey];
+          throw err;
+        });
+      return baseKeyPromises[modeKey];
+    }
+
     function animateBase64Decode(targetEl, cipherBytes, finalBase64) {
       if (!targetEl) return;
       if (scrambleRaf) {
@@ -971,25 +1398,36 @@
 
       targetEl.setAttribute("data-ciphertext", finalBase64);
 
-      if (reducedMotion.matches || !cipherBytes || cipherBytes.length === 0) {
+      if (
+        isActivelyScrolling ||
+        reducedMotion.matches ||
+        !cipherBytes ||
+        cipherBytes.length === 0
+      ) {
         targetEl.textContent = finalBase64;
         return;
       }
 
-      var durationMs = 180;
+      var len = cipherBytes.length;
+      var durationMs = 160;
       var startTs = performance.now();
-      var noiseBytes = new Uint8Array(cipherBytes.length);
+      var noiseBytes = new Uint8Array(len);
+      var frameBytes = new Uint8Array(len);
       if (window.crypto && typeof window.crypto.getRandomValues === "function") {
         window.crypto.getRandomValues(noiseBytes);
       }
 
-      var initialBlend = new Uint8Array(cipherBytes.length);
-      for (var i = 0; i < cipherBytes.length; i += 1) {
-        initialBlend[i] = i < 2 ? cipherBytes[i] : noiseBytes[i];
+      for (var i = 0; i < len; i += 1) {
+        frameBytes[i] = i < 2 ? cipherBytes[i] : noiseBytes[i];
       }
-      targetEl.textContent = bytesToBase64(initialBlend);
+      targetEl.textContent = bytesToBase64(frameBytes);
 
       function stepScramble(now) {
+        if (isActivelyScrolling) {
+          scrambleRaf = 0;
+          targetEl.textContent = finalBase64;
+          return;
+        }
         var progress = clamp((now - startTs) / durationMs, 0, 1);
         if (progress >= 1) {
           scrambleRaf = 0;
@@ -997,14 +1435,11 @@
           return;
         }
 
-        var lockedBytes = Math.floor(progress * cipherBytes.length);
-        var frameBytes = new Uint8Array(cipherBytes.length);
-        for (var b = 0; b < cipherBytes.length; b += 1) {
-          if (b < lockedBytes) {
-            frameBytes[b] = cipherBytes[b];
-          } else {
-            frameBytes[b] = (noiseBytes[b] + Math.floor(progress * 97) + b * 13) & 0xff;
-          }
+        var lockedBytes = Math.floor(progress * len);
+        var stepOffset = Math.floor(progress * 97);
+        for (var b = 0; b < len; b += 1) {
+          frameBytes[b] =
+            b < lockedBytes ? cipherBytes[b] : (noiseBytes[b] + stepOffset + b * 13) & 0xff;
         }
         targetEl.textContent = bytesToBase64(frameBytes);
         scrambleRaf = window.requestAnimationFrame(stepScramble);
@@ -1017,7 +1452,8 @@
       var currentSeq = ++runSequence;
       var plaintext = inputEl ? inputEl.value : "rdp://10.24.8.15:3389 • corp\\admin";
       var plainBytes = encoder.encode(plaintext);
-      var modeSpec = KEY_MATERIAL_BY_MODE[activeMode] || KEY_MATERIAL_BY_MODE.account;
+      var modeKey = KEY_MATERIAL_BY_MODE[activeMode] ? activeMode : "account";
+      var modeSpec = KEY_MATERIAL_BY_MODE[modeKey];
       var subtle = window.crypto && window.crypto.subtle;
 
       if (!subtle || typeof window.crypto.getRandomValues !== "function") {
@@ -1028,26 +1464,20 @@
       }
 
       try {
-        var salt = new Uint8Array(16);
-        var iv = new Uint8Array(12);
-        window.crypto.getRandomValues(salt);
-        window.crypto.getRandomValues(iv);
+        window.crypto.getRandomValues(reusableSalt);
+        window.crypto.getRandomValues(reusableIv);
+        var saltHex = bytesToHex(reusableSalt);
+        var ivHex = bytesToHex(reusableIv);
 
         var iterations = calibratedIterations || 100000;
         var t0 = performance.now();
 
-        var baseKey = await subtle.importKey(
-          "raw",
-          encoder.encode(modeSpec.secret),
-          { name: "PBKDF2" },
-          false,
-          ["deriveKey"]
-        );
+        var baseKey = await getImportedBaseKey(subtle, modeKey, modeSpec.secret);
 
         var aesKey = await subtle.deriveKey(
           {
             name: "PBKDF2",
-            salt: salt,
+            salt: reusableSalt,
             iterations: iterations,
             hash: "SHA-256"
           },
@@ -1060,7 +1490,7 @@
         var encryptedBuffer = await subtle.encrypt(
           {
             name: "AES-GCM",
-            iv: iv,
+            iv: reusableIv,
             tagLength: 128
           },
           aesKey,
@@ -1077,12 +1507,13 @@
 
         var sealedBytes = new Uint8Array(encryptedBuffer);
         var tagStart = Math.max(0, sealedBytes.length - 16);
-        var tagBytes = sealedBytes.slice(tagStart);
-        var bodyBytes = sealedBytes.length > 16 ? sealedBytes.slice(0, tagStart) : sealedBytes;
+        var tagBytes = sealedBytes.subarray(tagStart);
+        var bodyBytes =
+          sealedBytes.length > 16 ? sealedBytes.subarray(0, tagStart) : sealedBytes;
         var finalBase64 = bytesToBase64(bodyBytes);
 
-        if (saltEl) saltEl.textContent = bytesToHex(salt);
-        if (ivEl) ivEl.textContent = bytesToHex(iv);
+        if (saltEl) saltEl.textContent = saltHex;
+        if (ivEl) ivEl.textContent = ivHex;
         if (tagEl) tagEl.textContent = bytesToHex(tagBytes);
 
         if (animateOutput) {
@@ -1223,12 +1654,19 @@
 
       if (root) {
         root.classList.remove("is-bursting");
-        void root.offsetWidth;
-        root.classList.add("is-bursting");
       }
       if (svgEl) {
         svgEl.classList.remove("is-bursting");
-        svgEl.classList.add("is-bursting");
+      }
+
+      if (!reducedMotion.matches) {
+        window.requestAnimationFrame(function () {
+          if (root) root.classList.add("is-bursting");
+          if (svgEl) svgEl.classList.add("is-bursting");
+        });
+      } else {
+        if (root) root.classList.add("is-bursting");
+        if (svgEl) svgEl.classList.add("is-bursting");
       }
 
       hops.forEach(function (hop, index) {
@@ -1370,10 +1808,18 @@
       DEFAULT_SECRET;
     var secretBytes = decodeBase32(secretBase32);
     var hmacKeyPromise = null;
+    var counterBytes = new Uint8Array(8);
     var lastCounter = -1;
+    var lastRemainingWhole = -1;
+    var lastExpiring = null;
+    var lastTransform = "";
     var currentRawToken = "482910";
     var copyResetTimer = 0;
     var intervalId = 0;
+
+    if (progressEl) {
+      progressEl.style.transformOrigin = "left center";
+    }
 
     function getHmacKey() {
       if (hmacKeyPromise) return hmacKeyPromise;
@@ -1392,7 +1838,6 @@
       var key = await getHmacKey();
       if (!subtle || !key) return null;
 
-      var counterBytes = new Uint8Array(8);
       var high = Math.floor(counter / 0x100000000);
       var low = counter >>> 0;
       counterBytes[0] = (high >>> 24) & 0xff;
@@ -1416,7 +1861,9 @@
       return String(binary % 1000000).padStart(6, "0");
     }
 
-    async function refreshTotp() {
+    async function refreshTotp(forceWhileScrolling) {
+      if (isActivelyScrolling && !forceWhileScrolling) return;
+
       var nowMs = Date.now();
       var periodSec = 30;
       var nowSec = nowMs / 1000;
@@ -1425,20 +1872,26 @@
       var remainingWhole = Math.max(1, Math.ceil(periodSec - elapsed));
       var ratio = clamp((periodSec - elapsed) / periodSec, 0, 1);
 
-      if (timerEl) {
+      if (timerEl && remainingWhole !== lastRemainingWhole) {
+        lastRemainingWhole = remainingWhole;
         timerEl.textContent = remainingWhole + "s";
-        if (remainingWhole <= 5) {
-          timerEl.setAttribute("data-expiring", "true");
-        } else {
-          timerEl.removeAttribute("data-expiring");
+        var isExpiring = remainingWhole <= 5;
+        if (isExpiring !== lastExpiring) {
+          lastExpiring = isExpiring;
+          if (isExpiring) {
+            timerEl.setAttribute("data-expiring", "true");
+          } else {
+            timerEl.removeAttribute("data-expiring");
+          }
         }
       }
 
       if (progressEl) {
-        var ratioStr = ratio.toFixed(4);
-        progressEl.style.setProperty("--totp-ratio", ratioStr);
-        progressEl.style.transformOrigin = "left center";
-        progressEl.style.transform = "scaleX(" + ratioStr + ")";
+        var nextTransform = "scaleX(" + ratio.toFixed(4) + ")";
+        if (nextTransform !== lastTransform) {
+          lastTransform = nextTransform;
+          progressEl.style.transform = nextTransform;
+        }
       }
 
       if (counter !== lastCounter) {
@@ -1493,8 +1946,10 @@
 
     function startTicker() {
       if (intervalId) return;
-      refreshTotp();
-      intervalId = window.setInterval(refreshTotp, 250);
+      refreshTotp(true);
+      intervalId = window.setInterval(function () {
+        refreshTotp(false);
+      }, 250);
     }
 
     function stopTicker() {
@@ -1502,6 +1957,12 @@
       window.clearInterval(intervalId);
       intervalId = 0;
     }
+
+    onScrollActivityEnd(function () {
+      if (!document.hidden) {
+        refreshTotp(true);
+      }
+    });
 
     document.addEventListener("visibilitychange", function () {
       if (document.hidden) {
@@ -1516,13 +1977,16 @@
 
   /* ------------------------------------------------------------------------
    * 7. Scroll-Triggered Choreographed Entrance ([data-reveal])
+   *    Observe-once · Zero getComputedStyle · Zero reverse-scroll toggling
    * ---------------------------------------------------------------------- */
   function initScrollReveal() {
     var root = document.documentElement;
     var items = Array.prototype.slice.call(document.querySelectorAll("[data-reveal]"));
-    root.classList.add("jala-kinetic-ready");
 
-    if (!items.length) return;
+    if (!items.length) {
+      root.classList.add("jala-kinetic-ready");
+      return;
+    }
 
     function revealImmediately(el) {
       el.style.removeProperty("--reveal-delay");
@@ -1530,36 +1994,28 @@
     }
 
     if (reducedMotion.matches || typeof window.IntersectionObserver !== "function") {
+      root.classList.add("jala-kinetic-ready");
       items.forEach(revealImmediately);
       return;
     }
 
-    function revealWithOptionalDelay(el) {
-      var rawDelay = parseInt(el.getAttribute("data-reveal-delay") || "0", 10);
-      var delayMs = Number.isFinite(rawDelay) ? clamp(rawDelay, 0, 240) : 0;
-
-      if (delayMs > 0) {
-        el.style.setProperty("--reveal-delay", delayMs + "ms");
-        var computedDelay = parseFloat(window.getComputedStyle(el).transitionDelay || "0") || 0;
-        if (computedDelay > 0) {
-          el.classList.add("is-revealed");
-        } else {
-          window.setTimeout(function () {
-            el.classList.add("is-revealed");
-          }, delayMs);
-        }
-      } else {
-        el.classList.add("is-revealed");
-      }
+    var viewportCutoff = (window.innerHeight || 900) * 0.94;
+    var initialVisible = new Array(items.length);
+    for (var r = 0; r < items.length; r += 1) {
+      var rect = items[r].getBoundingClientRect();
+      initialVisible[r] = rect.top < viewportCutoff && rect.bottom > 0;
     }
+
+    root.classList.add("jala-kinetic-ready");
 
     var observer = new window.IntersectionObserver(
       function (entries) {
         for (var i = 0; i < entries.length; i += 1) {
           var entry = entries[i];
           if (entry.isIntersecting) {
-            observer.unobserve(entry.target);
-            revealWithOptionalDelay(entry.target);
+            var el = entry.target;
+            observer.unobserve(el);
+            el.classList.add("is-revealed");
           }
         }
       },
@@ -1569,15 +2025,19 @@
       }
     );
 
-    var viewportCutoff = (window.innerHeight || 900) * 0.94;
-    items.forEach(function (el) {
-      var rect = el.getBoundingClientRect();
-      if (rect.top < viewportCutoff && rect.bottom > 0) {
-        revealWithOptionalDelay(el);
-      } else {
-        observer.observe(el);
+    for (var idx = 0; idx < items.length; idx += 1) {
+      var item = items[idx];
+      var rawDelay = parseInt(item.getAttribute("data-reveal-delay") || "0", 10);
+      var delayMs = Number.isFinite(rawDelay) ? clamp(rawDelay, 0, 240) : 0;
+      if (delayMs > 0) {
+        item.style.setProperty("--reveal-delay", delayMs + "ms");
       }
-    });
+      if (initialVisible[idx]) {
+        item.classList.add("is-revealed");
+      } else {
+        observer.observe(item);
+      }
+    }
 
     reducedMotion.subscribe(function () {
       if (reducedMotion.matches) {
@@ -1591,6 +2051,7 @@
    * Boot Orchestrator
    * ---------------------------------------------------------------------- */
   function bootKineticEngine() {
+    initActiveScrollTracker();
     initScrollReveal();
     initScrollProgressLaser();
     var canvasState = initKineticConstellation();
@@ -1601,8 +2062,11 @@
     initLiveTotpAuthenticator();
 
     window.JalaKineticEngine = {
-      version: "1.16.0",
+      version: "1.17.0",
       reducedMotion: reducedMotion.matches,
+      get isActivelyScrolling() {
+        return isActivelyScrolling;
+      },
       canvas: canvasState
     };
   }
