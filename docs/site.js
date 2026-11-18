@@ -7,6 +7,9 @@
 
     var tabs = Array.prototype.slice.call(tablist.querySelectorAll('[role="tab"]'));
     var metaLabel = document.getElementById("stage-active-meta");
+    var statusEngine = document.getElementById("stage-status-engine");
+    var statusCipher = document.getElementById("stage-status-cipher");
+    var statusScope = document.getElementById("stage-status-scope");
     if (!tabs.length) return;
 
     function activateTab(nextTab, moveFocus) {
@@ -30,6 +33,18 @@
       if (metaLabel) {
         var spec = nextTab.getAttribute("data-stage-meta");
         if (spec) metaLabel.textContent = spec;
+      }
+      if (statusEngine) {
+        var eng = nextTab.getAttribute("data-stage-engine");
+        if (eng) statusEngine.textContent = eng;
+      }
+      if (statusCipher) {
+        var cip = nextTab.getAttribute("data-stage-cipher");
+        if (cip) statusCipher.textContent = cip;
+      }
+      if (statusScope) {
+        var scp = nextTab.getAttribute("data-stage-scope");
+        if (scp) statusScope.textContent = scp;
       }
 
       if (moveFocus) {
@@ -57,6 +72,24 @@
         if (targetIndex !== -1) {
           event.preventDefault();
           activateTab(tabs[targetIndex], true);
+        }
+      });
+    });
+  }
+
+  function initBlueprintInspector() {
+    var chips = Array.prototype.slice.call(document.querySelectorAll("[data-blueprint-chip]"));
+    var caption = document.getElementById("blueprint-caption-text");
+    if (!chips.length || !caption) return;
+
+    chips.forEach(function (chip) {
+      chip.addEventListener("click", function () {
+        chips.forEach(function (item) {
+          item.setAttribute("aria-pressed", item === chip ? "true" : "false");
+        });
+        var detail = chip.getAttribute("data-blueprint-detail");
+        if (detail) {
+          caption.textContent = detail;
         }
       });
     });
@@ -93,7 +126,7 @@
     }
 
     function updateOnScroll() {
-      var threshold = 140;
+      var threshold = 150;
       var currentId = sections[0].id;
       for (var i = 0; i < sections.length; i += 1) {
         var rect = sections[i].section.getBoundingClientRect();
@@ -132,13 +165,15 @@
     updateOnScroll();
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function () {
-      initProductStageTabs();
-      initLegalTocScrollSpy();
-    });
-  } else {
+  function boot() {
     initProductStageTabs();
+    initBlueprintInspector();
     initLegalTocScrollSpy();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
   }
 })();
