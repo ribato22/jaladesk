@@ -6,13 +6,34 @@
     if (!tablist) return;
 
     var tabs = Array.prototype.slice.call(tablist.querySelectorAll('[role="tab"]'));
+    var glider = tablist.querySelector("[data-tab-glider]");
     var metaLabel = document.getElementById("stage-active-meta");
     var statusEngine = document.getElementById("stage-status-engine");
     var statusCipher = document.getElementById("stage-status-cipher");
     var statusScope = document.getElementById("stage-status-scope");
+    var hudLayer = document.querySelector(".stage-hud-layer");
     if (!tabs.length) return;
 
+    var activeTabRef = tabs[0];
+
+    function syncGlider(targetTab) {
+      if (!glider || !targetTab) return;
+      var x = targetTab.offsetLeft;
+      var y = targetTab.offsetTop;
+      var w = targetTab.offsetWidth;
+      var h = targetTab.offsetHeight;
+      if (w <= 0 || h <= 0) return;
+
+      tablist.style.setProperty("--glider-x", x + "px");
+      tablist.style.setProperty("--glider-y", y + "px");
+      tablist.style.setProperty("--glider-w", w + "px");
+      tablist.style.setProperty("--glider-h", h + "px");
+      tablist.setAttribute("data-glider-ready", "true");
+    }
+
     function activateTab(nextTab, moveFocus) {
+      activeTabRef = nextTab;
+
       tabs.forEach(function (tab) {
         var isSelected = tab === nextTab;
         var panelId = tab.getAttribute("aria-controls");
@@ -29,6 +50,11 @@
           }
         }
       });
+
+      if (hudLayer) {
+        var isDesktopPanel = nextTab.getAttribute("aria-controls") === "panel-desktop";
+        hudLayer.setAttribute("data-hud-mode", isDesktopPanel ? "desktop" : "compact");
+      }
 
       if (metaLabel) {
         var spec = nextTab.getAttribute("data-stage-meta");
@@ -47,12 +73,18 @@
         if (scp) statusScope.textContent = scp;
       }
 
+      syncGlider(nextTab);
+
       if (moveFocus) {
         nextTab.focus();
       }
     }
 
     tabs.forEach(function (tab, index) {
+      if (tab.getAttribute("aria-selected") === "true") {
+        activeTabRef = tab;
+      }
+
       tab.addEventListener("click", function () {
         activateTab(tab, false);
       });
@@ -75,11 +107,31 @@
         }
       });
     });
+
+    window.requestAnimationFrame(function () {
+      syncGlider(activeTabRef);
+    });
+
+    if (typeof window.ResizeObserver === "function") {
+      var ro = new window.ResizeObserver(function () {
+        syncGlider(activeTabRef);
+      });
+      ro.observe(tablist);
+    } else {
+      window.addEventListener(
+        "resize",
+        function () {
+          syncGlider(activeTabRef);
+        },
+        { passive: true }
+      );
+    }
   }
 
   function initBlueprintInspector() {
     var chips = Array.prototype.slice.call(document.querySelectorAll("[data-blueprint-chip]"));
     var caption = document.getElementById("blueprint-caption-text");
+    var frame = document.querySelector(".blueprint-frame");
     if (!chips.length || !caption) return;
 
     chips.forEach(function (chip) {
@@ -90,6 +142,10 @@
         var detail = chip.getAttribute("data-blueprint-detail");
         if (detail) {
           caption.textContent = detail;
+        }
+        if (frame) {
+          var layer = chip.getAttribute("data-blueprint-layer") || "all";
+          frame.setAttribute("data-active-layer", layer);
         }
       });
     });

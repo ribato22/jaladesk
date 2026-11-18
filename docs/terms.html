@@ -20,6 +20,7 @@
   <a class="skip-link" href="#main-content">Skip to main content</a>
 
   <header class="site-header">
+    <div class="scroll-laser-bar" id="jala-scroll-progress" aria-hidden="true"></div>
     <div class="container header-inner">
       <div class="brand-cluster">
         <a class="brand-link" href="./index.html">
@@ -35,6 +36,7 @@
       <nav class="site-nav" aria-label="Primary navigation">
         <div class="nav-pill-track">
           <a href="./index.html">Overview</a>
+          <a href="./index.html#live-topology">Live Topology</a>
           <a href="./index.html#capabilities">Architecture</a>
           <a href="./index.html#security">Cloud Sync</a>
           <a href="./privacy.html">Privacy Policy</a>
@@ -60,7 +62,8 @@
     </div>
   </header>
 
-  <section class="arch-band">
+  <section class="arch-band hero-kinetic-band">
+    <canvas id="jala-kinetic-canvas" class="kinetic-backdrop-canvas kinetic-backdrop-compact" aria-hidden="true"></canvas>
     <div class="container">
       <div class="arch-rail arch-junction trust-hero-inner">
         <div class="trust-hero-top">
@@ -79,19 +82,19 @@
         </div>
 
         <dl class="trust-meta-grid">
-          <div>
+          <div data-spotlight-card>
             <dt>Effective Date</dt>
             <dd>November 18, 2026</dd>
           </div>
-          <div>
+          <div data-spotlight-card>
             <dt>Application &amp; Package ID</dt>
             <dd class="mono">com.jaladesk.app</dd>
           </div>
-          <div>
+          <div data-spotlight-card>
             <dt>Developer &amp; Licensor</dt>
             <dd>Rizky Bachtiar Irwanto</dd>
           </div>
-          <div>
+          <div data-spotlight-card>
             <dt>Official Legal Contact</dt>
             <dd><a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></dd>
           </div>
@@ -104,7 +107,7 @@
     <div class="container">
       <div class="arch-rail arch-junction trust-three-col">
         <aside class="legal-toc-rail" aria-label="Table of contents">
-          <div class="legal-toc">
+          <div class="legal-toc" data-spotlight-card>
             <p class="toc-heading">Terms Contents</p>
             <ul>
               <li><a href="#acceptance" class="is-active" aria-current="location">Acceptance &amp; Scope</a></li>
@@ -127,13 +130,13 @@
               </p>
             </section>
 
-            <section class="legal-section" id="licensing">
+            <section class="legal-section" id="licensing" data-reveal>
               <h2>Software Licensing</h2>
               <p>
                 JalaDesk is distributed under an Open-Core licensing model maintained by Rizky Bachtiar Irwanto (<span class="mono">@ribato22</span>):
               </p>
 
-              <div class="surface-panel">
+              <div class="surface-panel" data-spotlight-card>
                 <table class="spec-table">
                   <thead>
                     <tr>
@@ -158,7 +161,7 @@
               </div>
             </section>
 
-            <section class="legal-section" id="authorized-use">
+            <section class="legal-section" id="authorized-use" data-reveal>
               <h2>Authorized Infrastructure &amp; Network Use</h2>
               <p>
                 JalaDesk provides client-side network connectivity and diagnostic tools (RDP, VNC, SSH, SFTP, bastion Jump Host routing, port forwarding, and network inspection studios). You agree to use JalaDesk strictly on servers, virtual machines, network devices, and cloud environments that you own or hold explicit authorization to administer.
@@ -168,12 +171,12 @@
               </p>
             </section>
 
-            <section class="legal-section" id="vault-security">
+            <section class="legal-section" id="vault-security" data-reveal>
               <h2>Zero-Knowledge Encryption &amp; Master Passphrase Responsibility</h2>
               <p>
                 JalaDesk encrypts your connection documents and synced vaults locally on your device using authenticated <span class="mono">AES-256-GCM</span> encryption with cryptographic keys derived from your chosen Master Passphrase via <span class="mono">scrypt</span> and <span class="mono">PBKDF2-HMAC-SHA256</span>.
               </p>
-              <div class="compliance-callout">
+              <div class="compliance-callout" data-spotlight-card>
                 <h3>Zero-Knowledge Passphrase Custody Notice</h3>
                 <p>
                   Because Rizky Bachtiar Irwanto operates zero backend servers and never receives or stores your Master Passphrase or encryption keys, <strong>we cannot recover, reset, or decrypt your vault if you lose or forget your Master Passphrase</strong>. You are responsible for maintaining secure backups of your passphrases and vault files.
@@ -181,7 +184,7 @@
               </div>
             </section>
 
-            <section class="legal-section" id="cloud-sync">
+            <section class="legal-section" id="cloud-sync" data-reveal>
               <h2>Optional Third-Party Cloud Sync Providers</h2>
               <p>
                 JalaDesk enables you to optionally synchronize client-side encrypted vault containers using storage accounts you control, including <strong>Google Drive Application Data (<span class="mono">drive.appdata</span>)</strong>, SFTP servers, WebDAV endpoints, or GitHub Gists.
@@ -202,7 +205,7 @@
               </ul>
             </section>
 
-            <section class="legal-section" id="warranties-liability">
+            <section class="legal-section" id="warranties-liability" data-reveal>
               <h2>Disclaimer of Warranties &amp; Limitation of Liability</h2>
               <p>
                 TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, JALADESK IS PROVIDED ON AN "AS IS" AND "AS AVAILABLE" BASIS WITHOUT WARRANTIES OF ANY KIND, WHETHER EXPRESS, IMPLIED, OR STATUTORY, INCLUDING IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
@@ -212,7 +215,7 @@
               </p>
             </section>
 
-            <section class="legal-section" id="contact">
+            <section class="legal-section" id="contact" data-reveal>
               <h2>Changes to Terms, Governing Law &amp; Contact</h2>
               <p>
                 We may update these Terms of Service to reflect new JalaDesk capabilities, security standards, or regulatory requirements by updating the Effective Date at the top of this page. These Terms are governed by the laws of the Republic of Indonesia, without regard to conflict-of-law principles.
@@ -228,7 +231,7 @@
         </div>
 
         <aside class="governance-rail-wrap" aria-label="Licensing and custody quick summary">
-          <div class="governance-rail">
+          <div class="governance-rail" data-spotlight-card>
             <p class="rail-heading">Governance Summary</p>
             <dl class="governance-facts">
               <div>
@@ -302,6 +305,7 @@
             <p class="footer-heading">Product</p>
             <ul>
               <li><a href="./index.html">Workspace Overview</a></li>
+              <li><a href="./index.html#live-topology">Live Topology Lab</a></li>
               <li><a href="./index.html#capabilities">System Architecture</a></li>
               <li><a href="./index.html#security">Cloud Sync Security</a></li>
               <li><a href="https://github.com/ribato22/jaladesk">GitHub Repository</a></li>
@@ -336,5 +340,6 @@
       </div>
     </div>
   </footer>
+  <script src="./kinetic-engine.js" defer></script>
 </body>
 </html>
