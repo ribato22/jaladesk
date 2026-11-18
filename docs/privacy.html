@@ -1,14 +1,20 @@
 <!DOCTYPE html>
+<!-- impeccable-disable overused-font: Coordinator brief #46 explicitly pinned Plus Jakarta Sans -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Privacy Policy — JalaDesk</title>
+  <meta name="google-site-verification" content="PKd3q2UF_bLbD9RfmB5NhAeT7Kax_4L-onii8t4hn0w" />
+  <title>Privacy Policy — JalaDesk Trust Center</title>
   <meta name="description" content="Official Privacy Policy and Google OAuth 2.0 User Data Disclosures for JalaDesk (com.jaladesk.app) across macOS, Windows, Android, iOS, and iPadOS.">
   <link rel="icon" type="image/png" sizes="120x120" href="./assets/jaladesk-oauth-logo-120.png">
   <link rel="apple-touch-icon" href="./assets/jaladesk-logo.png">
   <link rel="canonical" href="https://ribato22.github.io/jaladesk/privacy.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&amp;family=Plus+Jakarta+Sans:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./site.css">
+  <script src="./site.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -16,26 +22,66 @@
   <header class="site-header">
     <div class="container header-inner">
       <a class="brand-link" href="./index.html">
-        <img class="brand-mark" src="./assets/jaladesk-logo.png" width="38" height="38" alt="JalaDesk official logo">
+        <img class="brand-mark" src="./assets/jaladesk-logo.png" width="34" height="34" alt="JalaDesk official logo">
         <span>JalaDesk</span>
       </a>
       <nav class="site-nav" aria-label="Primary navigation">
-        <a href="./index.html">Home</a>
-        <a href="./index.html#capabilities">Capabilities</a>
-        <a href="./index.html#security">Security &amp; Sync</a>
+        <a href="./index.html">Overview</a>
+        <a href="./index.html#capabilities">Architecture</a>
+        <a href="./index.html#security">Cloud Sync</a>
         <a href="./privacy.html" aria-current="page">Privacy Policy</a>
         <a href="./terms.html">Terms of Service</a>
-        <a class="nav-repo" href="https://github.com/ribato22/jaladesk">GitHub Repository</a>
+        <a class="nav-cta" href="https://github.com/ribato22/jaladesk">
+          <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"></path>
+            <path d="M9 18c-4.51 2-5-2-7-2"></path>
+          </svg>
+          <span>GitHub</span>
+        </a>
       </nav>
     </div>
   </header>
 
+  <section class="trust-hero">
+    <div class="container">
+      <h1>JalaDesk Privacy Policy</h1>
+      <p class="hero-lead">
+        Complete transparency into JalaDesk's local-first cryptography, zero-telemetry guarantees, and optional Google Drive Application Data handling across macOS, Windows, Android, iOS, and iPadOS.
+      </p>
+
+      <nav class="trust-switcher" aria-label="Trust Center documents">
+        <a href="./privacy.html" aria-current="page">Privacy Policy</a>
+        <a href="./terms.html">Terms of Service</a>
+        <a href="./ENTERPRISE-LICENSE.md">Enterprise License</a>
+      </nav>
+
+      <dl class="trust-meta-grid">
+        <div>
+          <dt>Effective Date</dt>
+          <dd>November 18, 2026</dd>
+        </div>
+        <div>
+          <dt>Application &amp; Package ID</dt>
+          <dd class="mono">com.jaladesk.app</dd>
+        </div>
+        <div>
+          <dt>Data Controller &amp; Developer</dt>
+          <dd>Rizky Bachtiar Irwanto</dd>
+        </div>
+        <div>
+          <dt>Official Privacy Contact</dt>
+          <dd><a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
   <main class="legal-main" id="main-content">
     <div class="container legal-layout">
       <aside class="legal-toc" aria-label="Table of contents">
-        <p class="toc-title">Policy Contents</p>
+        <p class="toc-heading">Policy Contents</p>
         <ul>
-          <li><a href="#architecture">Zero-Knowledge Architecture</a></li>
+          <li><a href="#architecture" class="is-active" aria-current="location">Zero-Knowledge Architecture</a></li>
           <li><a href="#local-storage">On-Device Encrypted Storage</a></li>
           <li><a href="#google-oauth">Google OAuth &amp; User Data</a></li>
           <li><a href="#limited-use">Google Limited Use Clause</a></li>
@@ -46,49 +92,69 @@
       </aside>
 
       <article class="legal-article">
-        <h1>JalaDesk Privacy Policy</h1>
-
-        <div class="legal-meta">
-          <p><strong>Effective Date:</strong> November 18, 2026</p>
-          <p><strong>Application Name:</strong> JalaDesk (<code>com.jaladesk.app</code>) for macOS, Windows, Android, iOS, and iPadOS</p>
-          <p><strong>Data Controller / Developer:</strong> Rizky Bachtiar Irwanto — <a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></p>
-          <p><strong>Official Home Page:</strong> <a href="./index.html">https://ribato22.github.io/jaladesk/</a></p>
-        </div>
-
         <section class="legal-section" id="architecture">
           <h2>Zero-Knowledge &amp; Local-First Privacy Architecture</h2>
           <p>
-            <strong>JalaDesk</strong> is engineered with a strict <strong>Zero-Knowledge, Local-First architecture</strong>. You can use JalaDesk across desktop and mobile without creating an account or connecting any cloud service.
+            <strong>JalaDesk</strong> (<span class="mono">com.jaladesk.app</span>) is engineered with a strict <strong>Zero-Knowledge, Local-First architecture</strong>. You can operate JalaDesk across macOS, Windows, Android, iOS, and iPadOS without registering an account or connecting any cloud storage service.
           </p>
           <p>
-            Developer and Data Controller <strong>Rizky Bachtiar Irwanto</strong> operates <strong>zero backend, telemetry, analytics, or proxy servers</strong>. We do not collect, transmit, inspect, rent, or sell your personal information, server IP addresses, host inventories, SSH private keys, passwords, or <code>RFC 6238</code> TOTP 2FA secrets.
+            Developer and Data Controller <strong>Rizky Bachtiar Irwanto</strong> operates <strong>zero backend, telemetry, analytics, or session relay servers</strong>. We do not collect, transmit, inspect, rent, or sell your personal information, server IP addresses, host inventories, SSH private keys, passwords, or RFC 6238 TOTP two-factor authentication secrets.
           </p>
         </section>
 
         <section class="legal-section" id="local-storage">
           <h2>Data Stored Locally on Your Device</h2>
           <p>
-            All connection configurations, jump-host topologies, credentials, and 2FA tokens reside locally on your device inside an authenticated <code>AES-256-GCM</code> encrypted container (<code>.rwdoc</code>, <code>.rtsz</code>, <code>.jaladesk</code>, or <code>.jvault</code>) protected by:
+            All connection configurations, bastion jump-host topologies, credentials, and two-factor authentication seeds reside locally on your device inside an authenticated encrypted container (<span class="mono">.rwdoc</span>, <span class="mono">.rtsz</span>, <span class="mono">.jaladesk</span>, or <span class="mono">.jvault</span>).
           </p>
-          <ul>
-            <li><strong>Hardened Key Derivation:</strong> Cryptographic keys are derived locally on your device from your master passphrase via <code>scrypt</code> and <code>PBKDF2-HMAC-SHA256</code> (<code>100,000</code> iterations with unique random salts).</li>
-            <li><strong>OS Keychain &amp; Hardware Enclave Unlock:</strong> Optional local unlock uses macOS Keychain, Windows DPAPI, Android Keystore / <code>BiometricPrompt</code> (<code>USE_BIOMETRIC</code>), or Apple Secure Enclave (<code>Face ID</code> / <code>Touch ID</code>). Biometric data is verified strictly by the operating system and never leaves your device hardware.</li>
-            <li><strong>Automatic Clipboard Secret Scrubber:</strong> Passwords, private keys, and 2FA tokens copied inside JalaDesk are automatically purged from the device clipboard after the configured time-to-live window (default: 30 seconds).</li>
-          </ul>
+
+          <div class="surface-panel">
+            <table class="spec-table">
+              <thead>
+                <tr>
+                  <th scope="col">Security Layer</th>
+                  <th scope="col">Standard / Mechanism</th>
+                  <th scope="col">Protection Boundary</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Key Derivation</strong></td>
+                  <td class="mono">scrypt &amp; PBKDF2-HMAC-SHA256</td>
+                  <td>Derived strictly on-device from your Master Passphrase using 100,000 iterations and unique cryptographic salts.</td>
+                </tr>
+                <tr>
+                  <td><strong>Vault Cipher</strong></td>
+                  <td class="mono">AES-256-GCM</td>
+                  <td>Authenticated encryption with random initialization vectors and 128-bit integrity tags preventing tampering.</td>
+                </tr>
+                <tr>
+                  <td><strong>Hardware Enclave</strong></td>
+                  <td class="mono">Keychain · DPAPI · Biometrics</td>
+                  <td>Optional local unlock via macOS Keychain, Windows DPAPI, Android BiometricPrompt, or Apple Secure Enclave (Face ID / Touch ID). Biometric data never leaves OS hardware.</td>
+                </tr>
+                <tr>
+                  <td><strong>Clipboard Scrubber</strong></td>
+                  <td class="mono">30-Second Auto-Purge</td>
+                  <td>Passwords, private keys, and TOTP tokens copied in JalaDesk are automatically cleared from system clipboard memory after the configured TTL window.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </section>
 
         <section class="legal-section" id="google-oauth">
           <h2>Optional Google Sign-In &amp; Google User Data Disclosures</h2>
           <p>
-            JalaDesk includes an <strong>optional, user-initiated Google Drive Cloud Sync</strong> feature so you can synchronize your encrypted vault across your own devices using your personal or workspace Google Account. If you do not activate Google Drive Cloud Sync, JalaDesk makes zero requests to Google APIs.
+            JalaDesk provides an <strong>optional, user-initiated Google Drive Cloud Sync</strong> capability so you can synchronize your encrypted vault across your own workstations and mobile devices using your Google Account. If you do not activate Google Drive Cloud Sync, JalaDesk makes zero requests to Google APIs.
           </p>
 
           <h3>Exact Google OAuth 2.0 Scopes Accessed</h3>
           <p>
-            When you explicitly initiate <strong>Sign in with Google</strong> inside JalaDesk, JalaDesk authenticates directly with Google using OAuth 2.0 with PKCE and requests only the following scopes:
+            When you explicitly initiate <strong>Sign in with Google</strong> inside JalaDesk, the application authenticates directly with Google using OAuth 2.0 with PKCE and requests only the following scopes:
           </p>
 
-          <div class="table-wrap">
+          <div class="surface-panel">
             <table class="spec-table">
               <thead>
                 <tr>
@@ -101,22 +167,22 @@
                 <tr>
                   <td><code>openid</code></td>
                   <td>OpenID Connect account subject identifier</td>
-                  <td>Verifies the authenticated OAuth 2.0 session directly between your device and Google (<code>accounts.google.com</code> and <code>oauth2.googleapis.com</code>). Stored only locally on your device.</td>
+                  <td>Verifies the authenticated OAuth 2.0 session directly between your device and Google (<span class="mono">accounts.google.com</span> and <span class="mono">oauth2.googleapis.com</span>). Stored strictly locally on your device.</td>
                 </tr>
                 <tr>
                   <td><code>userinfo.email</code></td>
                   <td>Primary Google account email address</td>
-                  <td>Displayed locally inside JalaDesk's Cloud Sync settings view so you can confirm which Google account is linked. Never sent to any developer server.</td>
+                  <td>Displayed locally inside JalaDesk's Cloud Sync settings view so you can verify which Google account is bound. Never sent to any developer server.</td>
                 </tr>
                 <tr>
                   <td><code>userinfo.profile</code></td>
                   <td>Basic Google profile display name and avatar metadata</td>
-                  <td>Displayed locally in JalaDesk's Cloud Sync status UI on your device. Never transmitted to any developer server or third party.</td>
+                  <td>Displayed locally in JalaDesk's Cloud Sync identity bar on your device. Never transmitted to any developer server or third party.</td>
                 </tr>
                 <tr>
                   <td><code>https://www.googleapis.com/auth/drive.appdata</code></td>
-                  <td>Application-specific hidden <code>appDataFolder</code> in your Google Drive (<code>jaladesk-vault-v1.jvault</code> / <code>jaladesk_vault_sync_v1.jdesk</code>)</td>
-                  <td>Reads, creates, updates, and deletes <strong>only</strong> JalaDesk's own client-side encrypted vault container in your hidden Google Drive Application Data folder. JalaDesk <strong>cannot</strong> view, list, read, modify, or delete any personal files, folders, documents, or photos in your Google Drive.</td>
+                  <td>Application-specific hidden <span class="mono">appDataFolder</span> in your Google Drive (<span class="mono">jaladesk-vault-v1.jvault</span> / <span class="mono">jaladesk_vault_sync_v1.jdesk</span>)</td>
+                  <td>Reads, creates, updates, and deletes <strong>only</strong> JalaDesk's own client-side encrypted vault container inside your hidden Google Drive Application Data folder. JalaDesk <strong>cannot</strong> view, list, read, modify, or delete any personal files, folders, documents, or photos in your Google Drive.</td>
                 </tr>
               </tbody>
             </table>
@@ -124,17 +190,17 @@
 
           <h3>Client-Side Encryption &amp; Storage of Google Drive AppData</h3>
           <p>
-            Before any vault file is uploaded to Google Drive <code>appDataFolder</code>, JalaDesk derives a 256-bit key locally on your device from your Vault Master Passphrase using <code>PBKDF2-HMAC-SHA256</code> (<code>100,000</code> iterations) and encrypts the vault payload client-side using authenticated <code>AES-256-GCM</code> encryption with a random initialization vector and authentication tag.
+            Prior to uploading any vault payload to Google Drive <span class="mono">appDataFolder</span>, JalaDesk derives a 256-bit encryption key locally on your device from your Vault Master Passphrase via <span class="mono">PBKDF2-HMAC-SHA256</span> (<span class="mono">100,000</span> iterations) and encrypts the vault client-side using authenticated <span class="mono">AES-256-GCM</span> encryption.
           </p>
           <ul>
-            <li>Plaintext server addresses, usernames, passwords, SSH private keys, and <code>RFC 6238</code> 2FA secrets never leave your device unencrypted.</li>
+            <li>Plaintext server hostnames, usernames, passwords, SSH private keys, and RFC 6238 two-factor secrets never leave your device unencrypted.</li>
             <li>Your Vault Master Passphrase is never transmitted to Google or to Rizky Bachtiar Irwanto.</li>
-            <li>OAuth 2.0 access and refresh tokens remain exclusively on your local device and communicate directly over HTTPS (<code>TLS 1.2+</code>) with official Google API endpoints.</li>
+            <li>OAuth 2.0 access and refresh tokens remain exclusively on your local device and communicate directly over HTTPS (<span class="mono">TLS 1.2+</span>) with official Google API endpoints.</li>
           </ul>
 
           <h3>Strict Prohibition on Data Sharing, Sale, Advertising &amp; AI Training</h3>
           <ul>
-            <li><strong>Zero Developer Server Transmission:</strong> No Google user data (<code>openid</code>, email address, profile metadata, OAuth tokens, or <code>drive.appdata</code> payloads) is ever sent to or stored on any server controlled by Rizky Bachtiar Irwanto.</li>
+            <li><strong>Zero Developer Server Transmission:</strong> No Google user data (<span class="mono">openid</span>, email address, profile metadata, OAuth tokens, or <span class="mono">drive.appdata</span> payloads) is ever sent to or stored on any server controlled by Rizky Bachtiar Irwanto.</li>
             <li><strong>Zero Third-Party Transfers or Sales:</strong> JalaDesk never sells, rents, licenses, trades, or shares Google user data with third parties, advertisers, analytics networks, or data brokers.</li>
             <li><strong>Zero Advertising or Profiling:</strong> Google user data is never used for serving advertisements, personalized retargeting, or creditworthiness evaluation.</li>
             <li><strong>Zero AI / ML Training:</strong> Google user data and synced vault containers are never used to train, fine-tune, or evaluate generalized artificial intelligence (AI) or machine learning (ML) models.</li>
@@ -143,7 +209,8 @@
 
         <section class="legal-section" id="limited-use">
           <h2>Google API Services User Data Policy — Limited Use Disclosure</h2>
-          <div class="notice-box">
+          <div class="compliance-callout">
+            <h3>Mandatory Limited Use Compliance</h3>
             <p>
               JalaDesk's use and transfer to any other app of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.
             </p>
@@ -153,37 +220,49 @@
         <section class="legal-section" id="permissions">
           <h2>Network &amp; Operating System Permissions</h2>
           <p>
-            JalaDesk requests only the minimal operating system permissions required to execute actions initiated by you:
+            JalaDesk requests only the minimal operating system permissions required to execute connections and security actions explicitly initiated by you:
           </p>
           <ul>
-            <li><strong>Internet &amp; Local Network Access (<code>android.permission.INTERNET</code> / Desktop sockets):</strong> Used exclusively to establish direct remote sessions (<code>RDP</code>, <code>VNC</code>, <code>SSH</code>, <code>SFTP</code>, <code>Jump Host</code> bastions) to hosts you configure, perform local LAN mDNS vault pairing, or sync encrypted vault containers directly with your chosen sync provider (Google Drive <code>appDataFolder</code>, SFTP, WebDAV, or GitHub Gist).</li>
-            <li><strong>Biometric Hardware Access (<code>android.permission.USE_BIOMETRIC</code> / <code>Face ID</code> / <code>Touch ID</code>):</strong> Used strictly locally via OS security APIs to unlock your encrypted vault or App Lock PIN.</li>
+            <li>
+              <strong>Internet &amp; Local Network Access (<span class="mono">android.permission.INTERNET</span> / Desktop sockets):</strong> Used exclusively to establish direct remote sessions (RDP, VNC, SSH, SFTP, and bastion Jump Hosts) to targets you configure, perform local LAN mDNS vault pairing, or synchronize encrypted vault files directly with your selected storage provider (Google Drive <span class="mono">appDataFolder</span>, SFTP, WebDAV, or GitHub Gist).
+            </li>
+            <li>
+              <strong>Biometric Hardware Access (<span class="mono">android.permission.USE_BIOMETRIC</span> / Face ID / Touch ID):</strong> Used strictly locally via OS hardware security APIs to unlock your encrypted vault or App Lock PIN.
+            </li>
           </ul>
         </section>
 
         <section class="legal-section" id="retention-revocation">
           <h2>Data Retention, Deletion &amp; Revoking Google OAuth Permissions</h2>
           <p>
-            Because JalaDesk stores data locally on your device and, only when opted in, inside your own Google Drive <code>appDataFolder</code>, you maintain complete control over data retention and deletion at every stage:
+            Because JalaDesk stores data locally on your device and, only when opted in, inside your own Google Drive <span class="mono">appDataFolder</span>, you retain full administrative control over retention and deletion at every stage:
           </p>
           <ol>
-            <li><strong>Disconnect Google Account in JalaDesk:</strong> Open the <strong>Cloud Sync</strong> panel in JalaDesk and click <strong>Disconnect Google Account</strong>. JalaDesk immediately erases local OAuth 2.0 tokens and cached Google account email/profile details from your device.</li>
-            <li><strong>Delete Synced Vault Data from Google Drive:</strong> Delete the synced vault container directly from JalaDesk's Cloud Sync settings, or open Google Drive on the web and navigate to <strong>Settings &rarr; Manage apps &rarr; JalaDesk &rarr; Options &rarr; Delete hidden app data</strong> to permanently purge JalaDesk's <code>appDataFolder</code> storage.</li>
-            <li><strong>Revoke OAuth 2.0 Access via Google Account Security:</strong> Visit <a href="https://myaccount.google.com/permissions">https://myaccount.google.com/permissions</a> at any time, select <strong>JalaDesk</strong>, and click <strong>Remove Access</strong> to immediately invalidate all OAuth tokens granted to JalaDesk.</li>
-            <li><strong>Remove Local Device Vaults:</strong> Deleting your local vault files or uninstalling JalaDesk immediately removes all locally stored connection records and credentials from your device.</li>
+            <li>
+              <strong>Disconnect Google Account in JalaDesk:</strong> Open the <strong>Cloud Sync</strong> studio inside JalaDesk and select <strong>Disconnect</strong>. JalaDesk immediately erases local OAuth 2.0 tokens and cached Google account email and profile metadata from your device.
+            </li>
+            <li>
+              <strong>Delete Synced Vault Data from Google Drive:</strong> Delete the synced vault container directly from JalaDesk's Cloud Sync settings, or open Google Drive on the web and navigate to <strong>Settings, then Manage apps, then JalaDesk, then Options, then Delete hidden app data</strong> to permanently purge JalaDesk's <span class="mono">appDataFolder</span> storage.
+            </li>
+            <li>
+              <strong>Revoke OAuth 2.0 Access via Google Account Security:</strong> Visit <a href="https://myaccount.google.com/permissions">https://myaccount.google.com/permissions</a> at any time, select <strong>JalaDesk</strong>, and click <strong>Remove Access</strong> to immediately invalidate all OAuth tokens granted to JalaDesk.
+            </li>
+            <li>
+              <strong>Remove Local Device Vaults:</strong> Deleting your local vault files or uninstalling JalaDesk immediately removes all locally stored connection inventories and encrypted credentials from your device.
+            </li>
           </ol>
         </section>
 
         <section class="legal-section" id="contact">
           <h2>Contact the Data Controller</h2>
           <p>
-            If you have questions about this Privacy Policy, Google OAuth data handling, or JalaDesk security practices, please contact:
+            If you have questions regarding this Privacy Policy, Google OAuth 2.0 data disclosures, or JalaDesk's cryptographic architecture, contact the Data Controller directly:
           </p>
           <ul>
             <li><strong>Data Controller / Developer:</strong> Rizky Bachtiar Irwanto</li>
             <li><strong>Email:</strong> <a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></li>
-            <li><strong>Application Identifier:</strong> <code>com.jaladesk.app</code></li>
-            <li><strong>Related Legal Terms:</strong> <a href="./terms.html">JalaDesk Terms of Service</a> &middot; <a href="./index.html">JalaDesk Home Page</a></li>
+            <li><strong>Application Identifier:</strong> <span class="mono">com.jaladesk.app</span></li>
+            <li><strong>Official Website &amp; Companion Terms:</strong> <a href="./index.html">https://ribato22.github.io/jaladesk/</a> &middot; <a href="./terms.html">JalaDesk Terms of Service</a></li>
           </ul>
         </section>
       </article>
@@ -191,17 +270,54 @@
   </main>
 
   <footer class="site-footer">
-    <div class="container footer-grid">
-      <div class="footer-identity">
-        <p><strong>JalaDesk</strong> (<code>com.jaladesk.app</code>) — Multi-Protocol Remote Desktop &amp; Zero-Trust Workspace</p>
-        <p>Developer &amp; Data Controller: Rizky Bachtiar Irwanto — <a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></p>
+    <div class="container">
+      <div class="footer-columns">
+        <div class="footer-brand-summary">
+          <a class="brand-link" href="./index.html">
+            <img class="brand-mark" src="./assets/jaladesk-logo.png" width="34" height="34" alt="JalaDesk official logo">
+            <span>JalaDesk</span>
+          </a>
+          <p>
+            Local-first multi-protocol remote desktop, SSH bastion, SFTP, and zero-knowledge vault workspace across macOS, Windows, Android, iOS, and iPadOS.
+          </p>
+          <span class="footer-pkg">Package ID: com.jaladesk.app</span>
+        </div>
+
+        <div class="footer-col">
+          <p class="footer-heading">Product</p>
+          <ul>
+            <li><a href="./index.html">Workspace Overview</a></li>
+            <li><a href="./index.html#capabilities">System Architecture</a></li>
+            <li><a href="./index.html#security">Cloud Sync Security</a></li>
+            <li><a href="https://github.com/ribato22/jaladesk">GitHub Repository</a></li>
+          </ul>
+        </div>
+
+        <div class="footer-col">
+          <p class="footer-heading">Legal &amp; Governance</p>
+          <ul>
+            <li><a href="./privacy.html" aria-current="page">Privacy Policy</a></li>
+            <li><a href="./terms.html">Terms of Service</a></li>
+            <li><a href="./ENTERPRISE-LICENSE.md">Enterprise License</a></li>
+            <li><a href="https://myaccount.google.com/permissions">Google OAuth Permissions</a></li>
+          </ul>
+        </div>
+
+        <div class="footer-col">
+          <p class="footer-heading">Developer &amp; Controller</p>
+          <ul>
+            <li>Rizky Bachtiar Irwanto</li>
+            <li><a href="mailto:rizkybachtiar7@gmail.com">rizkybachtiar7@gmail.com</a></li>
+            <li>Zero-Telemetry Local-First</li>
+            <li>Apache-2.0 Open-Core</li>
+          </ul>
+        </div>
       </div>
-      <ul class="footer-links" aria-label="Legal and project links">
-        <li><a href="./index.html">Home</a></li>
-        <li><a href="./privacy.html" aria-current="page">Privacy Policy</a></li>
-        <li><a href="./terms.html">Terms of Service</a></li>
-        <li><a href="https://github.com/ribato22/jaladesk">GitHub Repository</a></li>
-      </ul>
+
+      <div class="footer-bottom">
+        <p>&copy; 2026 Rizky Bachtiar Irwanto. JalaDesk and <span class="mono">com.jaladesk.app</span> official documentation &amp; trust center.</p>
+        <p><a href="./privacy.html">Privacy Policy</a> &middot; <a href="./terms.html">Terms of Service</a></p>
+      </div>
     </div>
   </footer>
 </body>
