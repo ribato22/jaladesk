@@ -1,0 +1,1173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#05080F">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://www.googleapis.com https://accounts.google.com https://oauth2.googleapis.com https://openidconnect.googleapis.com https://api.github.com https: wss: ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*; manifest-src 'self'; worker-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none';">
+  <title>JalaDesk Web — Zero-Knowledge Vault, 2FA &amp; Web Gateway</title>
+  <meta name="description" content="Installable zero-knowledge JalaDesk Web Companion PWA with client-side AES-256-GCM encrypted vault, RFC 6238 2FA authenticator, Cloud Sync, and self-hosted Web Gateway console.">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="120x120" href="../assets/jaladesk-oauth-logo-120.png">
+  <link rel="apple-touch-icon" href="../assets/jaladesk-logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&amp;family=JetBrains+Mono:wght@500;600;700&amp;family=Sora:wght@500;600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./app.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#app-workspace-main">Skip to workspace</a>
+
+  <!-- =======================================================================
+       LOCK / ONBOARDING STUDIO (#jala-web-lock)
+       ======================================================================= -->
+  <section id="jala-web-lock" class="lock-stage" aria-label="Vault unlock and onboarding">
+    <div class="lock-shell">
+      <div class="lock-card">
+        <header class="lock-card-head">
+          <div class="lock-brand-row">
+            <img class="lock-emblem" src="../assets/jaladesk-oauth-logo-120.png" width="44" height="44" alt="JalaDesk emblem">
+            <div class="lock-title-group">
+              <h1>JalaDesk Web Vault</h1>
+              <p class="lock-subtitle">Client-side AES-256-GCM vault, RFC 6238 2FA &amp; gateway bridge.</p>
+            </div>
+          </div>
+          <div class="lock-cipher-pill mono" id="lock-storage-badge">
+            <span class="status-dot status-dot-ok" aria-hidden="true"></span>
+            <span id="lock-storage-badge-text">AES-256-GCM &middot; Zero Plaintext</span>
+          </div>
+        </header>
+
+        <div id="lock-error" class="inline-alert inline-alert-danger" role="alert" hidden></div>
+        <div id="lock-info" class="inline-alert inline-alert-info" role="status" hidden></div>
+
+        <!-- Returning User Unlock Panel -->
+        <div id="lock-returning-panel" class="lock-panel" hidden>
+          <form id="form-unlock" class="stack-form" novalidate>
+            <div class="field-group">
+              <label class="field-label" for="unlock-passphrase">Master Passphrase</label>
+              <div class="input-with-action">
+                <input
+                  id="unlock-passphrase"
+                  class="text-input"
+                  type="password"
+                  name="passphrase"
+                  autocomplete="current-password"
+                  placeholder="Enter vault passphrase to decrypt"
+                  required
+                >
+                <button class="input-action-btn" type="button" data-toggle-visibility="unlock-passphrase" aria-label="Show passphrase" aria-pressed="false">
+                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <button class="btn btn-primary btn-block" id="btn-unlock-vault" type="submit">
+              <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 9.9-1"></path>
+              </svg>
+              <span>Unlock Vault</span>
+            </button>
+          </form>
+
+          <div class="lock-secondary-actions">
+            <button class="btn btn-ghost" id="btn-returning-import" type="button">Import .jvault</button>
+            <button class="btn btn-ghost" id="btn-returning-cloud" type="button">Connect Cloud</button>
+            <button class="btn btn-ghost btn-ghost-danger" id="btn-returning-reset" type="button">Reset Local Vault</button>
+          </div>
+
+          <div id="lock-reset-confirm" class="confirm-strip" hidden>
+            <p class="confirm-strip-text">Erase the sealed local browser vault? Export a .jvault backup first if not cloud-synced.</p>
+            <div class="confirm-strip-actions">
+              <button class="btn btn-ghost" id="btn-cancel-reset" type="button">Cancel</button>
+              <button class="btn btn-danger" id="btn-confirm-reset" type="button">Erase Local Vault</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- First-Run / Alternative Onboarding Panel -->
+        <div id="lock-onboarding-panel" class="lock-panel">
+          <div class="lock-back-row" id="lock-back-to-unlock-row" hidden>
+            <button class="btn-link" id="btn-back-to-unlock" type="button">
+              <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m15 18-6-6 6-6"></path>
+              </svg>
+              <span>Back to stored vault unlock</span>
+            </button>
+          </div>
+
+          <div class="segmented-control" role="tablist" aria-label="Vault setup method" id="onboard-mode-tabs">
+            <button class="seg-btn is-active" type="button" role="tab" aria-selected="true" data-onboard-tab="create">Create Vault</button>
+            <button class="seg-btn" type="button" role="tab" aria-selected="false" data-onboard-tab="import">Import .jvault</button>
+            <button class="seg-btn" type="button" role="tab" aria-selected="false" data-onboard-tab="cloud">Cloud Sync</button>
+          </div>
+
+          <!-- Create Local Encrypted Vault -->
+          <form id="form-onboard-create" class="stack-form" data-onboard-panel="create" novalidate>
+            <div class="field-group">
+              <label class="field-label" for="create-passphrase">Master Passphrase</label>
+              <div class="input-with-action">
+                <input
+                  id="create-passphrase"
+                  class="text-input"
+                  type="password"
+                  autocomplete="new-password"
+                  placeholder="Minimum 4 characters"
+                  minlength="4"
+                  required
+                >
+                <button class="input-action-btn" type="button" data-toggle-visibility="create-passphrase" aria-label="Show passphrase" aria-pressed="false">
+                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="field-group">
+              <label class="field-label" for="create-passphrase-confirm">Confirm Passphrase</label>
+              <input
+                id="create-passphrase-confirm"
+                class="text-input"
+                type="password"
+                autocomplete="new-password"
+                placeholder="Repeat master passphrase"
+                minlength="4"
+                required
+              >
+            </div>
+
+            <div class="field-group">
+              <span class="field-label">Auto-Lock Timer</span>
+              <div class="segmented-control" role="radiogroup" aria-label="Auto-lock timer" id="create-autolock-group">
+                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-autolock="immediate">Immediate</button>
+                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-autolock="60">1m</button>
+                <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-autolock="300">5m</button>
+                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-autolock="900">15m</button>
+                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-autolock="0">Off</button>
+              </div>
+            </div>
+
+            <button class="btn btn-primary btn-block" id="btn-create-vault" type="submit">
+              <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path>
+              </svg>
+              <span>Create Local Encrypted Vault</span>
+            </button>
+          </form>
+
+          <!-- Import .jvault -->
+          <form id="form-onboard-import" class="stack-form" data-onboard-panel="import" hidden novalidate>
+            <div class="dropzone" id="lock-dropzone" tabindex="0" role="button" aria-label="Drop .jvault file or press Enter to browse">
+              <input id="lock-jvault-file" class="sr-only" type="file" accept=".jvault,.jdesk,.json,application/json">
+              <svg class="icon-lg dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+              <span class="dropzone-title" id="lock-dropzone-label">Drop .jvault backup here or click to browse</span>
+              <span class="dropzone-meta" id="lock-dropzone-meta">Compatible with JalaDesk Desktop &amp; Mobile exports</span>
+            </div>
+
+            <div class="field-group">
+              <label class="field-label" for="import-lock-passphrase">Backup Passphrase</label>
+              <div class="input-with-action">
+                <input
+                  id="import-lock-passphrase"
+                  class="text-input"
+                  type="password"
+                  autocomplete="off"
+                  placeholder="Enter passphrase used to seal this .jvault"
+                  required
+                >
+                <button class="input-action-btn" type="button" data-toggle-visibility="import-lock-passphrase" aria-label="Show passphrase" aria-pressed="false">
+                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <button class="btn btn-primary btn-block" id="btn-onboard-import-submit" type="submit">
+              <span>Decrypt &amp; Open Vault</span>
+            </button>
+          </form>
+
+          <!-- Connect Cloud Sync -->
+          <form id="form-onboard-cloud" class="stack-form" data-onboard-panel="cloud" hidden novalidate>
+            <div class="field-group">
+              <span class="field-label">Cloud Provider</span>
+              <div class="segmented-control" role="radiogroup" aria-label="Onboarding cloud provider" id="onboard-cloud-provider">
+                <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-cloud-provider="githubGist">GitHub Gist</button>
+                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-cloud-provider="webdav">WebDAV</button>
+                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-cloud-provider="googleDrive">Google Drive</button>
+              </div>
+            </div>
+
+            <!-- GitHub Gist fields -->
+            <div class="stack-fields" data-onboard-provider-fields="githubGist">
+              <div class="field-group">
+                <label class="field-label" for="onboard-gist-token">GitHub Personal Access Token</label>
+                <input id="onboard-gist-token" class="text-input mono" type="password" autocomplete="off" placeholder="ghp_... (gist scope, memory-only)">
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="onboard-gist-id">Secret Gist ID</label>
+                <input id="onboard-gist-id" class="text-input mono" type="text" autocomplete="off" placeholder="Optional — leave blank to discover or create">
+              </div>
+            </div>
+
+            <!-- WebDAV fields -->
+            <div class="stack-fields" data-onboard-provider-fields="webdav" hidden>
+              <div class="field-group">
+                <label class="field-label" for="onboard-webdav-url">WebDAV Vault File URL</label>
+                <input id="onboard-webdav-url" class="text-input mono" type="url" autocomplete="off" placeholder="https://cloud.example.com/remote.php/dav/files/user/jaladesk.jvault">
+              </div>
+              <div class="field-row-2">
+                <div class="field-group">
+                  <label class="field-label" for="onboard-webdav-user">Username</label>
+                  <input id="onboard-webdav-user" class="text-input" type="text" autocomplete="username" placeholder="operator">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="onboard-webdav-pass">Password</label>
+                  <input id="onboard-webdav-pass" class="text-input" type="password" autocomplete="off" placeholder="Memory-only">
+                </div>
+              </div>
+            </div>
+
+            <!-- Google Drive fields -->
+            <div class="stack-fields" data-onboard-provider-fields="googleDrive" hidden>
+              <div class="field-group">
+                <label class="field-label" for="onboard-gdrive-token">Google OAuth Access Token</label>
+                <input id="onboard-gdrive-token" class="text-input mono" type="password" autocomplete="off" placeholder="ya29... (drive.appdata scope)">
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="onboard-gdrive-email">Google Account Email</label>
+                <input id="onboard-gdrive-email" class="text-input" type="email" autocomplete="email" placeholder="Optional for account-bound E2EE key">
+              </div>
+            </div>
+
+            <div class="field-group">
+              <label class="field-label" for="onboard-cloud-passphrase">Vault E2EE Passphrase</label>
+              <input id="onboard-cloud-passphrase" class="text-input" type="password" autocomplete="off" placeholder="Required unless using Google account-bound key">
+            </div>
+
+            <button class="btn btn-primary btn-block" id="btn-onboard-cloud-submit" type="submit">
+              <span>Pull &amp; Unlock Cloud Vault</span>
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <footer class="lock-footer">
+        <span>Zero plaintext stored in browser storage &middot; Offline PWA</span>
+        <a href="../" class="lock-footer-link">Back to JalaDesk Website</a>
+      </footer>
+    </div>
+  </section>
+
+  <!-- =======================================================================
+       FULL-HEIGHT ENTERPRISE APP SHELL (#jala-web-app)
+       ======================================================================= -->
+  <div id="jala-web-app" class="app-shell" hidden>
+    <!-- Desktop Navigation Rail (240px) -->
+    <aside class="app-rail" aria-label="Workspace navigation">
+      <div class="rail-brand">
+        <img class="rail-logo" src="../assets/jaladesk-oauth-logo-120.png" width="32" height="32" alt="JalaDesk logo">
+        <div class="rail-brand-copy">
+          <span class="rail-brand-name">JalaDesk</span>
+          <span class="rail-brand-sub">Web Companion</span>
+        </div>
+      </div>
+
+      <nav class="rail-nav" aria-label="Primary sections">
+        <button class="rail-item is-active" type="button" data-nav-view="connections" aria-current="page">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="3" width="20" height="7" rx="2"></rect>
+            <rect x="2" y="14" width="20" height="7" rx="2"></rect>
+            <line x1="6" y1="6.5" x2="6.01" y2="6.5"></line>
+            <line x1="6" y1="17.5" x2="6.01" y2="17.5"></line>
+          </svg>
+          <span class="rail-item-label">Connections</span>
+          <span class="rail-count mono" id="nav-count-connections">0</span>
+        </button>
+
+        <button class="rail-item" type="button" data-nav-view="totp">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"></circle>
+            <polyline points="12 7 12 12 15.5 14"></polyline>
+          </svg>
+          <span class="rail-item-label">2FA Authenticator</span>
+          <span class="rail-count mono" id="nav-count-totp">0</span>
+        </button>
+
+        <button class="rail-item" type="button" data-nav-view="credentials">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="7.5" cy="15.5" r="4.5"></circle>
+            <path d="m21 2-9.6 9.6"></path>
+            <path d="m15.5 7.5 3 3L22 7l-3-3"></path>
+          </svg>
+          <span class="rail-item-label">Credentials</span>
+          <span class="rail-count mono" id="nav-count-credentials">0</span>
+        </button>
+
+        <button class="rail-item" type="button" data-nav-view="sync">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
+          </svg>
+          <span class="rail-item-label">Cloud Sync &amp; .jvault</span>
+        </button>
+
+        <button class="rail-item" type="button" data-nav-view="gateway">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="4" width="20" height="14" rx="2"></rect>
+            <path d="M8 21h8"></path>
+            <path d="M12 18v3"></path>
+            <polyline points="8 11 10.5 13 8 15"></polyline>
+            <line x1="13" y1="15" x2="16" y2="15"></line>
+          </svg>
+          <span class="rail-item-label">Web Gateway</span>
+        </button>
+      </nav>
+
+      <div class="rail-footer">
+        <div class="rail-autolock-row">
+          <label class="rail-autolock-label" for="rail-autolock-select">Auto-Lock</label>
+          <select id="rail-autolock-select" class="select-compact" aria-label="Auto-lock idle timeout">
+            <option value="immediate">Immediate</option>
+            <option value="60">1 min</option>
+            <option value="300" selected>5 min</option>
+            <option value="900">15 min</option>
+            <option value="0">Off</option>
+          </select>
+        </div>
+
+        <button class="rail-action-btn rail-lock-btn" id="btn-lock-vault" type="button">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+          </svg>
+          <span>Lock Vault</span>
+        </button>
+
+        <a class="rail-action-btn rail-back-link" href="../">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m12 19-7-7 7-7"></path>
+            <path d="M19 12H5"></path>
+          </svg>
+          <span>Back to Website</span>
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main Column -->
+    <div class="app-main-col">
+      <!-- Top Command Header (56px) -->
+      <header class="app-topbar">
+        <div class="topbar-search-wrap">
+          <svg class="icon-sm search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"></circle>
+            <path d="m21 21-4.3-4.3"></path>
+          </svg>
+          <input
+            id="global-search"
+            class="topbar-search"
+            type="search"
+            placeholder="Filter connections, 2FA, credentials..."
+            aria-label="Global workspace search"
+          >
+          <kbd class="kbd-hint mono" aria-hidden="true">/</kbd>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="security-pill" id="vault-security-pill" role="status">
+            <span class="status-dot status-dot-ok" aria-hidden="true"></span>
+            <span id="vault-security-pill-text">AES-256-GCM &middot; Local-Only</span>
+          </div>
+
+          <button class="btn btn-secondary btn-sm" id="btn-quick-sync" type="button" hidden>
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+              <path d="M3 3v5h5"></path>
+              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"></path>
+              <path d="M16 16h5v5"></path>
+            </svg>
+            <span>Sync Now</span>
+          </button>
+
+          <button class="btn btn-ghost btn-sm mobile-lock-btn" id="btn-mobile-lock" type="button" aria-label="Lock Vault">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+            <span>Lock</span>
+          </button>
+
+          <button class="btn btn-primary btn-sm" id="btn-primary-add" type="button">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            <span id="btn-primary-add-label">Add Connection</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Workspace Stage -->
+      <main id="app-workspace-main" class="app-stage" tabindex="-1">
+        <!-- VIEW 1: Connections & Jump Host Gateways -->
+        <section id="view-connections" class="stage-view" aria-labelledby="heading-connections">
+          <div class="view-head">
+            <div class="view-title-block">
+              <h1 id="heading-connections">Connections</h1>
+              <p class="view-summary" id="connections-summary">0 hosts &middot; 0 jump gateways</p>
+            </div>
+            <div class="view-head-actions">
+              <button class="btn btn-secondary btn-sm" id="btn-add-bastion-quick" type="button">
+                <span>Add Jump Host</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="filter-bar" id="folder-filter-bar" role="tablist" aria-label="Filter connections by folder"></div>
+
+          <div id="connections-list" class="connections-grid" aria-live="polite"></div>
+
+          <div id="connections-empty" class="empty-state" hidden>
+            <svg class="icon-xl empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2" y="3" width="20" height="7" rx="2"></rect>
+              <rect x="2" y="14" width="20" height="7" rx="2"></rect>
+              <line x1="6" y1="6.5" x2="6.01" y2="6.5"></line>
+              <line x1="6" y1="17.5" x2="6.01" y2="17.5"></line>
+            </svg>
+            <h2>No connections yet</h2>
+            <p class="empty-copy">Add your RDP workstations, VNC hosts, SSH bastions, SFTP servers, or hypervisors. Everything encrypts locally before touching storage.</p>
+            <div class="empty-actions">
+              <button class="btn btn-primary" id="btn-empty-add-host" type="button">Add Connection</button>
+              <button class="btn btn-secondary" id="btn-empty-go-sync" type="button">Import .jvault Backup</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 2: Live RFC 6238 2FA Authenticator -->
+        <section id="view-totp" class="stage-view" aria-labelledby="heading-totp" hidden>
+          <div class="view-head">
+            <div class="view-title-block">
+              <h1 id="heading-totp">2FA Authenticator</h1>
+              <p class="view-summary" id="totp-summary">0 active tokens &middot; RFC 6238 WebCrypto</p>
+            </div>
+            <div class="view-head-actions">
+              <button class="btn btn-secondary btn-sm" id="btn-view-add-totp" type="button">Add 2FA Token</button>
+            </div>
+          </div>
+
+          <div id="totp-list" class="totp-grid" aria-live="polite"></div>
+
+          <div id="totp-empty" class="empty-state" hidden>
+            <svg class="icon-xl empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"></circle>
+              <polyline points="12 7 12 12 15.5 14"></polyline>
+            </svg>
+            <h2>No 2FA tokens stored</h2>
+            <p class="empty-copy">Generate live SHA1, SHA256, or SHA512 verification codes offline in your browser or paste any standard otpauth:// URI.</p>
+            <div class="empty-actions">
+              <button class="btn btn-primary" id="btn-empty-add-totp" type="button">Add 2FA Token</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 3: Saved Credentials Vault -->
+        <section id="view-credentials" class="stage-view" aria-labelledby="heading-credentials" hidden>
+          <div class="view-head">
+            <div class="view-title-block">
+              <h1 id="heading-credentials">Credentials</h1>
+              <p class="view-summary" id="credentials-summary">0 credentials stored in encrypted enclave</p>
+            </div>
+            <div class="view-head-actions">
+              <button class="btn btn-secondary btn-sm" id="btn-view-add-cred" type="button">Add Credential</button>
+            </div>
+          </div>
+
+          <div class="filter-bar" id="cred-kind-filter-bar" role="tablist" aria-label="Filter credentials by type">
+            <button class="filter-pill is-active" type="button" role="tab" aria-selected="true" data-cred-filter="all">All</button>
+            <button class="filter-pill" type="button" role="tab" aria-selected="false" data-cred-filter="password">Password</button>
+            <button class="filter-pill" type="button" role="tab" aria-selected="false" data-cred-filter="sshKey">SSH Key</button>
+            <button class="filter-pill" type="button" role="tab" aria-selected="false" data-cred-filter="domain">Domain</button>
+          </div>
+
+          <div id="credentials-panel" class="surface-list-panel" hidden>
+            <div id="credentials-list" class="cred-rows" aria-live="polite"></div>
+          </div>
+
+          <div id="credentials-empty" class="empty-state" hidden>
+            <svg class="icon-xl empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="7.5" cy="15.5" r="4.5"></circle>
+              <path d="m21 2-9.6 9.6"></path>
+              <path d="m15.5 7.5 3 3L22 7l-3-3"></path>
+            </svg>
+            <h2>No credentials saved</h2>
+            <p class="empty-copy">Store reusable passwords, domain accounts, and SSH private keys to bind across hosts and sync across Desktop and Mobile.</p>
+            <div class="empty-actions">
+              <button class="btn btn-primary" id="btn-empty-add-cred" type="button">Add Credential</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 4: Zero-Knowledge Cloud Sync & .jvault Studio -->
+        <section id="view-sync" class="stage-view" aria-labelledby="heading-sync" hidden>
+          <div class="view-head">
+            <div class="view-title-block">
+              <h1 id="heading-sync">Cloud Sync &amp; .jvault</h1>
+              <p class="view-summary" id="sync-summary">Envelope format: jaladesk-encrypted-vault-v1 (syncSchema 2)</p>
+            </div>
+          </div>
+
+          <div class="studio-two-col">
+            <!-- Cloud Sync Panel -->
+            <div class="studio-panel">
+              <div class="panel-head">
+                <h2>Zero-Knowledge Cloud Sync</h2>
+                <p class="panel-desc">Payloads are sealed with AES-256-GCM in your browser before leaving this device. Cloud providers store ciphertext only.</p>
+              </div>
+
+              <div class="field-group">
+                <span class="field-label">Sync Provider</span>
+                <div class="segmented-control" role="radiogroup" aria-label="Cloud sync provider" id="sync-provider-tabs">
+                  <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-sync-provider="googleDrive">Google Drive</button>
+                  <button class="seg-btn" type="button" role="radio" aria-checked="false" data-sync-provider="githubGist">GitHub Gist</button>
+                  <button class="seg-btn" type="button" role="radio" aria-checked="false" data-sync-provider="webdav">WebDAV</button>
+                </div>
+              </div>
+
+              <!-- Google Drive Config -->
+              <div class="stack-fields" data-sync-provider-panel="googleDrive">
+                <div class="info-callout">
+                  <p>Google Drive stores <code class="mono">jaladesk-vault-v1.jvault</code> inside hidden <code class="mono">appDataFolder</code>. Add an Authorized JavaScript Origin Web Client ID in GCP project <code class="mono">749663705305</code> for popup sign-in, or paste an OAuth access token directly for instant sync.</p>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="sync-gdrive-client-id">Google Web Client ID (Optional)</label>
+                  <div class="input-with-btn-row">
+                    <input id="sync-gdrive-client-id" class="text-input mono" type="text" autocomplete="off" placeholder="749663705305-xxxx.apps.googleusercontent.com">
+                    <button class="btn btn-secondary btn-sm" id="btn-gdrive-oauth" type="button">Connect OAuth</button>
+                  </div>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="sync-gdrive-token">OAuth Access Token (Memory-Only)</label>
+                  <input id="sync-gdrive-token" class="text-input mono" type="password" autocomplete="off" placeholder="ya29... (drive.appdata scope)">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="sync-gdrive-email">Google Account Email</label>
+                  <input id="sync-gdrive-email" class="text-input" type="email" autocomplete="email" placeholder="name@gmail.com (for account-bound E2EE key)">
+                </div>
+              </div>
+
+              <!-- GitHub Gist Config -->
+              <div class="stack-fields" data-sync-provider-panel="githubGist" hidden>
+                <div class="field-group">
+                  <label class="field-label" for="sync-gist-token">GitHub Personal Access Token (Memory-Only)</label>
+                  <input id="sync-gist-token" class="text-input mono" type="password" autocomplete="off" placeholder="ghp_... with gist scope">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="sync-gist-id">Secret Gist ID</label>
+                  <input id="sync-gist-id" class="text-input mono" type="text" autocomplete="off" placeholder="Auto-filled on first push or paste existing ID">
+                </div>
+              </div>
+
+              <!-- WebDAV Config -->
+              <div class="stack-fields" data-sync-provider-panel="webdav" hidden>
+                <div class="info-callout">
+                  <p>Ensure your WebDAV server permits CORS <code class="mono">GET</code> / <code class="mono">PUT</code> and <code class="mono">Authorization</code> headers from this origin.</p>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="sync-webdav-url">WebDAV File Endpoint</label>
+                  <input id="sync-webdav-url" class="text-input mono" type="url" autocomplete="off" placeholder="https://cloud.example.com/dav/jaladesk-vault.jvault">
+                </div>
+                <div class="field-row-2">
+                  <div class="field-group">
+                    <label class="field-label" for="sync-webdav-user">Username</label>
+                    <input id="sync-webdav-user" class="text-input" type="text" autocomplete="username" placeholder="operator">
+                  </div>
+                  <div class="field-group">
+                    <label class="field-label" for="sync-webdav-pass">Password (Memory-Only)</label>
+                    <input id="sync-webdav-pass" class="text-input" type="password" autocomplete="off" placeholder="Never saved to storage">
+                  </div>
+                </div>
+              </div>
+
+              <!-- Switch Row: Custom E2EE Passphrase -->
+              <div class="switch-row">
+                <div class="switch-copy">
+                  <span class="switch-title" id="label-custom-passphrase">Custom E2EE Passphrase</span>
+                  <span class="switch-desc">Use a dedicated sync passphrase instead of the local vault passphrase or Google account key.</span>
+                </div>
+                <button
+                  id="sync-custom-passphrase-switch"
+                  class="toggle-switch"
+                  type="button"
+                  role="switch"
+                  aria-checked="false"
+                  aria-labelledby="label-custom-passphrase"
+                >
+                  <span class="toggle-thumb" aria-hidden="true"></span>
+                </button>
+              </div>
+
+              <div id="sync-custom-passphrase-wrap" class="field-group" hidden>
+                <label class="field-label" for="sync-custom-passphrase">Sync Encryption Passphrase</label>
+                <input id="sync-custom-passphrase" class="text-input" type="password" autocomplete="off" placeholder="Enter dedicated sync passphrase">
+              </div>
+
+              <div class="action-bar-wrap">
+                <button class="btn btn-primary" id="btn-sync-merge" type="button">Smart Merge Sync</button>
+                <button class="btn btn-secondary" id="btn-sync-pull" type="button">Pull</button>
+                <button class="btn btn-secondary" id="btn-sync-push" type="button">Force Push</button>
+              </div>
+
+              <div id="sync-status-panel" class="sync-log-box" role="status" aria-live="polite">
+                <span class="sync-log-label">Sync Telemetry</span>
+                <p id="sync-status-message" class="sync-log-text">No cloud sync run in this session. Local vault remains sealed in browser storage.</p>
+              </div>
+            </div>
+
+            <!-- .jvault Backup & Local Security Panel -->
+            <div class="studio-stack">
+              <div class="studio-panel">
+                <div class="panel-head">
+                  <h2>.jvault Encrypted Backup</h2>
+                  <p class="panel-desc">Portable AES-256-GCM archives compatible with JalaDesk macOS, Windows, Android, and iOS.</p>
+                </div>
+
+                <div class="backup-export-row">
+                  <button class="btn btn-primary" id="btn-export-jvault" type="button">
+                    <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>Export .jvault</span>
+                  </button>
+                  <span class="backup-meta mono" id="export-summary-meta">Ready to seal</span>
+                </div>
+
+                <div class="panel-divider" aria-hidden="true"></div>
+
+                <form id="form-sync-import-jvault" class="stack-form" novalidate>
+                  <div class="dropzone" id="sync-dropzone" tabindex="0" role="button" aria-label="Drop .jvault file to import">
+                    <input id="sync-jvault-file" class="sr-only" type="file" accept=".jvault,.jdesk,.json,application/json">
+                    <svg class="icon-lg dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="17 8 12 3 7 8"></polyline>
+                      <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    <span class="dropzone-title" id="sync-dropzone-label">Drop .jvault archive here or click to select</span>
+                    <span class="dropzone-meta" id="sync-dropzone-meta">Deterministic tombstone-aware merge or full replace</span>
+                  </div>
+
+                  <div class="field-group">
+                    <span class="field-label">Import Strategy</span>
+                    <div class="segmented-control" role="radiogroup" aria-label="Import strategy" id="sync-import-mode">
+                      <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-import-mode="merge">Smart Merge</button>
+                      <button class="seg-btn" type="button" role="radio" aria-checked="false" data-import-mode="replace">Replace Local</button>
+                    </div>
+                  </div>
+
+                  <div class="field-group">
+                    <label class="field-label" for="sync-import-passphrase">Archive Passphrase</label>
+                    <input id="sync-import-passphrase" class="text-input" type="password" autocomplete="off" placeholder="Leave blank to use current vault passphrase">
+                  </div>
+
+                  <button class="btn btn-secondary btn-block" id="btn-sync-import-submit" type="submit">Import .jvault Archive</button>
+                </form>
+              </div>
+
+              <div class="studio-panel">
+                <div class="panel-head">
+                  <h2>Vault Passphrase &amp; Session Lock</h2>
+                  <p class="panel-desc">Re-encrypt your local vault envelope with a new passphrase or lock immediately to zero memory.</p>
+                </div>
+
+                <form id="form-change-passphrase" class="stack-form" novalidate>
+                  <div class="field-row-2">
+                    <div class="field-group">
+                      <label class="field-label" for="new-vault-passphrase">New Passphrase</label>
+                      <input id="new-vault-passphrase" class="text-input" type="password" autocomplete="new-password" placeholder="Min 4 characters" minlength="4" required>
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="confirm-new-vault-passphrase">Confirm New</label>
+                      <input id="confirm-new-vault-passphrase" class="text-input" type="password" autocomplete="new-password" placeholder="Repeat passphrase" minlength="4" required>
+                    </div>
+                  </div>
+                  <div class="action-bar-wrap">
+                    <button class="btn btn-secondary" type="submit">Update Master Passphrase</button>
+                    <button class="btn btn-ghost" id="btn-sync-lock-now" type="button">Lock Vault Now</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW 5: Self-Hosted Web Gateway (Phase 3 Ready) -->
+        <section id="view-gateway" class="stage-view" aria-labelledby="heading-gateway" hidden>
+          <div class="view-head">
+            <div class="view-title-block">
+              <h1 id="heading-gateway">Web Gateway</h1>
+              <p class="view-summary">Self-hosted browser bridge for live RDP, VNC, SSH &amp; SFTP sessions.</p>
+            </div>
+            <div class="gateway-state-pill mono" id="gateway-state-pill">
+              <span class="status-dot status-dot-idle" id="gateway-state-dot" aria-hidden="true"></span>
+              <span id="gateway-state-text">DISCONNECTED</span>
+            </div>
+          </div>
+
+          <div class="gateway-two-col">
+            <!-- Connection Console -->
+            <div class="studio-panel">
+              <div class="panel-head">
+                <h2>Gateway Session Console</h2>
+                <p class="panel-desc">Connect to your own JalaDesk Docker Gateway over TLS WebSocket. Ephemeral tokens stay in RAM and URL fragments are scrubbed automatically.</p>
+              </div>
+
+              <div id="gateway-fragment-notice" class="inline-alert inline-alert-info" role="status" hidden></div>
+
+              <form id="form-gateway-connect" class="stack-form" novalidate>
+                <div class="field-group">
+                  <label class="field-label" for="gateway-ws-url">Gateway WebSocket URL</label>
+                  <input id="gateway-ws-url" class="text-input mono" type="url" autocomplete="off" value="wss://gateway.local:8443" placeholder="wss://gateway.local:8443" required>
+                </div>
+
+                <div class="field-group">
+                  <label class="field-label" for="gateway-host-select">Vault Target Host</label>
+                  <select id="gateway-host-select" class="text-input">
+                    <option value="">Select a target from unlocked vault...</option>
+                  </select>
+                </div>
+
+                <div class="field-group">
+                  <span class="field-label">Gateway Authentication</span>
+                  <div class="segmented-control" role="radiogroup" aria-label="Gateway authentication method" id="gateway-auth-mode">
+                    <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-gateway-auth="pairing">Pairing Code</button>
+                    <button class="seg-btn" type="button" role="radio" aria-checked="false" data-gateway-auth="token">Session Token</button>
+                  </div>
+                </div>
+
+                <div id="gateway-pairing-wrap" class="field-group">
+                  <label class="field-label" for="gateway-pairing-code">6-Digit Pairing Code</label>
+                  <input
+                    id="gateway-pairing-code"
+                    class="text-input mono pairing-input"
+                    type="text"
+                    inputmode="text"
+                    maxlength="7"
+                    autocomplete="off"
+                    placeholder="482 910"
+                  >
+                </div>
+
+                <div id="gateway-token-wrap" class="field-group" hidden>
+                  <label class="field-label" for="gateway-session-token">Ephemeral Session Token</label>
+                  <input
+                    id="gateway-session-token"
+                    class="text-input mono"
+                    type="password"
+                    autocomplete="off"
+                    placeholder="Auto-captured from #token= URL fragment or paste token"
+                  >
+                </div>
+
+                <div class="switch-row">
+                  <div class="switch-copy">
+                    <span class="switch-title" id="label-view-only">View-Only Observer</span>
+                    <span class="switch-desc">Block pointer clicks and keyboard input while auditing a live desktop session.</span>
+                  </div>
+                  <button
+                    id="gateway-view-only-switch"
+                    class="toggle-switch"
+                    type="button"
+                    role="switch"
+                    aria-checked="false"
+                    aria-labelledby="label-view-only"
+                  >
+                    <span class="toggle-thumb" aria-hidden="true"></span>
+                  </button>
+                </div>
+
+                <div class="action-bar-wrap">
+                  <button class="btn btn-primary" id="btn-gateway-connect" type="submit">Connect Bridge</button>
+                  <button class="btn btn-secondary" id="btn-gateway-disconnect" type="button" disabled>Disconnect</button>
+                </div>
+              </form>
+
+              <div class="gateway-viewport" id="gateway-viewport">
+                <div class="gateway-viewport-bar">
+                  <span class="mono" id="gateway-target-badge">NO TARGET SELECTED</span>
+                  <span class="mono" id="gateway-mode-badge">INTERACTIVE</span>
+                </div>
+                <div class="gateway-console-body mono" id="gateway-log" role="log" aria-live="polite">
+                  <p class="console-line">Ready. Select a Vault host and enter a 6-digit pairing code or #token= fragment.</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Self-Hosted Docker Quickstart -->
+            <div class="studio-panel">
+              <div class="panel-head">
+                <h2>Self-Hosted Docker Gateway</h2>
+                <p class="panel-desc">Deploy your own zero-trust protocol bridge in seconds. Browsers connect over WSS while raw RDP, VNC, SSH, and SFTP stay inside your private network.</p>
+              </div>
+
+              <div class="segmented-control" role="tablist" aria-label="Docker quickstart format" id="docker-quickstart-tabs">
+                <button class="seg-btn is-active" type="button" role="tab" aria-selected="true" data-docker-tab="run">docker run</button>
+                <button class="seg-btn" type="button" role="tab" aria-selected="false" data-docker-tab="compose">docker compose</button>
+              </div>
+
+              <div class="code-well">
+                <pre class="code-block mono" id="docker-snippet-code">docker run --rm -p 8443:8443 \
+  -e JALADESK_PAIRING=true \
+  -e JALADESK_ORIGIN=https://ribato22.github.io \
+  ghcr.io/ribato22/jaladesk-gateway:latest</pre>
+                <button class="btn btn-secondary btn-sm code-copy-btn" id="btn-copy-docker" type="button">Copy Snippet</button>
+              </div>
+
+              <div class="capability-list" aria-label="Gateway protocol capabilities">
+                <div class="capability-row">
+                  <span class="proto-badge proto-rdp mono">RDP</span>
+                  <span class="capability-copy">Native FreeRDP 3.x dirty-rect stream &amp; opt-in clipboard</span>
+                </div>
+                <div class="capability-row">
+                  <span class="proto-badge proto-vnc mono">VNC</span>
+                  <span class="capability-copy">RFB 3.3 / 3.8 &amp; Apple Remote Desktop tile relay</span>
+                </div>
+                <div class="capability-row">
+                  <span class="proto-badge proto-ssh mono">SSH</span>
+                  <span class="capability-copy">Interactive PTY terminal with multi-hop jump bastions</span>
+                </div>
+                <div class="capability-row">
+                  <span class="proto-badge proto-sftp mono">SFTP</span>
+                  <span class="capability-copy">Chunked streaming upload &amp; download over WSS</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Mobile Bottom Navigation Bar (< 768px) -->
+    <nav class="mobile-bottom-nav" aria-label="Mobile workspace navigation">
+      <button class="mobile-nav-item is-active" type="button" data-nav-view="connections" aria-current="page">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2" y="3" width="20" height="7" rx="2"></rect>
+          <rect x="2" y="14" width="20" height="7" rx="2"></rect>
+        </svg>
+        <span>Hosts</span>
+      </button>
+      <button class="mobile-nav-item" type="button" data-nav-view="totp">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"></circle>
+          <polyline points="12 7 12 12 15.5 14"></polyline>
+        </svg>
+        <span>2FA</span>
+      </button>
+      <button class="mobile-nav-item" type="button" data-nav-view="credentials">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="7.5" cy="15.5" r="4.5"></circle>
+          <path d="m21 2-9.6 9.6"></path>
+        </svg>
+        <span>Vault</span>
+      </button>
+      <button class="mobile-nav-item" type="button" data-nav-view="sync">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
+        </svg>
+        <span>Sync</span>
+      </button>
+      <button class="mobile-nav-item" type="button" data-nav-view="gateway">
+        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2" y="4" width="20" height="14" rx="2"></rect>
+          <path d="M8 21h8"></path>
+        </svg>
+        <span>Gateway</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- =======================================================================
+       STUDIO MODALS (Separated #090E16 Footer)
+       ======================================================================= -->
+  <div id="jala-modal-backdrop" class="modal-backdrop" hidden>
+    <!-- Modal 1: Add / Edit Connection & Jump Host Gateway -->
+    <div id="modal-connection" class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-conn-title" hidden>
+      <div class="modal-header">
+        <h2 id="modal-conn-title">Add Connection</h2>
+        <button class="modal-close-btn" type="button" data-modal-close aria-label="Close modal">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <form id="form-connection" class="modal-form" novalidate>
+        <div class="modal-body">
+          <input id="conn-id" type="hidden">
+
+          <div class="field-group">
+            <span class="field-label">Protocol</span>
+            <div class="segmented-control" role="radiogroup" aria-label="Connection protocol" id="conn-protocol-group">
+              <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-proto="rdp">RDP</button>
+              <button class="seg-btn" type="button" role="radio" aria-checked="false" data-proto="vnc">VNC</button>
+              <button class="seg-btn" type="button" role="radio" aria-checked="false" data-proto="ssh">SSH</button>
+              <button class="seg-btn" type="button" role="radio" aria-checked="false" data-proto="sftp">SFTP</button>
+              <button class="seg-btn" type="button" role="radio" aria-checked="false" data-proto="hypervisor">Hypervisor</button>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="conn-name">Display Name</label>
+            <input id="conn-name" class="text-input" type="text" placeholder="prod-win-01 or Bastion Jakarta" required>
+          </div>
+
+          <div class="field-row-addr">
+            <div class="field-group">
+              <label class="field-label" for="conn-address">Host / IP Address</label>
+              <input id="conn-address" class="text-input mono" type="text" placeholder="10.28.37.14 or prod.internal" required>
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="conn-port">Port</label>
+              <input id="conn-port" class="text-input mono" type="number" min="1" max="65535" value="3389" required>
+            </div>
+          </div>
+
+          <div class="field-row-2">
+            <div class="field-group">
+              <label class="field-label" for="conn-username">Username</label>
+              <input id="conn-username" class="text-input mono" type="text" placeholder="administrator or root">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="conn-folder">Folder</label>
+              <input id="conn-folder" class="text-input" type="text" placeholder="Production">
+            </div>
+          </div>
+
+          <div class="field-row-2">
+            <div class="field-group">
+              <label class="field-label" for="conn-jump-host">Jump Host / Bastion Route</label>
+              <select id="conn-jump-host" class="text-input">
+                <option value="">Direct (No Jump Host)</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="conn-credential">Saved Credential</label>
+              <select id="conn-credential" class="text-input">
+                <option value="">Inline / None</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field-row-2">
+            <div class="field-group">
+              <label class="field-label" for="conn-domain">Domain / OS Label</label>
+              <input id="conn-domain" class="text-input" type="text" placeholder="CORP or Ubuntu 24.04">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="conn-password">Inline Password (Optional)</label>
+              <input id="conn-password" class="text-input" type="password" autocomplete="off" placeholder="Encrypted in vault">
+            </div>
+          </div>
+
+          <div class="switch-row">
+            <div class="switch-copy">
+              <span class="switch-title" id="label-is-jump">Jump Host / Bastion Gateway</span>
+              <span class="switch-desc">Expose this host in the Bastion dropdown so other servers can tunnel through it.</span>
+            </div>
+            <button id="conn-is-jump-switch" class="toggle-switch" type="button" role="switch" aria-checked="false" aria-labelledby="label-is-jump">
+              <span class="toggle-thumb" aria-hidden="true"></span>
+            </button>
+          </div>
+
+          <div class="switch-row">
+            <div class="switch-copy">
+              <span class="switch-title" id="label-is-fav">Pin to Favorites</span>
+              <span class="switch-desc">Keep this host surfaced under the Favorites filter pill.</span>
+            </div>
+            <button id="conn-is-fav-switch" class="toggle-switch" type="button" role="switch" aria-checked="false" aria-labelledby="label-is-fav">
+              <span class="toggle-thumb" aria-hidden="true"></span>
+            </button>
+          </div>
+
+          <div id="modal-conn-error" class="inline-alert inline-alert-danger" role="alert" hidden></div>
+        </div>
+
+        <footer class="modal-footer">
+          <button class="btn btn-ghost" type="button" data-modal-close>Cancel</button>
+          <button class="btn btn-primary" id="btn-save-connection" type="submit">Save Connection</button>
+        </footer>
+      </form>
+    </div>
+
+    <!-- Modal 2: Add / Edit 2FA Token -->
+    <div id="modal-totp" class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-totp-title" hidden>
+      <div class="modal-header">
+        <h2 id="modal-totp-title">Add 2FA Token</h2>
+        <button class="modal-close-btn" type="button" data-modal-close aria-label="Close modal">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <form id="form-totp" class="modal-form" novalidate>
+        <div class="modal-body">
+          <input id="totp-id" type="hidden">
+
+          <div class="field-group">
+            <label class="field-label" for="totp-uri-input">Paste otpauth:// URI (Optional)</label>
+            <div class="input-with-btn-row">
+              <input id="totp-uri-input" class="text-input mono" type="text" autocomplete="off" placeholder="otpauth://totp/Issuer:user@host?secret=...">
+              <button class="btn btn-secondary btn-sm" id="btn-parse-otpauth" type="button">Parse URI</button>
+            </div>
+          </div>
+
+          <div class="field-row-2">
+            <div class="field-group">
+              <label class="field-label" for="totp-issuer">Issuer</label>
+              <input id="totp-issuer" class="text-input" type="text" placeholder="GitHub, AWS, Proxmox">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="totp-account">Account / Label</label>
+              <input id="totp-account" class="text-input" type="text" placeholder="ops@example.com" required>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="totp-secret">Base32 Secret Key</label>
+            <input id="totp-secret" class="text-input mono" type="text" autocomplete="off" placeholder="JBSWY3DPEHPK3PXP" required>
+          </div>
+
+          <div class="field-group">
+            <span class="field-label">Hash Algorithm</span>
+            <div class="segmented-control" role="radiogroup" aria-label="TOTP hash algorithm" id="totp-algo-group">
+              <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-totp-algo="SHA1">SHA1</button>
+              <button class="seg-btn" type="button" role="radio" aria-checked="false" data-totp-algo="SHA256">SHA256</button>
+              <button class="seg-btn" type="button" role="radio" aria-checked="false" data-totp-algo="SHA512">SHA512</button>
+            </div>
+          </div>
+
+          <div class="field-row-2">
+            <div class="field-group">
+              <span class="field-label">Digits</span>
+              <div class="segmented-control" role="radiogroup" aria-label="TOTP digits" id="totp-digits-group">
+                <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-totp-digits="6">6 Digits</button>
+                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-totp-digits="8">8 Digits</button>
+              </div>
+            </div>
+            <div class="field-group">
+              <span class="field-label">Interval</span>
+              <div class="segmented-control" role="radiogroup" aria-label="TOTP period" id="totp-period-group">
+                <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-totp-period="30">30s</button>
+                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-totp-period="60">60s</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="totp-preview-bar" id="totp-preview-bar" hidden>
+            <span class="totp-preview-label">Live Verification Preview</span>
+            <span class="totp-preview-code mono" id="totp-preview-code">--- ---</span>
+          </div>
+
+          <div id="modal-totp-error" class="inline-alert inline-alert-danger" role="alert" hidden></div>
+        </div>
+
+        <footer class="modal-footer">
+          <button class="btn btn-ghost" type="button" data-modal-close>Cancel</button>
+          <button class="btn btn-primary" id="btn-save-totp" type="submit">Save 2FA Token</button>
+        </footer>
+      </form>
+    </div>
+
+    <!-- Modal 3: Add / Edit Credential -->
+    <div id="modal-credential" class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-cred-title" hidden>
+      <div class="modal-header">
+        <h2 id="modal-cred-title">Add Credential</h2>
+        <button class="modal-close-btn" type="button" data-modal-close aria-label="Close modal">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <form id="form-credential" class="modal-form" novalidate>
+        <div class="modal-body">
+          <input id="cred-id" type="hidden">
+
+          <div class="field-group">
+            <span class="field-label">Credential Type</span>
+            <div class="segmented-control" role="radiogroup" aria-label="Credential type" id="cred-kind-group">
+              <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-cred-kind="password">Password</button>
+              <button class="seg-btn" type="button" role="radio" aria-checked="false" data-cred-kind="sshKey">SSH Key</button>
+              <button class="seg-btn" type="button" role="radio" aria-checked="false" data-cred-kind="domain">Domain</button>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="cred-label">Label</label>
+            <input id="cred-label" class="text-input" type="text" placeholder="Production Linux Root or AD Admin" required>
+          </div>
+
+          <div class="field-row-2">
+            <div class="field-group">
+              <label class="field-label" for="cred-username">Username</label>
+              <input id="cred-username" class="text-input mono" type="text" placeholder="root or admin">
+            </div>
+            <div class="field-group" id="cred-domain-wrap">
+              <label class="field-label" for="cred-domain">Domain</label>
+              <input id="cred-domain" class="text-input" type="text" placeholder="CORP.LOCAL (optional)">
+            </div>
+          </div>
+
+          <div class="field-group" id="cred-password-wrap">
+            <label class="field-label" for="cred-password">Password / Passphrase</label>
+            <div class="input-with-action">
+              <input id="cred-password" class="text-input" type="password" autocomplete="off" placeholder="Stored encrypted in vault">
+              <button class="input-action-btn" type="button" data-toggle-visibility="cred-password" aria-label="Show password" aria-pressed="false">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path>
+                  <circle cx="12" cy="12" r="3"></circle>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="field-group" id="cred-pem-wrap" hidden>
+            <label class="field-label" for="cred-pem">Private Key (PEM / OpenSSH)</label>
+            <textarea id="cred-pem" class="text-input text-area mono" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="cred-notes">Notes</label>
+            <input id="cred-notes" class="text-input" type="text" placeholder="Optional scope or rotation notes">
+          </div>
+
+          <div id="modal-cred-error" class="inline-alert inline-alert-danger" role="alert" hidden></div>
+        </div>
+
+        <footer class="modal-footer">
+          <button class="btn btn-ghost" type="button" data-modal-close>Cancel</button>
+          <button class="btn btn-primary" id="btn-save-credential" type="submit">Save Credential</button>
+        </footer>
+      </form>
+    </div>
+  </div>
+
+  <div id="jala-toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

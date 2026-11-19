@@ -1,0 +1,32 @@
+{
+  "name": "JalaDesk Web",
+  "short_name": "JalaDesk",
+  "description": "Zero-knowledge encrypted Vault, RFC 6238 2FA Authenticator, and Self-Hosted Web Gateway companion for JalaDesk.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#05080F",
+  "background_color": "#05080F",
+  "categories": ["utilities", "developer", "security"],
+  "icons": [
+    {
+      "src": "../assets/jaladesk-oauth-logo-120.png",
+      "sizes": "120x120",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "../assets/jaladesk-logo.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "../assets/jaladesk-logo.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
