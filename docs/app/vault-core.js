@@ -40,6 +40,7 @@ const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 const ALLOWED_UI_PREF_KEYS = new Set([
   'autoLockSeconds',
   'syncProvider',
+  'vaultAuthMode',
   'useCustomPassphrase',
   'googleClientId',
   'googleAccountEmail',
@@ -1561,6 +1562,103 @@ export async function syncWithGoogleDriveAppData(params) {
 }
 
 /**
+ * Returning-user & first-run Google Drive AppData unlock + sync coordinator.
+ *
+ * When a local sealed vault already exists in `vaultStore`, FIRST attempts to
+ * decrypt it with `passphrase` (e.g. account-bound key) and run `smartMerge`
+ * against Google Drive so pending local deletions/tombstones and newly added
+ * hosts are preserved and pushed instead of overwritten by stale remote data.
+ * Falls back to `pullOnly` (or initializing an empty remote vault) ONLY when no
+ * local vault exists or local unlock fails (such as switching Google accounts).
+ *
+ * @param {{
+ *   vaultStore?: SealedBrowserVaultStore,
+ *   accessToken: string,
+ *   grantedScope?: string,
+ *   passphrase: string,
+ *   apiBaseUrl?: string,
+ *   fileName?: string,
+ *   nowMs?: number,
+ *   fetchImpl?: typeof fetch,
+ * }} params
+ */
+export async function unlockOrSyncGoogleVault(params) {
+  const { vaultStore, accessToken, grantedScope, passphrase, apiBaseUrl, fileName, nowMs, fetchImpl } = params ?? {};
+  const sharedOpts = {
+    accessToken,
+    grantedScope: grantedScope || undefined,
+    passphrase,
+    apiBaseUrl,
+    fileName,
+    nowMs,
+    fetchImpl,
+  };
+
+  if (vaultStore && typeof vaultStore.hasSealedVault === 'function' && vaultStore.hasSealedVault()) {
+    let localPayload = null;
+    let unlockedLocal = false;
+    try {
+      localPayload = await vaultStore.unlock(passphrase);
+      unlockedLocal = true;
+    } catch {
+      // Different Google account or prior local passphrase vault -> fall back to remote pull
+      unlockedLocal = false;
+    }
+
+    if (unlockedLocal && localPayload) {
+      try {
+        const merged = await syncWithGoogleDriveAppData({
+          ...sharedOpts,
+          localPayload,
+          mode: 'smartMerge',
+        });
+        await vaultStore.savePayload(merged.payload);
+        return {
+          ...merged,
+          mergedLocal: true,
+          createdFresh: !merged.hadRemote,
+        };
+      } catch (err) {
+        if (typeof vaultStore.lock === 'function') {
+          vaultStore.lock();
+        }
+        throw err;
+      }
+    }
+  }
+
+  let result;
+  let createdFresh = false;
+  try {
+    result = await syncWithGoogleDriveAppData({
+      ...sharedOpts,
+      localPayload: createEmptyVaultPayload(),
+      mode: 'pullOnly',
+    });
+  } catch (err) {
+    if (err instanceof VaultCoreError && err.code === 'remote-vault-empty') {
+      result = await syncWithGoogleDriveAppData({
+        ...sharedOpts,
+        localPayload: createEmptyVaultPayload(),
+        mode: 'pushForce',
+      });
+      createdFresh = true;
+    } else {
+      throw err;
+    }
+  }
+
+  if (vaultStore && typeof vaultStore.createVault === 'function') {
+    await vaultStore.createVault(passphrase, result.payload);
+  }
+  return {
+    ...result,
+    mergedLocal: false,
+    createdFresh,
+  };
+}
+
+/**
  * Zero-Knowledge GitHub Secret Gist sync (`jaladesk-vault.jvault`) over browser `fetch`.
  *
  * @param {{
@@ -1895,6 +1993,7 @@ export async function syncWithWebDav(params) {
 const DEFAULT_UI_PREFS = Object.freeze({
   autoLockSeconds: 300,
   syncProvider: 'googleDrive',
+  vaultAuthMode: 'passphrase',
   useCustomPassphrase: false,
   googleClientId: '',
   googleAccountEmail: '',
@@ -1952,6 +2051,11 @@ function sanitizeUiPrefs(raw) {
       case 'syncProvider':
         if (val === 'googleDrive' || val === 'githubGist' || val === 'webdav') {
           clean.syncProvider = val;
+        }
+        break;
+      case 'vaultAuthMode':
+        if (val === 'googleAccount' || val === 'passphrase') {
+          clean.vaultAuthMode = val;
         }
         break;
       default:

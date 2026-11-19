@@ -44,7 +44,40 @@
 
         <!-- Returning User Unlock Panel -->
         <div id="lock-returning-panel" class="lock-panel" hidden>
+          <!-- Google Account-Bound 1-Click Returning Unlock -->
+          <div id="lock-returning-google-wrap" class="lock-google-wrap" hidden>
+            <button class="btn btn-google btn-block" id="btn-returning-google-unlock" type="button">
+              <svg class="google-g-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82Z"></path>
+                <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.31 24 12 24Z"></path>
+                <path fill="#FBBC05" d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09Z"></path>
+                <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96Z"></path>
+              </svg>
+              <span id="btn-returning-google-unlock-label">Unlock &amp; Sync with Google</span>
+            </button>
+            <p class="lock-google-note" id="lock-returning-google-note">Your vault uses your automatic Google account-bound AES-256-GCM key &mdash; click to unlock &amp; sync.</p>
+
+            <div id="returning-gdrive-scope-callout" class="gdrive-callout gdrive-callout-warn" role="alert" hidden>
+              <div class="gdrive-callout-body">
+                <strong class="gdrive-callout-title">Google Drive Permission Needed</strong>
+                <p id="returning-gdrive-scope-text" class="gdrive-callout-text">Tick "See, create, and delete its own configuration data in your Google Drive" to unlock &amp; sync your vault.</p>
+              </div>
+              <button class="btn btn-primary btn-sm gdrive-callout-cta" id="btn-returning-gdrive-grant" type="button">
+                <span>Grant Drive Access &amp; Unlock</span>
+              </button>
+            </div>
+          </div>
+
           <form id="form-unlock" class="stack-form" novalidate>
+            <div class="lock-back-row" id="lock-returning-back-google-row" hidden>
+              <button class="btn-link" id="btn-returning-back-google" type="button">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m15 18-6-6 6-6"></path>
+                </svg>
+                <span>Back to 1-Click Google unlock</span>
+              </button>
+            </div>
+
             <div class="field-group">
               <label class="field-label" for="unlock-passphrase">Master Passphrase</label>
               <div class="input-with-action">
@@ -76,8 +109,9 @@
           </form>
 
           <div class="lock-secondary-actions">
-            <button class="btn btn-ghost" id="btn-returning-import" type="button">Import .jvault</button>
             <button class="btn btn-ghost" id="btn-returning-cloud" type="button">Connect Cloud</button>
+            <button class="btn btn-ghost" id="btn-returning-use-passphrase" type="button" hidden>Unlock with Passphrase</button>
+            <button class="btn btn-ghost" id="btn-returning-import" type="button">Import .jvault</button>
             <button class="btn btn-ghost btn-ghost-danger" id="btn-returning-reset" type="button">Reset Local Vault</button>
           </div>
         </div>
@@ -458,8 +492,8 @@
         </div>
 
         <div class="topbar-actions">
-          <div class="security-pill" id="vault-security-pill" role="status">
-            <span class="status-dot status-dot-ok" aria-hidden="true"></span>
+          <div class="security-pill" id="vault-security-pill" role="status" aria-live="polite">
+            <span class="status-dot status-dot-ok" id="vault-security-pill-dot" aria-hidden="true"></span>
             <span id="vault-security-pill-text">AES-256-GCM &middot; Local-Only</span>
           </div>
 
@@ -899,6 +933,15 @@
               </div>
             </div>
 
+            <!-- Interactive Browser Preview Banner -->
+            <div id="gateway-preview-banner" class="gateway-preview-banner" role="status" hidden>
+              <div class="gateway-preview-banner-copy">
+                <span class="status-dot status-dot-warn" aria-hidden="true"></span>
+                <span>Interactive Browser Preview &mdash; Start JalaDesk Gateway to connect to live servers</span>
+              </div>
+              <button class="btn btn-secondary btn-sm" id="btn-gateway-preview-setup" type="button">Show Gateway Setup</button>
+            </div>
+
             <!-- Live Desktop Canvas Pane (RDP / VNC / Demo) -->
             <div id="gateway-desktop-pane" class="gateway-desktop-pane">
               <div id="gateway-canvas-stage" class="gateway-canvas-stage" data-scale="fit">
@@ -961,6 +1004,19 @@
                 <span id="gateway-local-probe-text" class="gateway-probe-text">Checking Local Gateway (127.0.0.1:8443)...</span>
               </div>
 
+              <!-- Interactive Browser Remote Desktop GUI Preview Callout -->
+              <div id="gateway-preview-callout" class="gateway-preview-callout">
+                <p class="gateway-preview-callout-text">Live RDP, VNC &amp; SSH remote sessions render right inside this browser tab. Try the interactive desktop canvas, Fit/Fill/1:1 scaling, 2FA Auto-Type &amp; SSH preview now.</p>
+                <button class="btn btn-primary" id="btn-gateway-preview-demo" type="button">
+                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+                    <line x1="8" y1="21" x2="16" y2="21"></line>
+                    <line x1="12" y1="17" x2="12" y2="21"></line>
+                  </svg>
+                  <span>Preview Live Remote GUI (Interactive Demo)</span>
+                </button>
+              </div>
+
               <!-- 2-Step Inline Guidance When No Local Gateway Is Running -->
               <section id="gateway-setup-guidance" class="gateway-guidance-block" aria-label="Local gateway setup steps" hidden>
                 <p class="gateway-guidance-reason">Browsers block raw TCP :22/:3389/:5900 sockets; run JalaDesk Gateway locally on your Mac/PC or Docker server, then enter the 6-digit Pairing Code.</p>
@@ -1019,8 +1075,14 @@
 
               <form id="form-gateway-connect" class="stack-form" novalidate>
                 <div class="field-group">
-                  <label class="field-label" for="gateway-ws-url">Gateway URL</label>
-                  <input id="gateway-ws-url" class="text-input mono" type="url" autocomplete="off" value="wss://gateway.local:8443" placeholder="wss://gateway.local:8443 or http://127.0.0.1:8443" required>
+                  <div class="gateway-url-head">
+                    <label class="field-label" for="gateway-ws-url">Gateway URL</label>
+                    <div class="gateway-url-presets" role="group" aria-label="Gateway endpoint presets" id="gateway-url-presets">
+                      <button class="btn btn-secondary btn-sm gateway-preset-btn is-active" type="button" id="btn-gw-preset-local" data-gw-preset="http://127.0.0.1:8443" aria-pressed="true">Local Mac/PC (127.0.0.1:8443)</button>
+                      <button class="btn btn-secondary btn-sm gateway-preset-btn" type="button" id="btn-gw-preset-https" data-gw-preset="wss://gateway.local:8443" aria-pressed="false">Self-Hosted HTTPS (wss://)</button>
+                    </div>
+                  </div>
+                  <input id="gateway-ws-url" class="text-input mono" type="url" autocomplete="off" value="http://127.0.0.1:8443" placeholder="http://127.0.0.1:8443 or wss://gateway.example.com:8443" required>
                 </div>
 
                 <div class="field-group">

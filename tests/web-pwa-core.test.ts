@@ -165,6 +165,26 @@ interface VaultCoreModule {
     uploaded: boolean;
     syncedAtMs: number;
   }>;
+  unlockOrSyncGoogleVault(params: {
+    vaultStore?: WebSealedStoreInstance;
+    accessToken: string;
+    grantedScope?: string;
+    passphrase: string;
+    apiBaseUrl?: string;
+    fileName?: string;
+    nowMs?: number;
+  }): Promise<{
+    payload: WebVaultPayload;
+    mode: string;
+    provider: string;
+    fileId: string | null;
+    fileName: string;
+    hadRemote: boolean;
+    uploaded: boolean;
+    syncedAtMs: number;
+    mergedLocal: boolean;
+    createdFresh: boolean;
+  }>;
   syncWithGithubGist(params: {
     token: string;
     gistId?: string;
@@ -1183,8 +1203,8 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
   assert.ok(swRaw.includes('api.github.com'));
   assert.ok(swRaw.includes('Authorization'));
   assert.ok(
-    swRaw.includes('`${CACHE_PREFIX}v5`') || swRaw.includes("'jaladesk-web-pwa-v5'"),
-    'sw.js must bump CACHE_NAME to jaladesk-web-pwa-v5',
+    swRaw.includes('`${CACHE_PREFIX}v6`') || swRaw.includes("'jaladesk-web-pwa-v6'"),
+    'sw.js must bump CACHE_NAME to jaladesk-web-pwa-v6',
   );
 
   const indexRaw = await readFile(fileURLToPath(INDEX_HTML_URL), 'utf8');
@@ -1194,6 +1214,9 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
   assert.equal(/\sstyle\s*=\s*["']/.test(indexRaw), false, 'index.html must contain zero inline style="" attributes');
 
   for (const requiredId of [
+    'id="lock-returning-google-wrap"',
+    'id="btn-returning-google-unlock"',
+    'id="btn-returning-use-passphrase"',
     'id="modal-confirm-delete"',
     'id="btn-confirm-delete-cancel"',
     'id="btn-confirm-delete-submit"',
@@ -1204,6 +1227,11 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
     'id="btn-copy-gw-npm"',
     'id="btn-copy-gw-docker"',
     'id="gateway-cred-prompt"',
+    'id="gateway-url-presets"',
+    'id="btn-gw-preset-local"',
+    'id="btn-gw-preset-https"',
+    'id="btn-gateway-preview-demo"',
+    'id="gateway-preview-banner"',
   ]) {
     assert.ok(indexRaw.includes(requiredId), `index.html must include ${requiredId}`);
   }
@@ -1218,6 +1246,9 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
   assert.ok(appJsRaw.includes('http://127.0.0.1:8443'), 'app.js must probe local gateway on 127.0.0.1:8443');
   assert.ok(appJsRaw.includes('/healthz'), 'app.js must probe /healthz endpoint');
   assert.ok(appJsRaw.includes('openConfirmDeleteModal'), 'app.js must route destructive deletes through confirmation modal');
+  assert.ok(appJsRaw.includes('scheduleCloudAutoSync'), 'app.js must schedule debounced background cloud auto-sync');
+  assert.ok(appJsRaw.includes('unlockOrSyncGoogleVault'), 'app.js must use local-unlock-then-smartMerge helper for Google vaults');
+  assert.ok(appJsRaw.includes('startGatewayInteractivePreview'), 'app.js must provide interactive in-browser remote GUI preview');
 });
 
 test('g. 1-click Google Web OAuth config, fetchGoogleUserInfo & GIS sign-in flow with zero token persistence', async () => {
@@ -1497,5 +1528,191 @@ test('g. 1-click Google Web OAuth config, fetchGoogleUserInfo & GIS sign-in flow
     assert.equal(store.getUiPrefs().syncProvider, 'googleDrive');
   } finally {
     await e2eServer.close();
+  }
+});
+
+test('h. vaultAuthMode allow-list & returning Google local-unlock-then-smartMerge preserves tombstones and new hosts', async () => {
+  const core = await loadVaultCore();
+  const storage = createMemoryStorage();
+  const initialStore = new core.SealedBrowserVaultStore({ storage });
+
+  // 1. Default vaultAuthMode is 'passphrase' and allow-list enforces strictly 'googleAccount' | 'passphrase'
+  assert.equal(initialStore.getUiPrefs().vaultAuthMode, 'passphrase');
+  const savedGooglePrefs = initialStore.saveUiPrefs({
+    vaultAuthMode: 'googleAccount',
+    googleAccountEmail: 'ribato@jaladesk.io',
+    accessToken: 'ya29.must-never-persist',
+    passphrase: 'must-never-persist',
+  });
+  assert.equal(savedGooglePrefs.vaultAuthMode, 'googleAccount');
+  assert.equal(savedGooglePrefs.googleAccountEmail, 'ribato@jaladesk.io');
+  assert.equal(Object.hasOwn(savedGooglePrefs, 'accessToken'), false);
+  assert.equal(Object.hasOwn(savedGooglePrefs, 'passphrase'), false);
+
+  // Invalid vaultAuthMode falls back to safe default 'passphrase'
+  const invalidPrefs = initialStore.saveUiPrefs({ vaultAuthMode: 'invalidMode' });
+  assert.equal(invalidPrefs.vaultAuthMode, 'passphrase');
+
+  initialStore.saveUiPrefs({ vaultAuthMode: 'googleAccount', googleAccountEmail: 'ribato@jaladesk.io' });
+  assert.equal(initialStore.getUiPrefs().vaultAuthMode, 'googleAccount');
+
+  // 2. Seed local sealed vault (Account A) with a pending deletion tombstone (host-stale-deleted) AND a newly added local host (host-web-new)
+  const emailA = 'ribato@jaladesk.io';
+  const accountKeyA = core.deriveGoogleAccountBoundPassphrase(emailA);
+  const localPayload = {
+    syncSchema: 2,
+    updatedAtMs: 1_760_000_500_000,
+    hosts: [
+      { id: 'host-keep', name: 'bastion-keep', protocol: 'ssh', address: '10.0.0.10', port: 22, updatedAtMs: 1_760_000_100_000 },
+      { id: 'host-web-new', name: 'web-added-host', protocol: 'rdp', address: '10.0.0.99', port: 3389, updatedAtMs: 1_760_000_400_000 },
+    ],
+    credentials: [],
+    folders: [],
+    totp: [],
+    snippets: [],
+    tombstones: {
+      [core.makeTombstoneKey('host', 'host-stale-deleted')]: 1_760_000_450_000,
+    },
+  };
+  await initialStore.createVault(accountKeyA, localPayload);
+  initialStore.lock();
+
+  // Remote Google Drive still holds stale host-stale-deleted PLUS host-mobile-added from another device
+  let remoteEnvelopeA = await core.sealVaultEnvelope(
+    {
+      syncSchema: 2,
+      updatedAtMs: 1_760_000_300_000,
+      hosts: [
+        { id: 'host-keep', name: 'bastion-keep', protocol: 'ssh', address: '10.0.0.10', port: 22, updatedAtMs: 1_760_000_100_000 },
+        { id: 'host-stale-deleted', name: 'old-deleted-host', protocol: 'ssh', address: '10.0.0.55', port: 22, updatedAtMs: 1_760_000_100_000 },
+        { id: 'host-mobile-added', name: 'mobile-host', protocol: 'vnc', address: '10.0.0.77', port: 5900, updatedAtMs: 1_760_000_300_000 },
+      ],
+      credentials: [],
+      folders: [],
+      totp: [],
+      snippets: [],
+      tombstones: {},
+    },
+    accountKeyA,
+  );
+
+  const emailB = 'other-operator@jaladesk.io';
+  const accountKeyB = core.deriveGoogleAccountBoundPassphrase(emailB);
+  const remoteEnvelopeB = await core.sealVaultEnvelope(
+    {
+      syncSchema: 2,
+      updatedAtMs: 1_760_000_600_000,
+      hosts: [
+        { id: 'host-account-b', name: 'bob-server', protocol: 'ssh', address: '192.168.10.5', port: 22, updatedAtMs: 1_760_000_600_000 },
+      ],
+      credentials: [],
+      folders: [],
+      totp: [],
+      snippets: [],
+      tombstones: {},
+    },
+    accountKeyB,
+  );
+
+  let patchCountA = 0;
+  const driveServer = await startLoopbackServer((req, res) => {
+    const auth = req.headers.authorization || '';
+    const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const isAccountB = auth === 'Bearer ya29.account-b-token';
+    const isAccountA = auth === 'Bearer ya29.account-a-token';
+    if (!isAccountA && !isAccountB) {
+      res.writeHead(401);
+      res.end();
+      return;
+    }
+
+    if (req.method === 'GET' && reqUrl.pathname === '/drive/v3/files') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          files: [{ id: isAccountB ? 'file-b' : 'file-a', name: GOOGLE_DRIVE_PRIMARY_VAULT_FILE }],
+        }),
+      );
+      return;
+    }
+    if (req.method === 'GET' && reqUrl.pathname === '/drive/v3/files/file-a' && reqUrl.searchParams.get('alt') === 'media') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(remoteEnvelopeA);
+      return;
+    }
+    if (req.method === 'GET' && reqUrl.pathname === '/drive/v3/files/file-b' && reqUrl.searchParams.get('alt') === 'media') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(remoteEnvelopeB);
+      return;
+    }
+    if (req.method === 'PATCH' && reqUrl.pathname === '/upload/drive/v3/files/file-a') {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        remoteEnvelopeA = Buffer.concat(chunks).toString('utf8');
+        patchCountA += 1;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'file-a' }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  try {
+    // 3. Simulate Hard Refresh: brand-new SealedBrowserVaultStore on same storage, locked!
+    const refreshedStore = new core.SealedBrowserVaultStore({ storage });
+    assert.equal(refreshedStore.hasSealedVault(), true);
+    assert.equal(refreshedStore.isUnlocked(), false);
+    assert.equal(refreshedStore.getUiPrefs().vaultAuthMode, 'googleAccount');
+
+    const resA = await core.unlockOrSyncGoogleVault({
+      vaultStore: refreshedStore,
+      accessToken: 'ya29.account-a-token',
+      grantedScope: 'https://www.googleapis.com/auth/drive.appdata openid email',
+      passphrase: accountKeyA,
+      apiBaseUrl: driveServer.baseUrl,
+    });
+
+    assert.equal(resA.mergedLocal, true, 'Returning Google user MUST unlock local vault first and run smartMerge');
+    assert.equal(resA.mode, 'smartMerge');
+    assert.equal(resA.uploaded, true);
+    assert.equal(patchCountA, 1, 'Merged payload with local deletion tombstone & new host must upload to Google Drive');
+    assert.equal(refreshedStore.isUnlocked(), true);
+
+    const hostIds = resA.payload.hosts.map((h) => h.id).sort();
+    assert.deepStrictEqual(hostIds, ['host-keep', 'host-mobile-added', 'host-web-new']);
+    assert.equal(hostIds.includes('host-stale-deleted'), false, 'Deleted host MUST stay deleted via local tombstone');
+    assert.equal(resA.payload.tombstones[core.makeTombstoneKey('host', 'host-stale-deleted')], 1_760_000_450_000);
+
+    // Verify remote Google Drive now also has the deletion tombstone & newly added host
+    const decryptedRemote = await core.openVaultEnvelope(remoteEnvelopeA, accountKeyA);
+    const remoteHostIds = (decryptedRemote.hosts as Array<{ id: string }>).map((h) => h.id).sort();
+    assert.deepStrictEqual(remoteHostIds, ['host-keep', 'host-mobile-added', 'host-web-new']);
+
+    // 4. Verify switching to a different Google account falls back cleanly to pullOnly without crashing
+    refreshedStore.lock();
+    const resB = await core.unlockOrSyncGoogleVault({
+      vaultStore: refreshedStore,
+      accessToken: 'ya29.account-b-token',
+      grantedScope: 'https://www.googleapis.com/auth/drive.appdata openid email',
+      passphrase: accountKeyB,
+      apiBaseUrl: driveServer.baseUrl,
+    });
+    assert.equal(resB.mergedLocal, false, 'Switching Google accounts must fall back to pullOnly when local unlock fails');
+    assert.equal(resB.mode, 'pullOnly');
+    assert.deepStrictEqual(
+      resB.payload.hosts.map((h) => h.id),
+      ['host-account-b'],
+    );
+
+    const dump = JSON.stringify(storage.dump());
+    assert.equal(dump.includes('ya29.account-a-token'), false);
+    assert.equal(dump.includes('ya29.account-b-token'), false);
+    assert.equal(dump.includes(accountKeyA), false);
+    assert.equal(dump.includes(accountKeyB), false);
+  } finally {
+    await driveServer.close();
   }
 });

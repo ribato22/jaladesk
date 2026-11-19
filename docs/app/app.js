@@ -14,6 +14,7 @@ import {
   syncWithGithubGist,
   syncWithGoogleDriveAppData,
   syncWithWebDav,
+  unlockOrSyncGoogleVault,
 } from './vault-core.js';
 import {
   GOOGLE_CLOUD_PROJECT_NUMBER,
@@ -63,8 +64,11 @@ const PROVIDER_LABELS = Object.freeze({
 });
 
 const LOCAL_GATEWAY_DEFAULT_URL = 'http://127.0.0.1:8443';
+const REMOTE_GATEWAY_DEFAULT_URL = 'wss://gateway.local:8443';
 const LOCAL_GATEWAY_PROBE_TIMEOUT_MS = 1200;
 const UNDO_DELETE_WINDOW_MS = 6000;
+const CLOUD_AUTO_SYNC_DEBOUNCE_MS = 1500;
+const CLOUD_DELETE_SYNC_DELAY_MS = 6500;
 
 const GATEWAY_QUICK_COMMANDS = Object.freeze({
   npm: 'npm run gateway -- --host 127.0.0.1 --port 8443',
@@ -99,6 +103,8 @@ const appState = {
   onboardCloudProvider: 'googleDrive',
   onboardGdriveCustomPass: false,
   onboardGdrivePendingEmail: '',
+  returningPassphraseOverride: false,
+  returningGdrivePendingEmail: '',
   gdriveAuthInFlight: false,
   lockOnHidden: false,
   importMode: 'merge',
@@ -113,6 +119,8 @@ const appState = {
   gatewayViewOnly: false,
   gatewayTargetHostId: '__demo__',
   gatewayClient: null,
+  gatewayPreviewActive: false,
+  gatewayPreviewState: null,
   gatewayScaleMode: 'fit',
   gatewayPane: 'desktop',
   gatewaySetupVisible: true,
@@ -134,6 +142,11 @@ const appState = {
   clipboardClearTimer: null,
   lastCopiedSecret: '',
   syncInFlight: false,
+  cloudAutoSyncTimer: null,
+  cloudAutoSyncPending: false,
+  cloudAutoSyncState: 'idle',
+  cloudAutoSyncQueuedAgain: false,
+  cloudDirtyBeforePendingDelete: false,
 };
 
 function byId(id) {
@@ -313,9 +326,117 @@ async function undoPendingDelete() {
   }
   payload.updatedAtMs = now;
 
-  await store.savePayload(payload);
+  const hadPriorDirty = appState.cloudDirtyBeforePendingDelete;
+  appState.cloudDirtyBeforePendingDelete = false;
+  cancelCloudAutoSync();
+  await saveVaultPayload(payload, { skipAutoSync: !hadPriorDirty, autoSyncDelayMs: CLOUD_AUTO_SYNC_DEBOUNCE_MS });
   renderAllViews();
   showToast(`${snapshot.restoreLabel} restored.`, 'ok');
+}
+
+function hasActiveCloudSessionInRam() {
+  if (!store.isUnlocked()) return false;
+  const provider = appState.syncProvider;
+  if (appState.useCustomPassphrase) {
+    const customPass = (byId('sync-custom-passphrase')?.value || ramSecrets.customSyncPassphrase || '').trim();
+    if (customPass.length < 4) return false;
+  }
+  if (provider === 'googleDrive') {
+    const token = (ramSecrets.gdriveToken || byId('sync-gdrive-token')?.value || '').trim();
+    if (!token) return false;
+    if (!appState.useCustomPassphrase) {
+      const email = (
+        ramSecrets.gdriveEmail ||
+        store.getUiPrefs().googleAccountEmail ||
+        (byId('sync-gdrive-email')?.value || '')
+      ).trim();
+      if (!email && ramSecrets.unlockedPassphrase.length < 4) return false;
+    }
+    return true;
+  }
+  if (provider === 'githubGist') {
+    const token = (ramSecrets.gistToken || byId('sync-gist-token')?.value || '').trim();
+    return token.length > 0 && ramSecrets.unlockedPassphrase.length >= 4;
+  }
+  if (provider === 'webdav') {
+    const url = (byId('sync-webdav-url')?.value || store.getUiPrefs().webdavUrl || '').trim();
+    const pass = byId('sync-webdav-pass')?.value || ramSecrets.webdavPassword || '';
+    return url.length > 0 && pass.length > 0 && ramSecrets.unlockedPassphrase.length >= 4;
+  }
+  return false;
+}
+
+function cancelCloudAutoSync() {
+  if (appState.cloudAutoSyncTimer !== null) {
+    clearTimeout(appState.cloudAutoSyncTimer);
+    appState.cloudAutoSyncTimer = null;
+  }
+  appState.cloudAutoSyncPending = false;
+  appState.cloudAutoSyncQueuedAgain = false;
+  if (appState.cloudAutoSyncState === 'pending') {
+    appState.cloudAutoSyncState = 'idle';
+  }
+  updateSecurityPill();
+}
+
+function scheduleCloudAutoSync(delayMs = CLOUD_AUTO_SYNC_DEBOUNCE_MS) {
+  if (!hasActiveCloudSessionInRam()) return false;
+  if (appState.cloudAutoSyncTimer !== null) {
+    clearTimeout(appState.cloudAutoSyncTimer);
+    appState.cloudAutoSyncTimer = null;
+  }
+  appState.cloudAutoSyncPending = true;
+  if (appState.syncInFlight) {
+    appState.cloudAutoSyncQueuedAgain = true;
+  } else {
+    appState.cloudAutoSyncState = 'pending';
+    updateSecurityPill();
+  }
+  const safeDelay = Math.max(0, Number.isFinite(delayMs) ? Math.trunc(delayMs) : CLOUD_AUTO_SYNC_DEBOUNCE_MS);
+  appState.cloudAutoSyncTimer = setTimeout(() => {
+    appState.cloudAutoSyncTimer = null;
+    flushCloudAutoSync({ background: true });
+  }, safeDelay);
+  return true;
+}
+
+async function flushCloudAutoSync(options = {}) {
+  if (appState.cloudAutoSyncTimer !== null) {
+    clearTimeout(appState.cloudAutoSyncTimer);
+    appState.cloudAutoSyncTimer = null;
+  }
+  if (!hasActiveCloudSessionInRam()) {
+    appState.cloudAutoSyncPending = false;
+    if (appState.cloudAutoSyncState === 'pending') {
+      appState.cloudAutoSyncState = 'idle';
+    }
+    updateSecurityPill();
+    return;
+  }
+  if (appState.syncInFlight) {
+    appState.cloudAutoSyncQueuedAgain = true;
+    return;
+  }
+  appState.cloudAutoSyncPending = false;
+  appState.cloudDirtyBeforePendingDelete = false;
+  await runCloudSync('smartMerge', { background: options.background !== false });
+}
+
+async function saveVaultPayload(payload, options = {}) {
+  const saved = await store.savePayload(payload);
+  if (!options.skipAutoSync) {
+    if (options.isDelete) {
+      appState.cloudDirtyBeforePendingDelete = Boolean(appState.cloudAutoSyncPending || appState.syncInFlight);
+    } else {
+      appState.cloudDirtyBeforePendingDelete = false;
+    }
+    const delayMs =
+      typeof options.autoSyncDelayMs === 'number' && Number.isFinite(options.autoSyncDelayMs)
+        ? options.autoSyncDelayMs
+        : CLOUD_AUTO_SYNC_DEBOUNCE_MS;
+    scheduleCloudAutoSync(delayMs);
+  }
+  return saved;
 }
 
 function setAlert(id, message) {
@@ -557,12 +678,17 @@ function zeroSensitiveInputsAndDom(options = {}) {
   ramSecrets.gatewayRuntimePassword = '';
   ramSecrets.gatewayRuntimeKey = '';
   clearPendingUndo();
+  cancelCloudAutoSync();
+  appState.cloudAutoSyncState = 'idle';
+  appState.cloudDirtyBeforePendingDelete = false;
   appState.pendingConfirmAction = null;
   appState.gatewayProbeSeq += 1;
   appState.gatewayLocalReachable = null;
   appState.gatewayCredPromptHostId = '';
   appState.onboardGdrivePendingEmail = '';
   appState.onboardGdriveCustomPass = false;
+  appState.returningPassphraseOverride = false;
+  appState.returningGdrivePendingEmail = '';
   appState.gdriveAuthInFlight = false;
   appState.revealedCredIds.clear();
   appState.lockImportFileText = '';
@@ -678,7 +804,12 @@ function zeroSensitiveInputsAndDom(options = {}) {
     const hNode = byId(hiddenId);
     if (hNode) hNode.hidden = true;
   }
-  for (const calloutId of ['onboard-gdrive-scope-callout', 'onboard-gdrive-setup-note', 'sync-gdrive-callout']) {
+  for (const calloutId of [
+    'returning-gdrive-scope-callout',
+    'onboard-gdrive-scope-callout',
+    'onboard-gdrive-setup-note',
+    'sync-gdrive-callout',
+  ]) {
     const cNode = byId(calloutId);
     if (cNode) cNode.hidden = true;
   }
@@ -716,6 +847,51 @@ function applyAutoLockSelection(rawValue) {
   }
 }
 
+function renderReturningLockMode(options = {}) {
+  const prefs = store.getUiPrefs();
+  const email = String(prefs.googleAccountEmail || '').trim();
+  const isGoogleMode = prefs.vaultAuthMode === 'googleAccount' && email.length > 0;
+  const showGooglePrimary = isGoogleMode && !appState.returningPassphraseOverride;
+
+  const googleWrap = byId('lock-returning-google-wrap');
+  const unlockForm = byId('form-unlock');
+  const backGoogleRow = byId('lock-returning-back-google-row');
+  const usePassBtn = byId('btn-returning-use-passphrase');
+  const cloudBtn = byId('btn-returning-cloud');
+  const googleLabel = byId('btn-returning-google-unlock-label');
+  const badgeText = byId('lock-storage-badge-text');
+
+  if (googleWrap) googleWrap.hidden = !showGooglePrimary;
+  if (unlockForm) unlockForm.hidden = showGooglePrimary;
+  if (backGoogleRow) backGoogleRow.hidden = !(isGoogleMode && appState.returningPassphraseOverride);
+  if (usePassBtn) usePassBtn.hidden = !showGooglePrimary;
+  if (cloudBtn) {
+    cloudBtn.textContent = isGoogleMode ? 'Switch Account / Cloud' : 'Connect Cloud';
+  }
+  if (googleLabel && email) {
+    googleLabel.textContent = `Unlock & Sync with Google (${email})`;
+  }
+  if (badgeText && store.hasSealedVault()) {
+    badgeText.textContent = showGooglePrimary
+      ? 'AES-256-GCM · Google Account Key'
+      : 'AES-256-GCM · Sealed Vault';
+  }
+  if (!options.keepScopeCallout) {
+    const scopeCallout = byId('returning-gdrive-scope-callout');
+    if (scopeCallout) scopeCallout.hidden = true;
+  }
+
+  if (options.focus) {
+    if (showGooglePrimary) {
+      const googleBtn = byId('btn-returning-google-unlock');
+      if (googleBtn) setTimeout(() => googleBtn.focus(), 40);
+    } else {
+      const unlockInput = byId('unlock-passphrase');
+      if (unlockInput) setTimeout(() => unlockInput.focus(), 40);
+    }
+  }
+}
+
 function showLockScreen(reasonMessage = '', options = {}) {
   zeroSensitiveInputsAndDom(options);
   const lockEl = byId('jala-web-lock');
@@ -732,10 +908,8 @@ function showLockScreen(reasonMessage = '', options = {}) {
   if (returningPanel) returningPanel.hidden = !hasVault;
   if (onboardPanel) onboardPanel.hidden = hasVault;
   if (backRow) backRow.hidden = !hasVault;
-  if (badgeText) {
-    badgeText.textContent = hasVault
-      ? 'AES-256-GCM · Sealed Vault'
-      : 'AES-256-GCM · Zero Plaintext';
+  if (badgeText && !hasVault) {
+    badgeText.textContent = 'AES-256-GCM · Zero Plaintext';
   }
 
   setAlert('lock-error', '');
@@ -744,10 +918,8 @@ function showLockScreen(reasonMessage = '', options = {}) {
   hydrateOnboardGooglePrefs();
 
   if (hasVault) {
-    const unlockInput = byId('unlock-passphrase');
-    if (unlockInput) {
-      setTimeout(() => unlockInput.focus(), 40);
-    }
+    appState.returningPassphraseOverride = false;
+    renderReturningLockMode({ focus: true });
   } else {
     switchOnboardTab('create');
     const createInput = byId('create-passphrase');
@@ -813,12 +985,15 @@ function hydratePrefsIntoUi() {
     if (prefs.gatewayUrl) {
       gwUrl.value = prefs.gatewayUrl;
     } else if (
-      window.location.hostname === '127.0.0.1' ||
-      window.location.hostname === 'localhost'
+      (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') &&
+      window.location.port === '8443'
     ) {
       const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       gwUrl.value = `${wsProto}//${window.location.host}`;
+    } else {
+      gwUrl.value = LOCAL_GATEWAY_DEFAULT_URL;
     }
+    syncGatewayUrlPresetsUi();
   }
 
   if (appState.gatewayFragmentScrubbed && ramSecrets.gatewayToken) {
@@ -834,6 +1009,8 @@ function hydratePrefsIntoUi() {
 
 function updateSecurityPill() {
   const prefs = store.getUiPrefs();
+  const pill = byId('vault-security-pill');
+  const pillDot = byId('vault-security-pill-dot');
   const pillText = byId('vault-security-pill-text');
   const quickSyncBtn = byId('btn-quick-sync');
   const hasBoundCloud = Boolean(
@@ -849,14 +1026,30 @@ function updateSecurityPill() {
     quickSyncBtn.hidden = !hasBoundCloud;
   }
 
-  if (pillText) {
-    if (prefs.lastSyncedAtMs > 0) {
-      const label = PROVIDER_LABELS[prefs.syncProvider] || 'Cloud';
-      pillText.textContent = `AES-256-GCM · Synced (${label})`;
-    } else {
-      pillText.textContent = 'AES-256-GCM · Local-Only';
-    }
+  const label = PROVIDER_LABELS[prefs.syncProvider] || 'Cloud';
+  let text = 'AES-256-GCM · Local-Only';
+  let pillClass = 'security-pill';
+  let dotClass = 'status-dot status-dot-ok';
+
+  if (appState.syncInFlight || appState.cloudAutoSyncState === 'syncing') {
+    text = 'AES-256-GCM · Syncing...';
+    pillClass = 'security-pill is-syncing';
+    dotClass = 'status-dot status-dot-warn';
+  } else if (appState.cloudAutoSyncPending) {
+    text = `AES-256-GCM · Sync Pending (${label})`;
+    pillClass = 'security-pill is-pending';
+    dotClass = 'status-dot status-dot-warn';
+  } else if (appState.cloudAutoSyncState === 'error') {
+    text = `AES-256-GCM · Sync Needed (${label})`;
+    pillClass = 'security-pill is-error';
+    dotClass = 'status-dot status-dot-danger';
+  } else if (prefs.lastSyncedAtMs > 0) {
+    text = `AES-256-GCM · Synced (${label})`;
   }
+
+  if (pill) pill.className = pillClass;
+  if (pillDot) pillDot.className = dotClass;
+  if (pillText) pillText.textContent = text;
 }
 
 /* ==========================================================================
@@ -1138,7 +1331,7 @@ async function toggleHostFavorite(hostId) {
   const now = Date.now();
   payload.hosts = payload.hosts.map((h) => (h.id === hostId ? { ...h, isFavorite: !h.isFavorite, updatedAtMs: now } : h));
   payload.updatedAtMs = now;
-  await store.savePayload(payload);
+  await saveVaultPayload(payload);
   renderAllViews();
 }
 
@@ -1212,7 +1405,7 @@ async function executeDeleteHost(hostId) {
     appState.gatewayTargetHostId = '__demo__';
   }
 
-  await store.savePayload(payload);
+  await saveVaultPayload(payload, { autoSyncDelayMs: CLOUD_DELETE_SYNC_DELAY_MS, isDelete: true });
   renderAllViews();
 
   registerPendingUndo({
@@ -1528,7 +1721,7 @@ async function executeDeleteTotp(totpId) {
   payload.totp = payload.totp.filter((t) => t.id !== totpId);
   payload.tombstones[tombstoneKey] = now;
   payload.updatedAtMs = now;
-  await store.savePayload(payload);
+  await saveVaultPayload(payload, { autoSyncDelayMs: CLOUD_DELETE_SYNC_DELAY_MS, isDelete: true });
   renderAllViews();
 
   registerPendingUndo({
@@ -1709,7 +1902,7 @@ async function executeDeleteCredential(credId) {
   payload.tombstones[tombstoneKey] = now;
   payload.updatedAtMs = now;
   appState.revealedCredIds.delete(String(credId));
-  await store.savePayload(payload);
+  await saveVaultPayload(payload, { autoSyncDelayMs: CLOUD_DELETE_SYNC_DELAY_MS, isDelete: true });
   renderAllViews();
 
   registerPendingUndo({
@@ -1872,35 +2065,19 @@ function resolveEffectiveSyncPassphrase(provider) {
   throw new Error('Vault passphrase unavailable. Unlock vault or enable Custom E2EE Passphrase.');
 }
 
-async function pullOrInitializeGoogleVault(accessToken, grantedScope, passphrase) {
-  try {
-    const pulled = await syncWithGoogleDriveAppData({
-      accessToken,
-      grantedScope: grantedScope || undefined,
-      localPayload: createEmptyVaultPayload(),
-      passphrase,
-      mode: 'pullOnly',
-    });
-    return { ...pulled, createdFresh: false };
-  } catch (err) {
-    if (err instanceof VaultCoreError && err.code === 'remote-vault-empty') {
-      const pushed = await syncWithGoogleDriveAppData({
-        accessToken,
-        grantedScope: grantedScope || undefined,
-        localPayload: createEmptyVaultPayload(),
-        passphrase,
-        mode: 'pushForce',
-      });
-      return { ...pushed, createdFresh: true };
+async function runCloudSync(mode, options = {}) {
+  const isBackground = Boolean(options.background);
+  if (!store.isUnlocked()) return;
+  if (appState.syncInFlight) {
+    if (isBackground) {
+      appState.cloudAutoSyncQueuedAgain = true;
     }
-    throw err;
+    return;
   }
-}
-
-async function runCloudSync(mode) {
-  if (appState.syncInFlight || !store.isUnlocked()) return;
   const payload = getPayloadSafe();
   if (!payload) return;
+
+  cancelCloudAutoSync();
 
   const provider = appState.syncProvider;
   const statusMsg = byId('sync-status-message');
@@ -1908,6 +2085,7 @@ async function runCloudSync(mode) {
   if (provider === 'googleDrive') {
     const existingToken = (byId('sync-gdrive-token')?.value || ramSecrets.gdriveToken || '').trim();
     if (!existingToken) {
+      if (isBackground) return;
       const prefs = store.getUiPrefs();
       const loginHint = (ramSecrets.gdriveEmail || prefs.googleAccountEmail || '').trim();
       await handleStudioGoogleSignIn({ loginHint, prompt: '', autoSyncMode: mode });
@@ -1916,6 +2094,8 @@ async function runCloudSync(mode) {
   }
 
   appState.syncInFlight = true;
+  appState.cloudAutoSyncState = 'syncing';
+  updateSecurityPill();
   if (statusMsg) statusMsg.textContent = `Running ${mode} with ${PROVIDER_LABELS[provider] || provider}...`;
 
   try {
@@ -1946,6 +2126,11 @@ async function runCloudSync(mode) {
       }
       store.saveUiPrefs({
         syncProvider: 'googleDrive',
+        vaultAuthMode: appState.useCustomPassphrase
+          ? 'passphrase'
+          : email
+            ? 'googleAccount'
+            : store.getUiPrefs().vaultAuthMode,
         googleAccountEmail: email,
         googleClientId: clientId,
         useCustomPassphrase: appState.useCustomPassphrase,
@@ -1993,6 +2178,8 @@ async function runCloudSync(mode) {
 
     await store.savePayload(result.payload);
     store.saveUiPrefs({ lastSyncedAtMs: result.syncedAtMs || Date.now() });
+    appState.syncInFlight = false;
+    appState.cloudAutoSyncState = 'idle';
     renderAllViews();
 
     const p = result.payload;
@@ -2005,8 +2192,11 @@ async function runCloudSync(mode) {
         text: `${(p.hosts || []).length} hosts, ${(p.totp || []).length} 2FA tokens, and ${(p.credentials || []).length} credentials synced with Google Drive AppData.`,
       });
     }
-    showToast(`${PROVIDER_LABELS[provider]} sync complete.`, 'ok');
+    if (!isBackground) {
+      showToast(`${PROVIDER_LABELS[provider]} sync complete.`, 'ok');
+    }
   } catch (err) {
+    appState.cloudAutoSyncState = 'error';
     const msg = err instanceof Error ? err.message : String(err);
     if (statusMsg) statusMsg.textContent = `Sync failed: ${msg}`;
     if (provider === 'googleDrive') {
@@ -2030,9 +2220,135 @@ async function runCloudSync(mode) {
         setSyncGoogleCallout({ tone: 'danger', title: 'Google Drive Sync Failed', text: msg });
       }
     }
-    showToast(msg, 'danger');
+    if (
+      !isBackground ||
+      (err instanceof VaultCoreError && (err.code === 'gdrive-http-401' || err.code === 'gdrive-missing-scope'))
+    ) {
+      showToast(msg, 'danger');
+    }
   } finally {
     appState.syncInFlight = false;
+    updateSecurityPill();
+    if (appState.cloudAutoSyncQueuedAgain) {
+      appState.cloudAutoSyncQueuedAgain = false;
+      scheduleCloudAutoSync(400);
+    }
+  }
+}
+
+async function handleReturningGoogleUnlock(options = {}) {
+  if (appState.gdriveAuthInFlight) return;
+  setAlert('lock-error', '');
+  setAlert('lock-info', '');
+  const scopeCallout = byId('returning-gdrive-scope-callout');
+  if (scopeCallout) scopeCallout.hidden = true;
+
+  const prefs = store.getUiPrefs();
+  const clientId = resolveGoogleWebOAuthClientId(prefs.googleClientId);
+  if (!clientId) {
+    byId('lock-returning-panel').hidden = true;
+    byId('lock-onboarding-panel').hidden = false;
+    switchOnboardTab('cloud');
+    const originEl = byId('onboard-gdrive-origin');
+    if (originEl) originEl.textContent = getCurrentWebOrigin();
+    const setupNote = byId('onboard-gdrive-setup-note');
+    if (setupNote) setupNote.hidden = false;
+    const adv = byId('onboard-gdrive-advanced');
+    if (adv) adv.open = true;
+    byId('onboard-gdrive-client-id')?.focus();
+    return;
+  }
+
+  const unlockBtn = byId('btn-returning-google-unlock');
+  const unlockLabel = byId('btn-returning-google-unlock-label');
+  const grantBtn = byId('btn-returning-gdrive-grant');
+  const expectedEmail = String(options.loginHint || prefs.googleAccountEmail || '').trim();
+
+  appState.gdriveAuthInFlight = true;
+  if (unlockBtn) unlockBtn.disabled = true;
+  if (grantBtn) grantBtn.disabled = true;
+  if (unlockLabel) unlockLabel.textContent = 'Unlocking & Syncing with Google...';
+
+  try {
+    const tokenRes = await requestGoogleWebAccessToken({
+      clientId,
+      loginHint: expectedEmail,
+      prompt: options.prompt || '',
+    });
+    ramSecrets.gdriveToken = tokenRes.accessToken;
+    ramSecrets.gdriveScope = tokenRes.grantedScope;
+
+    const userInfo = await fetchGoogleUserInfo(tokenRes.accessToken);
+    const email = userInfo.email || expectedEmail;
+    const displayName = userInfo.displayName || prefs.googleAccountName || '';
+    ramSecrets.gdriveEmail = email;
+    ramSecrets.gdriveDisplayName = displayName;
+
+    if (!tokenRes.hasAppDataScope) {
+      appState.returningGdrivePendingEmail = email;
+      const scopeText = byId('returning-gdrive-scope-text');
+      if (scopeText) {
+        scopeText.textContent =
+          `Signed in as ${email || 'your Google account'}, but Google Drive AppData permission was left unchecked. Click below to grant access and unlock your vault.`;
+      }
+      if (scopeCallout) scopeCallout.hidden = false;
+      return;
+    }
+
+    const accountKey = deriveGoogleAccountBoundPassphrase(email);
+    let syncRes;
+    try {
+      syncRes = await unlockOrSyncGoogleVault({
+        vaultStore: store,
+        accessToken: tokenRes.accessToken,
+        grantedScope: tokenRes.grantedScope,
+        passphrase: accountKey,
+      });
+    } catch (syncErr) {
+      if (syncErr instanceof VaultCoreError && syncErr.code === 'gdrive-missing-scope') {
+        appState.returningGdrivePendingEmail = email;
+        if (scopeCallout) scopeCallout.hidden = false;
+        return;
+      }
+      if (syncErr instanceof VaultCoreError && syncErr.code === 'decrypt-failed') {
+        setAlert(
+          'lock-error',
+          'This Google Drive vault uses a Custom E2EE Passphrase. Click "Switch Account / Cloud" and toggle Custom E2EE Passphrase ON.',
+        );
+        return;
+      }
+      throw syncErr;
+    }
+
+    store.saveUiPrefs({
+      syncProvider: 'googleDrive',
+      vaultAuthMode: 'googleAccount',
+      googleAccountEmail: email,
+      googleAccountName: displayName,
+      useCustomPassphrase: false,
+      lastSyncedAtMs: syncRes.syncedAtMs,
+    });
+    enterUnlockedShell(accountKey);
+    const h = (syncRes.payload.hosts || []).length;
+    const t = (syncRes.payload.totp || []).length;
+    showToast(
+      syncRes.mergedLocal
+        ? `Unlocked & merged as ${email} — ${h} hosts & ${t} 2FA tokens synced.`
+        : `Unlocked & synced as ${email} — ${h} hosts & ${t} 2FA tokens.`,
+      'ok',
+    );
+  } catch (err) {
+    setAlert('lock-error', err instanceof Error ? err.message : String(err));
+  } finally {
+    appState.gdriveAuthInFlight = false;
+    if (unlockBtn) unlockBtn.disabled = false;
+    if (grantBtn) grantBtn.disabled = false;
+    if (unlockLabel) {
+      const latestEmail = store.getUiPrefs().googleAccountEmail || expectedEmail;
+      unlockLabel.textContent = latestEmail
+        ? `Unlock & Sync with Google (${latestEmail})`
+        : 'Unlock & Sync with Google';
+    }
   }
 }
 
@@ -2093,12 +2409,9 @@ async function handleOnboardGoogleSignIn(options = {}) {
     const displayName = userInfo.displayName;
     ramSecrets.gdriveEmail = email;
     ramSecrets.gdriveDisplayName = displayName;
-    store.saveUiPrefs({
-      syncProvider: 'googleDrive',
-      googleAccountEmail: email,
-      googleAccountName: displayName,
-      googleClientId: customClientId || prefs.googleClientId,
-    });
+    if (customClientId && customClientId !== prefs.googleClientId) {
+      store.saveUiPrefs({ googleClientId: customClientId });
+    }
 
     if (!tokenRes.hasAppDataScope) {
       appState.onboardGdrivePendingEmail = email;
@@ -2117,7 +2430,12 @@ async function handleOnboardGoogleSignIn(options = {}) {
 
     let syncRes;
     try {
-      syncRes = await pullOrInitializeGoogleVault(tokenRes.accessToken, tokenRes.grantedScope, effectivePass);
+      syncRes = await unlockOrSyncGoogleVault({
+        vaultStore: store,
+        accessToken: tokenRes.accessToken,
+        grantedScope: tokenRes.grantedScope,
+        passphrase: effectivePass,
+      });
     } catch (syncErr) {
       if (syncErr instanceof VaultCoreError && syncErr.code === 'gdrive-missing-scope') {
         appState.onboardGdrivePendingEmail = email;
@@ -2137,9 +2455,9 @@ async function handleOnboardGoogleSignIn(options = {}) {
     if (appState.onboardGdriveCustomPass) {
       ramSecrets.customSyncPassphrase = customPass;
     }
-    await store.createVault(effectivePass, syncRes.payload);
     store.saveUiPrefs({
       syncProvider: 'googleDrive',
+      vaultAuthMode: appState.onboardGdriveCustomPass ? 'passphrase' : 'googleAccount',
       googleAccountEmail: email,
       googleAccountName: displayName,
       useCustomPassphrase: appState.onboardGdriveCustomPass,
@@ -2152,7 +2470,9 @@ async function handleOnboardGoogleSignIn(options = {}) {
     showToast(
       syncRes.createdFresh
         ? `Signed in as ${email} — created encrypted Google Drive vault.`
-        : `Signed in as ${email} — unlocked ${h} hosts & ${t} 2FA tokens.`,
+        : syncRes.mergedLocal
+          ? `Signed in as ${email} — merged local & cloud vault (${h} hosts, ${t} 2FA).`
+          : `Signed in as ${email} — unlocked ${h} hosts & ${t} 2FA tokens.`,
       'ok',
     );
   } catch (err) {
@@ -2199,13 +2519,18 @@ async function handleOnboardGoogleManualPull() {
   const btn = byId('btn-onboard-gdrive-manual-submit');
   if (btn) btn.disabled = true;
   try {
-    const syncRes = await pullOrInitializeGoogleVault(token, '', effectivePass);
+    const syncRes = await unlockOrSyncGoogleVault({
+      vaultStore: store,
+      accessToken: token,
+      grantedScope: '',
+      passphrase: effectivePass,
+    });
     ramSecrets.gdriveToken = token;
     ramSecrets.gdriveEmail = email;
     ramSecrets.gdriveDisplayName = displayName;
-    await store.createVault(effectivePass, syncRes.payload);
     store.saveUiPrefs({
       syncProvider: 'googleDrive',
+      vaultAuthMode: appState.onboardGdriveCustomPass || !email ? 'passphrase' : 'googleAccount',
       googleAccountEmail: email,
       googleAccountName: displayName,
       useCustomPassphrase: appState.onboardGdriveCustomPass,
@@ -2273,6 +2598,11 @@ async function handleStudioGoogleSignIn(options = {}) {
 
     store.saveUiPrefs({
       syncProvider: 'googleDrive',
+      vaultAuthMode: appState.useCustomPassphrase
+        ? 'passphrase'
+        : email
+          ? 'googleAccount'
+          : store.getUiPrefs().vaultAuthMode,
       googleAccountEmail: email,
       googleAccountName: displayName,
       googleClientId: customClientId || prefs.googleClientId,
@@ -2396,6 +2726,39 @@ function setGatewayScaleMode(mode) {
   }
 }
 
+function syncGatewayUrlPresetsUi() {
+  const urlVal = (byId('gateway-ws-url')?.value || '').trim().toLowerCase();
+  const isLocal = urlVal.includes('127.0.0.1') || urlVal.includes('localhost');
+  const isHttps = urlVal.startsWith('wss://') || (urlVal.startsWith('https://') && !isLocal);
+  const localBtn = byId('btn-gw-preset-local');
+  const httpsBtn = byId('btn-gw-preset-https');
+  if (localBtn) {
+    localBtn.classList.toggle('is-active', isLocal);
+    localBtn.setAttribute('aria-pressed', isLocal ? 'true' : 'false');
+  }
+  if (httpsBtn) {
+    httpsBtn.classList.toggle('is-active', !isLocal && isHttps);
+    httpsBtn.setAttribute('aria-pressed', !isLocal && isHttps ? 'true' : 'false');
+  }
+}
+
+function applyGatewayUrlPreset(presetUrl) {
+  const urlInput = byId('gateway-ws-url');
+  if (!urlInput) return;
+  const target = String(presetUrl || '').trim();
+  if (!target) return;
+  urlInput.value = target;
+  syncGatewayUrlPresetsUi();
+  if (store.isUnlocked()) {
+    store.saveUiPrefs({ gatewayUrl: target });
+  }
+  if (target === LOCAL_GATEWAY_DEFAULT_URL) {
+    probeLocalGatewayHealth({ autoFocusPairing: false });
+  } else {
+    urlInput.focus();
+  }
+}
+
 function setGatewayPane(pane) {
   const next = pane === 'ssh' || pane === 'sftp' ? pane : 'desktop';
   appState.gatewayPane = next;
@@ -2412,8 +2775,12 @@ function setGatewayPane(pane) {
   if (scaleGroup) scaleGroup.hidden = next !== 'desktop';
   if (cadBtn) cadBtn.hidden = next !== 'desktop';
 
-  if (next === 'sftp' && appState.gatewayClient && appState.gatewayClient.connected) {
-    refreshGatewaySftpList();
+  if (next === 'sftp') {
+    if (appState.gatewayClient && appState.gatewayClient.connected) {
+      refreshGatewaySftpList();
+    } else if (appState.gatewayPreviewActive) {
+      renderGatewayPreviewSftpList();
+    }
   }
 }
 
@@ -2486,6 +2853,8 @@ function resetGatewayLiveDom() {
   }
   const toggleBtn = byId('btn-gateway-toggle-setup');
   if (toggleBtn) toggleBtn.hidden = true;
+  const previewBanner = byId('gateway-preview-banner');
+  if (previewBanner) previewBanner.hidden = true;
   setGatewaySetupVisible(true);
 
   const canvas = byId('gateway-canvas');
@@ -2549,10 +2918,14 @@ function renderGatewayTotpSelect() {
   select.replaceChildren();
 
   if (tokens.length === 0) {
-    const opt = el('option', '', 'No 2FA tokens');
-    opt.value = '';
+    const opt = el(
+      'option',
+      '',
+      appState.gatewayPreviewActive ? 'Demo Preview 2FA (RFC 6238)' : 'No 2FA tokens',
+    );
+    opt.value = appState.gatewayPreviewActive ? '__preview_demo_2fa__' : '';
     select.appendChild(opt);
-    if (autoBtn) autoBtn.disabled = true;
+    if (autoBtn) autoBtn.disabled = !appState.gatewayPreviewActive;
     return;
   }
 
@@ -2733,9 +3106,10 @@ async function probeLocalGatewayHealth(options = {}) {
     const urlInput = byId('gateway-ws-url');
     if (urlInput) {
       const currentUrl = urlInput.value.trim();
-      if (!currentUrl || currentUrl === 'wss://gateway.local:8443') {
+      if (!currentUrl || currentUrl === REMOTE_GATEWAY_DEFAULT_URL) {
         urlInput.value = LOCAL_GATEWAY_DEFAULT_URL;
       }
+      syncGatewayUrlPresetsUi();
     }
 
     if (!hasPairedGatewayToken()) {
@@ -2874,6 +3248,9 @@ function buildGatewayOpenParamsFromVault(selectedTargetId) {
 }
 
 function disconnectGatewaySession(silent = false) {
+  const wasPreview = appState.gatewayPreviewActive;
+  stopGatewayPreview();
+
   if (appState.gatewayClient) {
     try {
       appState.gatewayClient.detachCanvasInput();
@@ -2897,7 +3274,12 @@ function disconnectGatewaySession(silent = false) {
   resetGatewayLiveDom();
 
   if (!silent) {
-    appendGatewayLog('Gateway JSR1 session closed cleanly.', 'warn');
+    appendGatewayLog(
+      wasPreview
+        ? 'Interactive browser preview closed. Start JalaDesk Gateway to connect to live servers.'
+        : 'Gateway JSR1 session closed cleanly.',
+      'warn',
+    );
   }
 }
 
@@ -3067,33 +3449,679 @@ async function connectGatewayBridge() {
   }
 }
 
-async function handleGatewayAutoType2fa() {
-  const client = appState.gatewayClient;
-  if (!client || !client.connected) {
-    showToast('Connect to a live Gateway session first.', 'danger');
+function mapPreviewCanvasCoords(canvas, clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return { x: 640, y: 360 };
+  const x = Math.max(0, Math.min(canvas.width, Math.round(((clientX - rect.left) / rect.width) * canvas.width)));
+  const y = Math.max(0, Math.min(canvas.height, Math.round(((clientY - rect.top) / rect.height) * canvas.height)));
+  return { x, y };
+}
+
+function drawPreviewRoundedRect(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+function renderGatewayPreviewCanvas() {
+  const state = appState.gatewayPreviewState;
+  const canvas = byId('gateway-canvas');
+  if (!state || !canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const W = canvas.width;
+  const H = canvas.height;
+  const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  // Wallpaper gradient & precision grid
+  const bg = ctx.createLinearGradient(0, 0, W, H);
+  bg.addColorStop(0, '#071122');
+  bg.addColorStop(0.55, '#0D1B33');
+  bg.addColorStop(1, '#081326');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.strokeStyle = 'rgba(148, 182, 224, 0.06)';
+  ctx.lineWidth = 1;
+  for (let gx = 40; gx < W; gx += 40) {
+    ctx.beginPath();
+    ctx.moveTo(gx, 36);
+    ctx.lineTo(gx, H - 44);
+    ctx.stroke();
+  }
+  for (let gy = 76; gy < H - 44; gy += 40) {
+    ctx.beginPath();
+    ctx.moveTo(0, gy);
+    ctx.lineTo(W, gy);
+    ctx.stroke();
+  }
+
+  // Top remote OS bar
+  ctx.fillStyle = 'rgba(7, 12, 22, 0.92)';
+  ctx.fillRect(0, 0, W, 36);
+  ctx.strokeStyle = 'rgba(150, 178, 214, 0.2)';
+  ctx.beginPath();
+  ctx.moveTo(0, 36);
+  ctx.lineTo(W, 36);
+  ctx.stroke();
+
+  ctx.font = '600 14px "DM Sans", system-ui, sans-serif';
+  ctx.fillStyle = '#38BDF8';
+  ctx.fillText('JalaDesk Remote Desktop', 18, 23);
+  ctx.fillStyle = '#C4D3E7';
+  ctx.font = '500 13px "JetBrains Mono", monospace';
+  ctx.fillText(`Target: ${state.targetLabel}  ·  Cursor (${state.cursorX}, ${state.cursorY})`, 235, 23);
+  ctx.fillStyle = '#F3C66F';
+  ctx.fillText(nowStr, W - 98, 23);
+
+  const drawAuthWindow = () => {
+    const win = state.authWin;
+    const focused = state.focusedWindow === 'auth';
+    drawPreviewRoundedRect(ctx, win.x, win.y, win.w, win.h, 12);
+    ctx.fillStyle = '#0D1627';
+    ctx.fill();
+    ctx.lineWidth = focused ? 2 : 1;
+    ctx.strokeStyle = focused ? '#38BDF8' : 'rgba(150, 178, 214, 0.25)';
+    ctx.stroke();
+
+    // Window header
+    drawPreviewRoundedRect(ctx, win.x, win.y, win.w, 40, 12);
+    ctx.fillStyle = focused ? '#162844' : '#101C31';
+    ctx.fill();
+    ctx.fillStyle = '#F4F8FD';
+    ctx.font = '600 15px "DM Sans", system-ui, sans-serif';
+    ctx.fillText('Remote Session Auth & 2FA Receiver', win.x + 18, win.y + 25);
+    ctx.fillStyle = '#34D399';
+    ctx.font = '600 12px "JetBrains Mono", monospace';
+    ctx.fillText(focused ? 'FOCUSED' : 'CLICK TO FOCUS', win.x + win.w - 118, win.y + 24);
+
+    // Info cards
+    ctx.fillStyle = '#C4D3E7';
+    ctx.font = '500 14px "DM Sans", system-ui, sans-serif';
+    ctx.fillText('Live RDP / VNC frames stream over JSR1 binary WebSocket.', win.x + 20, win.y + 70);
+    ctx.fillStyle = '#97ADC9';
+    ctx.font = '500 13px "JetBrains Mono", monospace';
+    ctx.fillText(`Host: ${state.targetLabel}`, win.x + 20, win.y + 98);
+    ctx.fillText(`Mode: ${appState.gatewayViewOnly ? 'VIEW-ONLY OBSERVER' : 'INTERACTIVE CONTROL'}`, win.x + 20, win.y + 122);
+
+    // 2FA / Keyboard Input Box
+    ctx.fillStyle = '#F4F8FD';
+    ctx.font = '600 14px "DM Sans", system-ui, sans-serif';
+    ctx.fillText('2FA Auto-Type / Keyboard Input Target:', win.x + 20, win.y + 166);
+
+    const boxX = win.x + 20;
+    const boxY = win.y + 178;
+    const boxW = win.w - 40;
+    const boxH = 52;
+    drawPreviewRoundedRect(ctx, boxX, boxY, boxW, boxH, 8);
+    ctx.fillStyle = '#060B14';
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = state.totpFlashUntil > Date.now() ? '#34D399' : '#38BDF8';
+    ctx.stroke();
+
+    ctx.font = '700 22px "JetBrains Mono", monospace';
+    ctx.fillStyle = state.authInputText ? '#34D399' : '#64748B';
+    const displayText = state.authInputText || 'Click "2FA Auto-Type" or type here...';
+    if (!state.authInputText) {
+      ctx.font = '500 15px "JetBrains Mono", monospace';
+    }
+    ctx.fillText(displayText.slice(-28), boxX + 16, boxY + 33);
+
+    // Interactive verify & clear buttons inside Auth window
+    for (const btn of state.authButtons) {
+      drawPreviewRoundedRect(ctx, btn.x, btn.y, btn.w, btn.h, 7);
+      ctx.fillStyle = btn.primary ? '#F3C66F' : '#162844';
+      ctx.fill();
+      ctx.strokeStyle = btn.primary ? '#F3C66F' : 'rgba(150, 178, 214, 0.35)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = btn.primary ? '#05080F' : '#F4F8FD';
+      ctx.font = '600 14px "DM Sans", system-ui, sans-serif';
+      ctx.fillText(btn.label, btn.x + 14, btn.y + 24);
+    }
+
+    ctx.fillStyle = state.authStatusTone === 'ok' ? '#34D399' : '#F3C66F';
+    ctx.font = '500 13px "JetBrains Mono", monospace';
+    ctx.fillText(state.authStatus, win.x + 20, win.y + 324);
+
+    ctx.fillStyle = '#97ADC9';
+    ctx.font = '400 13px "DM Sans", system-ui, sans-serif';
+    ctx.fillText('Tip: Switch Fit / Fill / 1:1 above, test Ctrl+Alt+Del, or open the SSH tab.', win.x + 20, win.y + 372);
+  };
+
+  const drawTermWindow = () => {
+    const win = state.termWin;
+    const focused = state.focusedWindow === 'term';
+    drawPreviewRoundedRect(ctx, win.x, win.y, win.w, win.h, 12);
+    ctx.fillStyle = '#09111E';
+    ctx.fill();
+    ctx.lineWidth = focused ? 2 : 1;
+    ctx.strokeStyle = focused ? '#34D399' : 'rgba(150, 178, 214, 0.25)';
+    ctx.stroke();
+
+    drawPreviewRoundedRect(ctx, win.x, win.y, win.w, 40, 12);
+    ctx.fillStyle = focused ? '#112B29' : '#0F1A2C';
+    ctx.fill();
+    ctx.fillStyle = '#F4F8FD';
+    ctx.font = '600 15px "DM Sans", system-ui, sans-serif';
+    ctx.fillText('Remote Desktop Console (Interactive Window)', win.x + 18, win.y + 25);
+    ctx.fillStyle = '#34D399';
+    ctx.font = '600 12px "JetBrains Mono", monospace';
+    ctx.fillText(focused ? 'ACTIVE' : 'CLICK TO FOCUS', win.x + win.w - 118, win.y + 24);
+
+    // Quick action buttons
+    for (const btn of state.termButtons) {
+      drawPreviewRoundedRect(ctx, btn.x, btn.y, btn.w, btn.h, 6);
+      ctx.fillStyle = '#15253E';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = '#DCE9F9';
+      ctx.font = '600 13px "DM Sans", system-ui, sans-serif';
+      ctx.fillText(btn.label, btn.x + 12, btn.y + 22);
+    }
+
+    // Console lines
+    ctx.font = '500 13px "JetBrains Mono", monospace';
+    const visibleLines = state.termLines.slice(-13);
+    let ly = win.y + 112;
+    for (const line of visibleLines) {
+      ctx.fillStyle = line.startsWith('$') ? '#38BDF8' : line.includes('[OK]') ? '#34D399' : '#D5E3F5';
+      ctx.fillText(line.slice(0, 64), win.x + 18, ly);
+      ly += 24;
+    }
+  };
+
+  if (state.focusedWindow === 'auth') {
+    drawTermWindow();
+    drawAuthWindow();
+  } else {
+    drawAuthWindow();
+    drawTermWindow();
+  }
+
+  // Click ripple feedback
+  if (state.lastClick && Date.now() - state.lastClick.at < 450) {
+    const progress = (Date.now() - state.lastClick.at) / 450;
+    ctx.beginPath();
+    ctx.arc(state.lastClick.x, state.lastClick.y, 6 + progress * 22, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(56, 189, 248, ${(1 - progress).toFixed(2)})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Ctrl+Alt+Del Secure Attention overlay
+  if (state.cadOverlay) {
+    ctx.fillStyle = 'rgba(5, 8, 15, 0.84)';
+    ctx.fillRect(0, 36, W, H - 80);
+    const mw = 500;
+    const mh = 220;
+    const mx = Math.round((W - mw) / 2);
+    const my = Math.round((H - mh) / 2);
+    drawPreviewRoundedRect(ctx, mx, my, mw, mh, 14);
+    ctx.fillStyle = '#0D1627';
+    ctx.fill();
+    ctx.strokeStyle = '#F3C66F';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#F3C66F';
+    ctx.font = '700 20px "Sora", "DM Sans", sans-serif';
+    ctx.fillText('Ctrl+Alt+Del Received (SAS)', mx + 28, my + 48);
+    ctx.fillStyle = '#C4D3E7';
+    ctx.font = '400 15px "DM Sans", system-ui, sans-serif';
+    ctx.fillText('Simulated Secure Attention Sequence delivered over JSR1.', mx + 28, my + 86);
+    ctx.fillText('Lock Workstation · Switch User · Task Manager · Sign Out', mx + 28, my + 114);
+    drawPreviewRoundedRect(ctx, mx + 28, my + 148, 176, 40, 8);
+    ctx.fillStyle = '#F3C66F';
+    ctx.fill();
+    ctx.fillStyle = '#05080F';
+    ctx.font = '700 14px "DM Sans", system-ui, sans-serif';
+    ctx.fillText('Click Anywhere to Dismiss', mx + 42, my + 173);
+  }
+
+  // Bottom Taskbar
+  ctx.fillStyle = 'rgba(7, 12, 22, 0.94)';
+  ctx.fillRect(0, H - 44, W, 44);
+  ctx.strokeStyle = 'rgba(150, 178, 214, 0.2)';
+  ctx.beginPath();
+  ctx.moveTo(0, H - 44);
+  ctx.lineTo(W, H - 44);
+  ctx.stroke();
+
+  for (const tab of state.taskbarTabs) {
+    const active = state.focusedWindow === tab.win;
+    drawPreviewRoundedRect(ctx, tab.x, tab.y, tab.w, tab.h, 6);
+    ctx.fillStyle = active ? '#1D3354' : '#0E1729';
+    ctx.fill();
+    ctx.strokeStyle = active ? '#38BDF8' : 'rgba(150, 178, 214, 0.22)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = active ? '#F4F8FD' : '#97ADC9';
+    ctx.font = '600 13px "DM Sans", system-ui, sans-serif';
+    ctx.fillText(tab.label, tab.x + 12, tab.y + 19);
+  }
+
+  ctx.fillStyle = '#97ADC9';
+  ctx.font = '500 13px "JetBrains Mono", monospace';
+  ctx.fillText(`Clicks: ${state.clickCount} · Tiles: ${state.tilesDecoded} · Scale: ${appState.gatewayScaleMode.toUpperCase()}`, W - 360, H - 17);
+
+  // Crisp vector remote cursor
+  if (!appState.gatewayViewOnly) {
+    const cx = state.cursorX;
+    const cy = state.cursorY;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx, cy + 20);
+    ctx.lineTo(cx + 6, cy + 15);
+    ctx.lineTo(cx + 12, cy + 22);
+    ctx.lineTo(cx + 15, cy + 19);
+    ctx.lineTo(cx + 9, cy + 13);
+    ctx.lineTo(cx + 16, cy + 12);
+    ctx.closePath();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fill();
+    ctx.strokeStyle = '#05080F';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+function stopGatewayPreview() {
+  const state = appState.gatewayPreviewState;
+  if (state) {
+    if (state.timerId) {
+      clearInterval(state.timerId);
+    }
+    const canvas = byId('gateway-canvas');
+    if (canvas && state.listeners) {
+      for (const [evt, fn] of state.listeners) {
+        canvas.removeEventListener(evt, fn);
+      }
+    }
+  }
+  appState.gatewayPreviewActive = false;
+  appState.gatewayPreviewState = null;
+  const previewBanner = byId('gateway-preview-banner');
+  if (previewBanner) previewBanner.hidden = true;
+}
+
+function handleGatewayPreviewSshCommand(rawCmd) {
+  const cmd = String(rawCmd || '').trim();
+  const state = appState.gatewayPreviewState;
+  const hostName = state ? state.sshHostSlug : 'jaladesk-preview';
+  appendGatewaySshOutput(`operator@${hostName}:~$ ${cmd}\n`);
+  if (!cmd) return;
+  if (cmd === 'clear') {
+    appState.gatewaySshBuffer = '';
+    const consoleEl = byId('gateway-ssh-console');
+    if (consoleEl) consoleEl.textContent = '';
     return;
   }
-  if (!client.canSendInput()) {
+  if (cmd === 'help') {
+    appendGatewaySshOutput(
+      'Interactive Browser SSH Preview commands: help, whoami, uname -a, ls, uptime, date, clear\n' +
+        'Start JalaDesk Gateway locally (127.0.0.1:8443) or via Docker to open live PTY sessions.\n',
+    );
+  } else if (cmd === 'whoami') {
+    appendGatewaySshOutput('operator (JalaDesk Web Preview)\n');
+  } else if (cmd.startsWith('uname')) {
+    appendGatewaySshOutput('Linux jaladesk-bastion 6.8.0-generic #1 SMP x86_64 GNU/Linux (Interactive Preview)\n');
+  } else if (cmd === 'ls' || cmd.startsWith('ls ')) {
+    appendGatewaySshOutput('deploy.sh  docker-compose.gateway.yml  logs/  nginx.conf  README.md\n');
+  } else if (cmd === 'uptime') {
+    appendGatewaySshOutput(' 12:04:19 up 42 days,  6:18,  1 user,  load average: 0.14, 0.11, 0.08\n');
+  } else if (cmd === 'date') {
+    appendGatewaySshOutput(`${new Date().toUTCString()}\n`);
+  } else {
+    appendGatewaySshOutput(`[preview] executed: ${cmd}\n`);
+  }
+}
+
+function renderGatewayPreviewSftpList() {
+  const statusEl = byId('gateway-sftp-status');
+  const listEl = byId('gateway-sftp-list');
+  const pathInput = byId('gateway-sftp-path');
+  const path = (pathInput?.value || '/').trim() || '/';
+  if (statusEl) {
+    statusEl.textContent = `${path} · 4 sample items (Interactive Browser Preview — start Gateway for live SFTP)`;
+  }
+  if (!listEl) return;
+  listEl.replaceChildren();
+  const sampleEntries = [
+    { name: 'logs', type: 'dir', size: 0, meta: 'Directory' },
+    { name: 'docker-compose.gateway.yml', type: 'file', size: 1248, meta: '1.2 KB' },
+    { name: 'deploy.sh', type: 'file', size: 4096, meta: '4.0 KB' },
+    { name: 'nginx.conf', type: 'file', size: 2816, meta: '2.8 KB' },
+  ];
+  for (const item of sampleEntries) {
+    const row = el('div', 'sftp-row');
+    const nameWrap = el('div', 'sftp-name-wrap');
+    nameWrap.appendChild(el('span', `proto-badge mono ${item.type === 'dir' ? 'proto-hypervisor' : 'proto-sftp'}`, item.type === 'dir' ? 'DIR' : 'FILE'));
+    nameWrap.appendChild(el('span', 'sftp-name mono', item.name));
+    row.appendChild(nameWrap);
+    row.appendChild(el('span', 'sftp-meta mono', item.meta));
+    row.appendChild(el('span', 'sftp-meta mono', 'Preview'));
+    listEl.appendChild(row);
+  }
+}
+
+function startGatewayInteractivePreview() {
+  disconnectGatewaySession(true);
+
+  const selectedTargetId = byId('gateway-host-select')?.value || '__demo__';
+  const built = buildGatewayOpenParamsFromVault(selectedTargetId);
+  const targetLabel =
+    selectedTargetId === '__demo__' ? 'bastion-prod-01.internal (RDP 3389)' : built.displayLabel;
+  const sshHostSlug = String(built.host || 'jaladesk-preview').replace(/[^a-zA-Z0-9._-]/g, '');
+
+  const authWin = { x: 48, y: 66, w: 568, h: 430 };
+  const termWin = { x: 644, y: 98, w: 588, h: 460 };
+
+  const previewState = {
+    targetLabel,
+    sshHostSlug,
+    focusedWindow: 'auth',
+    cursorX: 340,
+    cursorY: 268,
+    clickCount: 0,
+    tilesDecoded: 14,
+    authInputText: '',
+    authStatus: 'Ready — click "2FA Auto-Type" above or type on your keyboard.',
+    authStatusTone: 'warn',
+    totpFlashUntil: 0,
+    cadOverlay: false,
+    lastClick: null,
+    authWin,
+    termWin,
+    authButtons: [
+      { id: 'verify', label: 'Verify 2FA Code', x: authWin.x + 20, y: authWin.y + 248, w: 158, h: 38, primary: true },
+      { id: 'clear-auth', label: 'Clear Field', x: authWin.x + 190, y: authWin.y + 248, w: 118, h: 38, primary: false },
+    ],
+    termButtons: [
+      { id: 'ping', label: 'Ping Bastion', x: termWin.x + 18, y: termWin.y + 54, w: 124, h: 34 },
+      { id: 'services', label: 'Check Services', x: termWin.x + 152, y: termWin.y + 54, w: 138, h: 34 },
+      { id: 'clear-term', label: 'Clear', x: termWin.x + 300, y: termWin.y + 54, w: 82, h: 34 },
+    ],
+    taskbarTabs: [
+      { win: 'auth', label: 'Auth & 2FA Receiver', x: 18, y: 682, w: 174, h: 28 },
+      { win: 'term', label: 'Remote Console', x: 202, y: 682, w: 144, h: 28 },
+    ],
+    termLines: [
+      `$ ssh operator@${sshHostSlug}`,
+      `[OK] JSR1 interactive preview canvas ready (${targetLabel})`,
+      '[OK] FreeRDP / VNC / SSH browser compositor active',
+      'Click buttons above, click windows to focus, or try 2FA Auto-Type.',
+    ],
+    timerId: null,
+    listeners: [],
+  };
+
+  appState.gatewayPreviewActive = true;
+  appState.gatewayPreviewState = previewState;
+  appState.gatewaySessionProtocol = 'demo';
+
+  const liveStage = byId('gateway-live-stage');
+  const previewBanner = byId('gateway-preview-banner');
+  const toggleBtn = byId('btn-gateway-toggle-setup');
+  const hudTarget = byId('hud-target-badge');
+  const discBtn = byId('btn-gateway-disconnect');
+
+  if (liveStage) liveStage.hidden = false;
+  if (previewBanner) previewBanner.hidden = false;
+  if (toggleBtn) toggleBtn.hidden = false;
+  if (discBtn) discBtn.disabled = false;
+  if (hudTarget) hudTarget.textContent = `PREVIEW · ${targetLabel} · 1280×720`;
+
+  setGatewaySetupVisible(false);
+  setGatewayStatus('PREVIEW · INTERACTIVE', 'ok');
+  updateGatewayControlUi(true, false);
+  renderGatewayTotpSelect();
+  setGatewayScaleMode(appState.gatewayScaleMode);
+  setGatewayPane('desktop');
+
+  appState.gatewaySshBuffer = '';
+  appendGatewaySshOutput(
+    `JalaDesk Web Gateway — Interactive Browser SSH Preview\n` +
+      `Target: ${targetLabel}\n` +
+      `Type "help", "whoami", "uname -a", or "ls" below (or click 2FA Auto-Type).\n\n`,
+  );
+  renderGatewayPreviewSftpList();
+
+  const canvas = byId('gateway-canvas');
+  if (canvas) {
+    const bumpTile = () => {
+      previewState.tilesDecoded += 1;
+      updateGatewayHudMetrics({ fps: 30, rttMs: 1, kbPerSec: 184, tilesDecoded: previewState.tilesDecoded });
+      renderGatewayPreviewCanvas();
+    };
+
+    const onPointerMove = (e) => {
+      const pt = mapPreviewCanvasCoords(canvas, e.clientX, e.clientY);
+      previewState.cursorX = pt.x;
+      previewState.cursorY = pt.y;
+      renderGatewayPreviewCanvas();
+    };
+
+    const onPointerDown = (e) => {
+      if (appState.gatewayViewOnly) {
+        showToast('View-Only Observer active — click Take Control to interact.', 'danger');
+        return;
+      }
+      canvas.focus();
+      const pt = mapPreviewCanvasCoords(canvas, e.clientX, e.clientY);
+      previewState.cursorX = pt.x;
+      previewState.cursorY = pt.y;
+      previewState.clickCount += 1;
+      previewState.lastClick = { x: pt.x, y: pt.y, at: Date.now() };
+
+      if (previewState.cadOverlay) {
+        previewState.cadOverlay = false;
+        bumpTile();
+        return;
+      }
+
+      for (const tab of previewState.taskbarTabs) {
+        if (pt.x >= tab.x && pt.x <= tab.x + tab.w && pt.y >= tab.y && pt.y <= tab.y + tab.h) {
+          previewState.focusedWindow = tab.win;
+          bumpTile();
+          return;
+        }
+      }
+
+      const inRect = (r) => pt.x >= r.x && pt.x <= r.x + r.w && pt.y >= r.y && pt.y <= r.y + r.h;
+      const checkAuthClick = () => {
+        if (!inRect(previewState.authWin)) return false;
+        previewState.focusedWindow = 'auth';
+        for (const btn of previewState.authButtons) {
+          if (inRect(btn)) {
+            if (btn.id === 'verify') {
+              const code = previewState.authInputText.trim();
+              if (code.length >= 6) {
+                previewState.authStatus = `[OK] Verified code "${code}" inside remote desktop!`;
+                previewState.authStatusTone = 'ok';
+                previewState.totpFlashUntil = Date.now() + 1800;
+              } else {
+                previewState.authStatus = 'Enter a 6-digit code or click "2FA Auto-Type" in the HUD above.';
+                previewState.authStatusTone = 'warn';
+              }
+            } else if (btn.id === 'clear-auth') {
+              previewState.authInputText = '';
+              previewState.authStatus = 'Input cleared. Click "2FA Auto-Type" or type on your keyboard.';
+              previewState.authStatusTone = 'warn';
+            }
+          }
+        }
+        return true;
+      };
+      const checkTermClick = () => {
+        if (!inRect(previewState.termWin)) return false;
+        previewState.focusedWindow = 'term';
+        for (const btn of previewState.termButtons) {
+          if (inRect(btn)) {
+            if (btn.id === 'ping') {
+              previewState.termLines.push(`$ ping -c 1 ${previewState.sshHostSlug}`);
+              previewState.termLines.push(`[OK] 64 bytes from ${previewState.sshHostSlug}: time=0.84 ms`);
+            } else if (btn.id === 'services') {
+              previewState.termLines.push('$ systemctl status jaladesk-gateway');
+              previewState.termLines.push('[OK] rdp-freerdp3: ready · vnc-rfb: ready · ssh-pty: ready');
+            } else if (btn.id === 'clear-term') {
+              previewState.termLines = ['[OK] Console cleared (Interactive Browser Preview).'];
+            }
+          }
+        }
+        return true;
+      };
+
+      if (previewState.focusedWindow === 'auth') {
+        if (!checkAuthClick()) checkTermClick();
+      } else if (!checkTermClick()) {
+        checkAuthClick();
+      }
+      bumpTile();
+    };
+
+    const onKeyDown = (e) => {
+      if (appState.gatewayViewOnly) return;
+      if (e.key === 'Escape' && previewState.cadOverlay) {
+        e.preventDefault();
+        previewState.cadOverlay = false;
+        bumpTile();
+        return;
+      }
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        if (previewState.focusedWindow === 'auth') {
+          previewState.authInputText = previewState.authInputText.slice(0, -1);
+        }
+        bumpTile();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (previewState.focusedWindow === 'auth') {
+          previewState.authStatus = previewState.authInputText
+            ? `[OK] Submitted "${previewState.authInputText}" to remote session.`
+            : 'Type characters or click "2FA Auto-Type" above.';
+          previewState.authStatusTone = previewState.authInputText ? 'ok' : 'warn';
+        } else {
+          previewState.termLines.push('[OK] Remote desktop Enter key dispatched.');
+        }
+        bumpTile();
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        if (previewState.focusedWindow === 'auth') {
+          previewState.authInputText = `${previewState.authInputText}${e.key}`.slice(-28);
+          previewState.authStatus = 'Live keyboard input received on remote desktop canvas.';
+          previewState.authStatusTone = 'ok';
+        } else {
+          const lastIdx = previewState.termLines.length - 1;
+          if (lastIdx >= 0 && previewState.termLines[lastIdx].startsWith('$ ')) {
+            previewState.termLines[lastIdx] += e.key;
+          } else {
+            previewState.termLines.push(`$ ${e.key}`);
+          }
+        }
+        bumpTile();
+      }
+    };
+
+    canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('keydown', onKeyDown);
+    previewState.listeners.push(
+      ['pointermove', onPointerMove],
+      ['pointerdown', onPointerDown],
+      ['keydown', onKeyDown],
+    );
+  }
+
+  updateGatewayHudMetrics({ fps: 30, rttMs: 1, kbPerSec: 162, tilesDecoded: previewState.tilesDecoded });
+  renderGatewayPreviewCanvas();
+  previewState.timerId = setInterval(() => {
+    if (!appState.gatewayPreviewActive || !appState.gatewayPreviewState) return;
+    renderGatewayPreviewCanvas();
+  }, 1000);
+
+  appendGatewayLog('Opened Interactive Browser Preview — start JalaDesk Gateway to connect to live servers.', 'ok');
+  liveStage?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+async function handleGatewayAutoType2fa() {
+  const isPreview = appState.gatewayPreviewActive && Boolean(appState.gatewayPreviewState);
+  const client = appState.gatewayClient;
+
+  if (!isPreview && (!client || !client.connected)) {
+    showToast('Connect to a live Gateway session or open Interactive Preview first.', 'danger');
+    return;
+  }
+  if (isPreview && appState.gatewayViewOnly) {
     showToast('View-Only mode active. Click Take Control before auto-typing 2FA.', 'danger');
     return;
   }
+  if (!isPreview && !client.canSendInput()) {
+    showToast('View-Only mode active. Click Take Control before auto-typing 2FA.', 'danger');
+    return;
+  }
+
   const select = byId('gateway-totp-select');
   const tokenId = select ? select.value : '';
   const payload = getPayloadSafe();
   const token = payload && Array.isArray(payload.totp) ? payload.totp.find((t) => String(t.id) === String(tokenId)) : null;
-  if (!token) {
+
+  if (!token && !isPreview) {
     showToast('Add a 2FA token in the Authenticator tab first.', 'danger');
     return;
   }
+
   try {
-    const evaluated = await evaluateTotpToken(token, Date.now());
+    let code = '';
+    let digits = 6;
+    let label = 'Demo Preview 2FA';
+    if (token) {
+      const evaluated = await evaluateTotpToken(token, Date.now());
+      code = evaluated.code;
+      digits = evaluated.digits;
+      label = token.issuer || token.accountName || '2FA token';
+    } else {
+      const demoEval = await evaluateTotpToken(
+        { secretBase32: 'JBSWY3DPEHPK3PXP', algorithm: 'SHA1', digits: 6, period: 30 },
+        Date.now(),
+      );
+      code = demoEval.code;
+      digits = demoEval.digits;
+    }
+
+    if (isPreview && appState.gatewayPreviewState) {
+      const pState = appState.gatewayPreviewState;
+      if (appState.gatewayPane === 'ssh') {
+        appendGatewaySshOutput(`${code}\n`);
+      } else {
+        pState.focusedWindow = 'auth';
+        pState.authInputText = code;
+        pState.authStatus = `[OK] Auto-typed ${digits}-digit 2FA (${label}): ${code}`;
+        pState.authStatusTone = 'ok';
+        pState.totpFlashUntil = Date.now() + 2400;
+        pState.tilesDecoded += 1;
+        updateGatewayHudMetrics({ fps: 30, rttMs: 1, kbPerSec: 196, tilesDecoded: pState.tilesDecoded });
+        renderGatewayPreviewCanvas();
+      }
+      appendGatewayLog(`Auto-typed ${digits}-digit 2FA code (${label}) into Interactive Browser Preview.`, 'ok');
+      showToast(`2FA code auto-typed into Preview (${label}).`, 'ok');
+      return;
+    }
+
     const sent =
       appState.gatewayPane === 'ssh'
-        ? client.sendSshData(evaluated.code)
-        : client.sendText(evaluated.code);
+        ? client.sendSshData(code)
+        : client.sendText(code);
     if (sent) {
-      const label = token.issuer || token.accountName || '2FA token';
-      appendGatewayLog(`Auto-typed live ${evaluated.digits}-digit 2FA code for ${label} via JSR1 input.`, 'ok');
+      appendGatewayLog(`Auto-typed live ${digits}-digit 2FA code for ${label} via JSR1 input.`, 'ok');
       showToast(`2FA code auto-typed for ${label}.`, 'ok');
     } else {
       showToast('Unable to send 2FA code: session is not holding input control.', 'danger');
@@ -3140,6 +4168,11 @@ async function refreshGatewaySftpList(overridePath) {
   const statusEl = byId('gateway-sftp-status');
   const listEl = byId('gateway-sftp-list');
   const pathInput = byId('gateway-sftp-path');
+  if (appState.gatewayPreviewActive && (!client || !client.connected)) {
+    if (overridePath !== undefined && pathInput) pathInput.value = overridePath;
+    renderGatewayPreviewSftpList();
+    return;
+  }
   if (!client || !client.connected) return;
 
   const targetPath = (overridePath !== undefined ? overridePath : pathInput?.value || '/').trim() || '/';
@@ -3482,7 +4515,7 @@ async function handleSaveConnection(event) {
   delete payload.tombstones[makeTombstoneKey('host', id)];
   payload.updatedAtMs = now;
 
-  await store.savePayload(payload);
+  await saveVaultPayload(payload);
   closeActiveModal();
   renderAllViews();
   showToast(existingId ? `Updated ${name}.` : `Added ${name}.`, 'ok');
@@ -3600,7 +4633,7 @@ async function handleSaveTotp(event) {
   delete payload.tombstones[makeTombstoneKey('totp', id)];
   payload.updatedAtMs = now;
 
-  await store.savePayload(payload);
+  await saveVaultPayload(payload);
   closeActiveModal();
   renderAllViews();
   showToast(existingId ? 'Updated 2FA token.' : 'Added 2FA token.', 'ok');
@@ -3674,7 +4707,7 @@ async function handleSaveCredential(event) {
   delete payload.tombstones[makeTombstoneKey('cred', id)];
   payload.updatedAtMs = now;
 
-  await store.savePayload(payload);
+  await saveVaultPayload(payload);
   closeActiveModal();
   renderAllViews();
   showToast(existingId ? `Updated ${label}.` : `Saved ${label}.`, 'ok');
@@ -3764,6 +4797,27 @@ function wireEventListeners() {
     }
   });
 
+  byId('btn-returning-google-unlock')?.addEventListener('click', () => {
+    handleReturningGoogleUnlock();
+  });
+
+  byId('btn-returning-gdrive-grant')?.addEventListener('click', () => {
+    const hint = appState.returningGdrivePendingEmail || ramSecrets.gdriveEmail || store.getUiPrefs().googleAccountEmail || '';
+    handleReturningGoogleUnlock({ loginHint: hint, prompt: 'consent' });
+  });
+
+  byId('btn-returning-use-passphrase')?.addEventListener('click', () => {
+    appState.returningPassphraseOverride = true;
+    setAlert('lock-error', '');
+    renderReturningLockMode({ focus: true });
+  });
+
+  byId('btn-returning-back-google')?.addEventListener('click', () => {
+    appState.returningPassphraseOverride = false;
+    setAlert('lock-error', '');
+    renderReturningLockMode({ focus: true });
+  });
+
   byId('btn-returning-import')?.addEventListener('click', () => {
     byId('lock-returning-panel').hidden = true;
     byId('lock-onboarding-panel').hidden = false;
@@ -3780,6 +4834,7 @@ function wireEventListeners() {
     byId('lock-onboarding-panel').hidden = true;
     byId('lock-returning-panel').hidden = false;
     setAlert('lock-error', '');
+    renderReturningLockMode({ focus: true });
   });
 
   byId('btn-returning-reset')?.addEventListener('click', () => {
@@ -3831,6 +4886,7 @@ function wireEventListeners() {
     try {
       applyAutoLockSelection(appState.onboardAutolock);
       await store.createVault(pass, createEmptyVaultPayload());
+      store.saveUiPrefs({ vaultAuthMode: 'passphrase', useCustomPassphrase: false });
       enterUnlockedShell(pass);
       showToast('Zero-knowledge AES-256-GCM vault created.', 'ok');
     } catch (err) {
@@ -3860,6 +4916,7 @@ function wireEventListeners() {
     }
     try {
       await store.importEnvelope(appState.lockImportFileText, pass, { mode: 'replace' });
+      store.saveUiPrefs({ vaultAuthMode: 'passphrase' });
       enterUnlockedShell(pass);
       showToast(`Imported ${appState.lockImportFileName || '.jvault backup'}.`, 'ok');
     } catch (err) {
@@ -3932,7 +4989,12 @@ function wireEventListeners() {
           mode: 'pullOnly',
         });
         ramSecrets.gistToken = token;
-        store.saveUiPrefs({ syncProvider: 'githubGist', githubGistId: result.gistId || gistId, lastSyncedAtMs: result.syncedAtMs });
+        store.saveUiPrefs({
+          syncProvider: 'githubGist',
+          vaultAuthMode: 'passphrase',
+          githubGistId: result.gistId || gistId,
+          lastSyncedAtMs: result.syncedAtMs,
+        });
       } else {
         const url = (byId('onboard-webdav-url')?.value || '').trim();
         const username = (byId('onboard-webdav-user')?.value || '').trim();
@@ -3946,7 +5008,13 @@ function wireEventListeners() {
           mode: 'pullOnly',
         });
         ramSecrets.webdavPassword = password;
-        store.saveUiPrefs({ syncProvider: 'webdav', webdavUrl: url, webdavUsername: username, lastSyncedAtMs: result.syncedAtMs });
+        store.saveUiPrefs({
+          syncProvider: 'webdav',
+          vaultAuthMode: 'passphrase',
+          webdavUrl: url,
+          webdavUsername: username,
+          lastSyncedAtMs: result.syncedAtMs,
+        });
       }
       await store.createVault(effectivePass, result.payload);
       enterUnlockedShell(effectivePass);
@@ -4032,7 +5100,11 @@ function wireEventListeners() {
     setSwitchState(byId('sync-custom-passphrase-switch'), appState.useCustomPassphrase);
     const wrap = byId('sync-custom-passphrase-wrap');
     if (wrap) wrap.hidden = !appState.useCustomPassphrase;
-    store.saveUiPrefs({ useCustomPassphrase: appState.useCustomPassphrase });
+    const prefUpdate = { useCustomPassphrase: appState.useCustomPassphrase };
+    if (appState.useCustomPassphrase) {
+      prefUpdate.vaultAuthMode = 'passphrase';
+    }
+    store.saveUiPrefs(prefUpdate);
   });
 
   byId('btn-sync-gdrive-signin')?.addEventListener('click', () => {
@@ -4088,6 +5160,7 @@ function wireEventListeners() {
       });
       appState.syncImportFileText = '';
       if (byId('sync-import-passphrase')) byId('sync-import-passphrase').value = '';
+      scheduleCloudAutoSync(CLOUD_AUTO_SYNC_DEBOUNCE_MS);
       renderAllViews();
       showToast(`Imported ${appState.syncImportFileName || '.jvault'} (${appState.importMode}).`, 'ok');
     } catch (err) {
@@ -4110,6 +5183,7 @@ function wireEventListeners() {
     try {
       await store.changePassphrase(nextPass);
       ramSecrets.unlockedPassphrase = nextPass;
+      store.saveUiPrefs({ vaultAuthMode: 'passphrase' });
       byId('new-vault-passphrase').value = '';
       byId('confirm-new-vault-passphrase').value = '';
       showToast('Local vault re-encrypted with new passphrase.', 'ok');
@@ -4119,6 +5193,25 @@ function wireEventListeners() {
   });
 
   // Web Gateway controls
+  byId('gateway-url-presets')?.addEventListener('click', (e) => {
+    const btn = e.target instanceof Element ? e.target.closest('[data-gw-preset]') : null;
+    if (!btn) return;
+    applyGatewayUrlPreset(btn.getAttribute('data-gw-preset') || LOCAL_GATEWAY_DEFAULT_URL);
+  });
+
+  byId('gateway-ws-url')?.addEventListener('input', () => {
+    syncGatewayUrlPresetsUi();
+  });
+
+  byId('btn-gateway-preview-demo')?.addEventListener('click', () => {
+    startGatewayInteractivePreview();
+  });
+
+  byId('btn-gateway-preview-setup')?.addEventListener('click', () => {
+    setGatewaySetupVisible(true);
+    byId('gateway-setup-grid')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+
   byId('gateway-auth-mode')?.addEventListener('click', (e) => {
     const btn = e.target instanceof Element ? e.target.closest('[data-gateway-auth]') : null;
     if (!btn) return;
@@ -4136,7 +5229,10 @@ function wireEventListeners() {
     appState.gatewayViewOnly = !appState.gatewayViewOnly;
     setSwitchState(byId('gateway-view-only-switch'), appState.gatewayViewOnly);
     updateGatewayTargetBadge();
-    if (appState.gatewayClient && appState.gatewayClient.connected) {
+    if (appState.gatewayPreviewActive) {
+      updateGatewayControlUi(!appState.gatewayViewOnly, appState.gatewayViewOnly);
+      renderGatewayPreviewCanvas();
+    } else if (appState.gatewayClient && appState.gatewayClient.connected) {
       if (appState.gatewayViewOnly) {
         appState.gatewayClient.releaseControl();
       } else {
@@ -4200,9 +5296,24 @@ function wireEventListeners() {
     const btn = e.target instanceof Element ? e.target.closest('[data-gateway-scale]') : null;
     if (!btn) return;
     setGatewayScaleMode(btn.getAttribute('data-gateway-scale') || 'fit');
+    if (appState.gatewayPreviewActive) {
+      renderGatewayPreviewCanvas();
+    }
   });
 
   byId('btn-gateway-control-toggle')?.addEventListener('click', () => {
+    if (appState.gatewayPreviewActive) {
+      const nextViewOnly = !appState.gatewayViewOnly;
+      updateGatewayControlUi(!nextViewOnly, nextViewOnly);
+      renderGatewayPreviewCanvas();
+      appendGatewayLog(
+        nextViewOnly
+          ? 'Preview switched to View-Only Observer mode.'
+          : 'Preview acquired exclusive interactive control.',
+        'ok',
+      );
+      return;
+    }
     const client = appState.gatewayClient;
     if (!client || !client.connected) return;
     if (client.hasControl && !client.viewOnly) {
@@ -4217,6 +5328,17 @@ function wireEventListeners() {
   });
 
   byId('btn-gateway-cad')?.addEventListener('click', () => {
+    if (appState.gatewayPreviewActive && appState.gatewayPreviewState) {
+      if (appState.gatewayViewOnly) {
+        showToast('Click Take Control before sending Ctrl+Alt+Del.', 'danger');
+        return;
+      }
+      appState.gatewayPreviewState.cadOverlay = !appState.gatewayPreviewState.cadOverlay;
+      appState.gatewayPreviewState.tilesDecoded += 1;
+      renderGatewayPreviewCanvas();
+      appendGatewayLog('Simulated Ctrl+Alt+Del sequence inside Interactive Browser Preview.', 'ok');
+      return;
+    }
     const client = appState.gatewayClient;
     if (!client || !client.connected) return;
     if (client.sendCtrlAltDel()) {
@@ -4247,9 +5369,19 @@ function wireEventListeners() {
   // SSH Terminal controls
   byId('form-gateway-ssh-input')?.addEventListener('submit', (e) => {
     e.preventDefault();
-    const client = appState.gatewayClient;
     const input = byId('gateway-ssh-input');
-    if (!client || !client.connected || !input) return;
+    if (!input) return;
+    if (appState.gatewayPreviewActive) {
+      if (appState.gatewayViewOnly) {
+        showToast('View-Only mode active. Click Take Control to send SSH commands.', 'danger');
+        return;
+      }
+      handleGatewayPreviewSshCommand(input.value);
+      input.value = '';
+      return;
+    }
+    const client = appState.gatewayClient;
+    if (!client || !client.connected) return;
     if (!client.canSendInput()) {
       showToast('View-Only mode active. Click Take Control to send SSH commands.', 'danger');
       return;
@@ -4260,6 +5392,14 @@ function wireEventListeners() {
   });
 
   byId('gateway-ssh-console')?.addEventListener('keydown', (e) => {
+    if (appState.gatewayPreviewActive) {
+      if (appState.gatewayViewOnly) return;
+      if (e.ctrlKey && e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        appendGatewaySshOutput('^C\n');
+      }
+      return;
+    }
     const client = appState.gatewayClient;
     if (!client || !client.connected || !client.canSendInput()) return;
     if (e.key === 'Enter') {
@@ -4278,6 +5418,10 @@ function wireEventListeners() {
   });
 
   byId('btn-gateway-ssh-ctrlc')?.addEventListener('click', () => {
+    if (appState.gatewayPreviewActive && !appState.gatewayViewOnly) {
+      appendGatewaySshOutput('^C\n');
+      return;
+    }
     const client = appState.gatewayClient;
     if (client && client.connected && client.canSendInput()) {
       client.sendSshData('\x03');
@@ -4454,15 +5598,31 @@ function wireEventListeners() {
   document.addEventListener('pointerdown', () => store.touchActivity(), { passive: true });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && store.isUnlocked() && appState.lockOnHidden) {
+    if (!document.hidden || !store.isUnlocked()) return;
+    if (appState.lockOnHidden) {
       store.lock();
       showLockScreen('Vault auto-locked immediately when tab lost visibility.');
+      return;
+    }
+    if (appState.cloudAutoSyncPending && hasActiveCloudSessionInRam()) {
+      flushCloudAutoSync({ background: true });
+    }
+  });
+
+  window.addEventListener('beforeunload', () => {
+    if (appState.cloudAutoSyncPending && store.isUnlocked() && hasActiveCloudSessionInRam()) {
+      flushCloudAutoSync({ background: true });
     }
   });
 
   store.onLock(() => {
     if (!byId('jala-web-app')?.hidden) {
-      showLockScreen('Vault auto-locked after inactivity. Enter passphrase to resume.');
+      const prefs = store.getUiPrefs();
+      const msg =
+        prefs.vaultAuthMode === 'googleAccount' && prefs.googleAccountEmail
+          ? 'Vault auto-locked after inactivity. Click Unlock & Sync with Google to resume.'
+          : 'Vault auto-locked after inactivity. Enter passphrase to resume.';
+      showLockScreen(msg);
     }
   });
 
