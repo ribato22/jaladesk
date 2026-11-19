@@ -16,6 +16,9 @@ export const MAX_TOMBSTONES = 500;
 
 export const GOOGLE_DRIVE_DEFAULT_API_BASE_URL = 'https://www.googleapis.com';
 export const GOOGLE_DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+export const GOOGLE_WEB_OAUTH_SCOPES = 'https://www.googleapis.com/auth/drive.appdata openid email profile';
+export const GOOGLE_GSI_CLIENT_SCRIPT_URL = 'https://accounts.google.com/gsi/client';
+export const GOOGLE_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
 export const GOOGLE_DRIVE_PRIMARY_VAULT_FILE = 'jaladesk-vault-v1.jvault';
 export const GOOGLE_DRIVE_ALT_VAULT_FILE = 'jaladesk_vault_sync_v1.jdesk';
 export const GOOGLE_DRIVE_APPDATA_MISSING_MESSAGE =
@@ -40,6 +43,7 @@ const ALLOWED_UI_PREF_KEYS = new Set([
   'useCustomPassphrase',
   'googleClientId',
   'googleAccountEmail',
+  'googleAccountName',
   'githubGistId',
   'webdavUrl',
   'webdavUsername',
@@ -974,6 +978,302 @@ export function hasGoogleDriveAppDataScope(scopeStr) {
   return trimmed.split(/\s+/).includes(GOOGLE_DRIVE_APPDATA_SCOPE);
 }
 
+let cachedGsiLoadPromise = null;
+
+/**
+ * Lazily loads Google Identity Services (`https://accounts.google.com/gsi/client`) on demand.
+ * Cached for the lifetime of the page; rejects cleanly offline without blocking PWA boot.
+ *
+ * @param {{ scriptUrl?: string, windowObj?: any, documentObj?: any }} [options]
+ * @returns {Promise<any>}
+ */
+export function loadGoogleIdentityServicesScript(options = {}) {
+  const win = options.windowObj ?? globalThis.window;
+  const doc = options.documentObj ?? globalThis.document;
+  const scriptUrl = (options.scriptUrl ?? GOOGLE_GSI_CLIENT_SCRIPT_URL).trim() || GOOGLE_GSI_CLIENT_SCRIPT_URL;
+  const isDefaultBrowserEnv = !options.windowObj && !options.documentObj && !options.scriptUrl;
+
+  if (win?.google?.accounts?.oauth2 && typeof win.google.accounts.oauth2.initTokenClient === 'function') {
+    return Promise.resolve(win.google);
+  }
+  if (!doc || typeof doc.createElement !== 'function') {
+    return Promise.reject(
+      new VaultCoreError('Google Identity Services requires a browser document context.', 'gdrive-gsi-unavailable'),
+    );
+  }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return Promise.reject(
+      new VaultCoreError(
+        'Offline — reconnect to the internet to sign in with Google.',
+        'gdrive-gsi-offline',
+      ),
+    );
+  }
+  if (isDefaultBrowserEnv && cachedGsiLoadPromise) {
+    return cachedGsiLoadPromise;
+  }
+
+  const loadPromise = new Promise((resolve, reject) => {
+    const finishReady = () => {
+      if (win?.google?.accounts?.oauth2 && typeof win.google.accounts.oauth2.initTokenClient === 'function') {
+        resolve(win.google);
+      } else {
+        if (isDefaultBrowserEnv) cachedGsiLoadPromise = null;
+        reject(
+          new VaultCoreError(
+            'Google Identity Services loaded without OAuth2 token client support.',
+            'gdrive-gsi-load-failed',
+          ),
+        );
+      }
+    };
+
+    const failLoad = () => {
+      if (isDefaultBrowserEnv) cachedGsiLoadPromise = null;
+      reject(
+        new VaultCoreError(
+          'Unable to load Google Sign-In script. Check your network connection or content blockers and try again.',
+          'gdrive-gsi-load-failed',
+        ),
+      );
+    };
+
+    const existing =
+      typeof doc.querySelector === 'function'
+        ? doc.querySelector(`script[src="${scriptUrl}"]`)
+        : null;
+    if (existing) {
+      if (win?.google?.accounts?.oauth2 && typeof win.google.accounts.oauth2.initTokenClient === 'function') {
+        resolve(win.google);
+        return;
+      }
+      existing.addEventListener('load', finishReady, { once: true });
+      existing.addEventListener('error', failLoad, { once: true });
+      return;
+    }
+
+    const script = doc.createElement('script');
+    script.src = scriptUrl;
+    script.async = true;
+    script.defer = true;
+    script.addEventListener('load', finishReady, { once: true });
+    script.addEventListener('error', failLoad, { once: true });
+    const targetParent = doc.head || doc.documentElement || doc.body;
+    if (!targetParent || typeof targetParent.appendChild !== 'function') {
+      failLoad();
+      return;
+    }
+    targetParent.appendChild(script);
+  });
+
+  if (isDefaultBrowserEnv) {
+    cachedGsiLoadPromise = loadPromise;
+  }
+  return loadPromise;
+}
+
+/**
+ * Launches a 1-click Google Identity Services OAuth2 browser popup and returns an ephemeral
+ * in-memory access token scoped to Google Drive AppData + OpenID profile.
+ *
+ * @param {{
+ *   clientId: string,
+ *   loginHint?: string,
+ *   prompt?: string,
+ *   scope?: string,
+ *   gsiLoader?: () => Promise<any>,
+ *   windowObj?: any,
+ * }} params
+ * @returns {Promise<{ accessToken: string, grantedScope: string, expiresInSec: number, hasAppDataScope: boolean }>}
+ */
+export async function requestGoogleWebAccessToken(params) {
+  const cleanClientId = typeof params?.clientId === 'string' ? params.clientId.trim() : '';
+  if (!cleanClientId) {
+    throw new VaultCoreError(
+      'Google Web OAuth Client ID is not configured.',
+      'gdrive-missing-client-id',
+    );
+  }
+  const cleanHint = typeof params?.loginHint === 'string' ? params.loginHint.trim() : '';
+  const cleanPrompt = typeof params?.prompt === 'string' ? params.prompt.trim() : '';
+  const cleanScope =
+    typeof params?.scope === 'string' && params.scope.trim().length > 0
+      ? params.scope.trim()
+      : GOOGLE_WEB_OAUTH_SCOPES;
+
+  const gsi =
+    typeof params?.gsiLoader === 'function'
+      ? await params.gsiLoader()
+      : await loadGoogleIdentityServicesScript({ windowObj: params?.windowObj });
+
+  const win = params?.windowObj ?? globalThis.window;
+  const oauth2 =
+    gsi?.accounts?.oauth2 ??
+    gsi?.oauth2 ??
+    (typeof gsi?.initTokenClient === 'function' ? gsi : null) ??
+    win?.google?.accounts?.oauth2 ??
+    null;
+
+  if (!oauth2 || typeof oauth2.initTokenClient !== 'function') {
+    throw new VaultCoreError(
+      'Google Identity Services OAuth2 token client is unavailable.',
+      'gdrive-gsi-unavailable',
+    );
+  }
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const settleResolve = (val) => {
+      if (settled) return;
+      settled = true;
+      resolve(val);
+    };
+    const settleReject = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
+    try {
+      const tokenClient = oauth2.initTokenClient({
+        client_id: cleanClientId,
+        scope: cleanScope,
+        include_granted_scopes: true,
+        ...(cleanHint ? { hint: cleanHint } : {}),
+        prompt: cleanPrompt,
+        callback: (response) => {
+          if (!response || typeof response !== 'object') {
+            settleReject(new VaultCoreError('Google Sign-In returned an empty response.', 'gdrive-oauth-error'));
+            return;
+          }
+          if (response.error) {
+            const code = String(response.error);
+            if (code === 'access_denied') {
+              settleReject(
+                new VaultCoreError('Google Sign-In was cancelled or access was denied.', 'gdrive-oauth-denied'),
+              );
+              return;
+            }
+            const desc =
+              typeof response.error_description === 'string' && response.error_description.trim()
+                ? `: ${response.error_description.trim()}`
+                : '';
+            settleReject(new VaultCoreError(`Google Sign-In error (${code})${desc}`, 'gdrive-oauth-error'));
+            return;
+          }
+          const accessToken = typeof response.access_token === 'string' ? response.access_token.trim() : '';
+          if (!accessToken) {
+            settleReject(new VaultCoreError('Google Sign-In did not return an access token.', 'gdrive-oauth-error'));
+            return;
+          }
+          const grantedScope = typeof response.scope === 'string' ? response.scope.trim() : '';
+          const rawExpires = Number(response.expires_in);
+          const expiresInSec = Number.isFinite(rawExpires) && rawExpires > 0 ? Math.trunc(rawExpires) : 3600;
+          settleResolve({
+            accessToken,
+            grantedScope,
+            expiresInSec,
+            hasAppDataScope: hasGoogleDriveAppDataScope(grantedScope),
+          });
+        },
+        error_callback: (err) => {
+          const type = typeof err?.type === 'string' ? err.type : '';
+          if (type === 'popup_closed') {
+            settleReject(new VaultCoreError('Google Sign-In popup was closed before completing.', 'gdrive-popup-closed'));
+            return;
+          }
+          if (type === 'popup_failed_to_open') {
+            settleReject(
+              new VaultCoreError(
+                'Browser blocked the Google Sign-In popup. Allow popups for this site and try again.',
+                'gdrive-popup-blocked',
+              ),
+            );
+            return;
+          }
+          const detail = typeof err?.message === 'string' && err.message.trim() ? err.message.trim() : type || 'unknown error';
+          settleReject(new VaultCoreError(`Google Sign-In failed: ${detail}`, 'gdrive-oauth-error'));
+        },
+      });
+
+      tokenClient.requestAccessToken({ prompt: cleanPrompt });
+    } catch (err) {
+      settleReject(
+        err instanceof VaultCoreError
+          ? err
+          : new VaultCoreError(
+              `Google Sign-In initialization failed: ${err instanceof Error ? err.message : String(err)}`,
+              'gdrive-oauth-error',
+            ),
+      );
+    }
+  });
+}
+
+/**
+ * Fetches the signed-in Google account's OpenID Connect identity (`email` and `displayName`)
+ * using an in-memory OAuth2 access token.
+ *
+ * @param {string} accessToken
+ * @param {{ userInfoUrl?: string, fetchImpl?: typeof fetch }} [options]
+ * @returns {Promise<{ email: string, displayName: string }>}
+ */
+export async function fetchGoogleUserInfo(accessToken, options = {}) {
+  const token = typeof accessToken === 'string' ? accessToken.trim() : '';
+  if (!token) {
+    throw new VaultCoreError('Google OAuth access token is required to fetch account info.', 'gdrive-missing-token');
+  }
+  const fetchFn = options.fetchImpl ?? globalThis.fetch;
+  const url = (options.userInfoUrl ?? GOOGLE_USERINFO_URL).trim() || GOOGLE_USERINFO_URL;
+  let res;
+  try {
+    res = await fetchFn(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+    });
+  } catch (err) {
+    throw new VaultCoreError(
+      `Network error fetching Google profile: ${err instanceof Error ? err.message : String(err)}`,
+      'gdrive-userinfo-network',
+    );
+  }
+  const text = await res.text();
+  if (res.status === 401) {
+    throw new VaultCoreError(
+      'Google session expired (HTTP 401). Sign in again to refresh authorization.',
+      'gdrive-http-401',
+      401,
+    );
+  }
+  if (res.status !== 200) {
+    throw new VaultCoreError(
+      `Google profile lookup failed (HTTP ${res.status}).`,
+      `gdrive-userinfo-http-${res.status}`,
+      res.status,
+    );
+  }
+  let decoded;
+  try {
+    decoded = JSON.parse(text);
+  } catch {
+    throw new VaultCoreError('Google profile endpoint returned invalid JSON.', 'gdrive-userinfo-invalid');
+  }
+  if (!isPlainObject(decoded)) {
+    throw new VaultCoreError('Google profile endpoint returned an unexpected payload.', 'gdrive-userinfo-invalid');
+  }
+  const email = typeof decoded.email === 'string' ? decoded.email.trim() : '';
+  const displayName =
+    typeof decoded.name === 'string' && decoded.name.trim().length > 0
+      ? decoded.name.trim()
+      : typeof decoded.given_name === 'string' && decoded.given_name.trim().length > 0
+        ? decoded.given_name.trim()
+        : '';
+  return { email, displayName };
+}
+
 function normalizeSyncMode(rawMode) {
   if (rawMode === 'pullOnly' || rawMode === 'pushForce' || rawMode === 'smartMerge') {
     return rawMode;
@@ -1594,10 +1894,11 @@ export async function syncWithWebDav(params) {
 
 const DEFAULT_UI_PREFS = Object.freeze({
   autoLockSeconds: 300,
-  syncProvider: 'githubGist',
+  syncProvider: 'googleDrive',
   useCustomPassphrase: false,
   googleClientId: '',
   googleAccountEmail: '',
+  googleAccountName: '',
   githubGistId: '',
   webdavUrl: '',
   webdavUsername: '',

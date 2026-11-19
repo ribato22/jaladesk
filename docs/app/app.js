@@ -1,17 +1,24 @@
 import {
-  GOOGLE_DRIVE_APPDATA_SCOPE,
   SealedBrowserVaultStore,
+  VaultCoreError,
   calculateTotpTiming,
   createEmptyVaultPayload,
   deriveGoogleAccountBoundPassphrase,
   evaluateTotpToken,
+  fetchGoogleUserInfo,
+  hasGoogleDriveAppDataScope,
   makeTombstoneKey,
   normalizeTotpSecretBase32,
   parseOtpAuthUri,
+  requestGoogleWebAccessToken,
   syncWithGithubGist,
   syncWithGoogleDriveAppData,
   syncWithWebDav,
 } from './vault-core.js';
+import {
+  GOOGLE_CLOUD_PROJECT_NUMBER,
+  resolveGoogleWebOAuthClientId,
+} from './web-oauth-config.js';
 import { JalaGatewayClient, normalizeGatewayEndpoints } from './gateway-client.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -62,6 +69,8 @@ const ramSecrets = {
   unlockedPassphrase: '',
   gdriveToken: '',
   gdriveScope: '',
+  gdriveEmail: '',
+  gdriveDisplayName: '',
   gistToken: '',
   webdavPassword: '',
   customSyncPassphrase: '',
@@ -76,7 +85,10 @@ const appState = {
   credKindFilter: 'all',
   onboardTab: 'create',
   onboardAutolock: '300',
-  onboardCloudProvider: 'githubGist',
+  onboardCloudProvider: 'googleDrive',
+  onboardGdriveCustomPass: false,
+  onboardGdrivePendingEmail: '',
+  gdriveAuthInFlight: false,
   lockOnHidden: false,
   importMode: 'merge',
   lockImportFileText: '',
@@ -321,8 +333,7 @@ function inspectUrlHash(isLiveChange = false) {
       appState.syncProvider = 'googleDrive';
       appState.activeView = 'sync';
       if (isLiveChange && store.isUnlocked()) {
-        const gToken = byId('sync-gdrive-token');
-        if (gToken) gToken.value = accessToken;
+        renderGoogleDriveStudioState();
         switchWorkspaceView('sync', true);
       }
     }
@@ -385,11 +396,16 @@ function zeroSensitiveInputsAndDom(options = {}) {
   ramSecrets.unlockedPassphrase = '';
   ramSecrets.gdriveToken = '';
   ramSecrets.gdriveScope = '';
+  ramSecrets.gdriveEmail = '';
+  ramSecrets.gdriveDisplayName = '';
   ramSecrets.gistToken = '';
   ramSecrets.webdavPassword = '';
   ramSecrets.customSyncPassphrase = '';
   ramSecrets.gatewayToken = pendingToken;
   ramSecrets.gatewayPairing = '';
+  appState.onboardGdrivePendingEmail = '';
+  appState.onboardGdriveCustomPass = false;
+  appState.gdriveAuthInFlight = false;
   appState.revealedCredIds.clear();
   appState.lockImportFileText = '';
   appState.syncImportFileText = '';
@@ -412,6 +428,7 @@ function zeroSensitiveInputsAndDom(options = {}) {
     'onboard-gist-token',
     'onboard-webdav-pass',
     'onboard-gdrive-token',
+    'onboard-gdrive-custom-passphrase',
     'onboard-cloud-passphrase',
     'sync-gdrive-token',
     'sync-gist-token',
@@ -492,6 +509,13 @@ function zeroSensitiveInputsAndDom(options = {}) {
   const previewCode = byId('totp-preview-code');
   if (previewCode) previewCode.textContent = '--- ---';
   setAlert('gateway-fragment-notice', '');
+  for (const calloutId of ['onboard-gdrive-scope-callout', 'onboard-gdrive-setup-note', 'sync-gdrive-callout']) {
+    const cNode = byId(calloutId);
+    if (cNode) cNode.hidden = true;
+  }
+  setSwitchState(byId('onboard-gdrive-custom-pass-switch'), false);
+  const onboardCustomWrap = byId('onboard-gdrive-custom-pass-wrap');
+  if (onboardCustomWrap) onboardCustomWrap.hidden = true;
 
   const gwBadge = byId('gateway-target-badge');
   if (gwBadge) gwBadge.textContent = 'DEMO SESSION · SYNTHETIC';
@@ -549,6 +573,8 @@ function showLockScreen(reasonMessage = '', options = {}) {
   if (resetConfirm) resetConfirm.hidden = true;
   setAlert('lock-error', '');
   setAlert('lock-info', reasonMessage);
+  updateOnboardCloudProviderUi('googleDrive');
+  hydrateOnboardGooglePrefs();
 
   if (hasVault) {
     const unlockInput = byId('unlock-passphrase');
@@ -604,11 +630,9 @@ function hydratePrefsIntoUi() {
   if (customWrap) customWrap.hidden = !appState.useCustomPassphrase;
 
   const gClient = byId('sync-gdrive-client-id');
-  if (gClient && prefs.googleClientId) gClient.value = prefs.googleClientId;
+  if (gClient) gClient.value = prefs.googleClientId || '';
   const gEmail = byId('sync-gdrive-email');
-  if (gEmail && prefs.googleAccountEmail) gEmail.value = prefs.googleAccountEmail;
-  const gToken = byId('sync-gdrive-token');
-  if (gToken && ramSecrets.gdriveToken) gToken.value = ramSecrets.gdriveToken;
+  if (gEmail) gEmail.value = prefs.googleAccountEmail || '';
   const gistId = byId('sync-gist-id');
   if (gistId && prefs.githubGistId) gistId.value = prefs.githubGistId;
   const gistToken = byId('sync-gist-token');
@@ -637,6 +661,7 @@ function hydratePrefsIntoUi() {
     setAlert('gateway-fragment-notice', 'URL fragment #token= was captured into RAM and scrubbed from browser history.');
   }
 
+  renderGoogleDriveStudioState();
   updateSecurityPill();
 }
 
@@ -717,6 +742,9 @@ function switchOnboardTab(tab) {
     form.hidden = form.getAttribute('data-onboard-panel') !== tab;
   }
   setAlert('lock-error', '');
+  if (tab === 'cloud') {
+    hydrateOnboardGooglePrefs();
+  }
 }
 
 function renderAllViews() {
@@ -727,6 +755,7 @@ function renderAllViews() {
   renderTotpView();
   renderCredentialsView();
   renderSyncExportSummary(payload);
+  renderGoogleDriveStudioState();
   renderGatewayTargets();
   updateSecurityPill();
 }
@@ -1264,6 +1293,110 @@ async function deleteCredential(credId) {
    View 4 — Zero-Knowledge Cloud Sync & .jvault Studio
    ========================================================================== */
 
+function getCurrentWebOrigin() {
+  const origin = window.location && typeof window.location.origin === 'string' ? window.location.origin : '';
+  return origin && origin !== 'null' ? origin : 'https://ribato22.github.io';
+}
+
+function updateOnboardCloudProviderUi(provider) {
+  const prov = provider === 'githubGist' || provider === 'webdav' ? provider : 'googleDrive';
+  appState.onboardCloudProvider = prov;
+  setSegmentedValue(byId('onboard-cloud-provider'), 'data-cloud-provider', prov);
+  for (const block of document.querySelectorAll('[data-onboard-provider-fields]')) {
+    block.hidden = block.getAttribute('data-onboard-provider-fields') !== prov;
+  }
+  const nonGoogleFooter = byId('onboard-non-google-footer');
+  if (nonGoogleFooter) {
+    nonGoogleFooter.hidden = prov === 'googleDrive';
+  }
+}
+
+function hydrateOnboardGooglePrefs() {
+  const prefs = store.getUiPrefs();
+  const originEl = byId('onboard-gdrive-origin');
+  if (originEl) originEl.textContent = getCurrentWebOrigin();
+  const clientInput = byId('onboard-gdrive-client-id');
+  if (clientInput && prefs.googleClientId && !clientInput.value) {
+    clientInput.value = prefs.googleClientId;
+  }
+  const emailInput = byId('onboard-gdrive-email');
+  if (emailInput && prefs.googleAccountEmail && !emailInput.value) {
+    emailInput.value = prefs.googleAccountEmail;
+  }
+  setSwitchState(byId('onboard-gdrive-custom-pass-switch'), appState.onboardGdriveCustomPass);
+  const customWrap = byId('onboard-gdrive-custom-pass-wrap');
+  if (customWrap) customWrap.hidden = !appState.onboardGdriveCustomPass;
+  updateOnboardCloudProviderUi(appState.onboardCloudProvider || 'googleDrive');
+}
+
+function setSyncGoogleCallout(opts = null) {
+  const box = byId('sync-gdrive-callout');
+  const titleEl = byId('sync-gdrive-callout-title');
+  const textEl = byId('sync-gdrive-callout-text');
+  const grantBtn = byId('btn-sync-gdrive-grant');
+  if (!box || !titleEl || !textEl) return;
+  if (!opts || !opts.text) {
+    box.hidden = true;
+    titleEl.textContent = '';
+    textEl.textContent = '';
+    if (grantBtn) grantBtn.hidden = true;
+    return;
+  }
+  const tone = ['warn', 'info', 'ok', 'danger'].includes(opts.tone) ? opts.tone : 'info';
+  box.className = `gdrive-callout gdrive-callout-${tone}`;
+  titleEl.textContent = opts.title || '';
+  textEl.textContent = opts.text;
+  if (grantBtn) grantBtn.hidden = !opts.showGrant;
+  box.hidden = false;
+}
+
+function renderGoogleDriveStudioState() {
+  const prefs = store.getUiPrefs();
+  const originEl = byId('sync-gdrive-origin');
+  if (originEl) originEl.textContent = getCurrentWebOrigin();
+
+  const email = (
+    ramSecrets.gdriveEmail ||
+    prefs.googleAccountEmail ||
+    (byId('sync-gdrive-email')?.value || '')
+  ).trim();
+  const displayName = (ramSecrets.gdriveDisplayName || prefs.googleAccountName || '').trim();
+  const hasToken = Boolean(ramSecrets.gdriveToken || (byId('sync-gdrive-token')?.value || '').trim());
+  const isBound = Boolean(email || hasToken);
+
+  const signedOutHero = byId('sync-gdrive-signed-out');
+  const accountBar = byId('sync-gdrive-account-bar');
+  if (signedOutHero) signedOutHero.hidden = isBound;
+  if (accountBar) accountBar.hidden = !isBound;
+  if (!isBound) return;
+
+  const avatar = byId('sync-gdrive-avatar');
+  if (avatar) {
+    const leadChar = ((displayName || email || 'G').trim().charAt(0) || 'G').toUpperCase();
+    avatar.textContent = leadChar;
+  }
+  const emailNode = byId('sync-gdrive-account-email');
+  if (emailNode) {
+    emailNode.textContent = email || 'Google Drive OAuth Session';
+  }
+  const pill = byId('sync-gdrive-account-pill');
+  const missingScope = Boolean(ramSecrets.gdriveToken && ramSecrets.gdriveScope && !hasGoogleDriveAppDataScope(ramSecrets.gdriveScope));
+  if (pill) {
+    pill.className = missingScope ? 'status-pill status-pill-warn' : 'status-pill status-pill-ok';
+    pill.textContent = missingScope ? 'Permission Needed' : 'Bound';
+  }
+  const sub = byId('sync-gdrive-account-sub');
+  if (sub) {
+    if (prefs.lastSyncedAtMs > 0) {
+      sub.textContent = `Google Drive AppData · Synced ${new Date(prefs.lastSyncedAtMs).toLocaleTimeString()}`;
+    } else if (hasToken) {
+      sub.textContent = 'Google Drive AppData · AES-256-GCM ready';
+    } else {
+      sub.textContent = 'Google Drive AppData · Click Sync or Reconnect';
+    }
+  }
+}
+
 function updateSyncProviderVisibility(provider) {
   for (const panel of document.querySelectorAll('[data-sync-provider-panel]')) {
     panel.hidden = panel.getAttribute('data-sync-provider-panel') !== provider;
@@ -1289,7 +1422,11 @@ function resolveEffectiveSyncPassphrase(provider) {
     return custom;
   }
   if (provider === 'googleDrive') {
-    const email = (byId('sync-gdrive-email')?.value || '').trim();
+    const email = (
+      ramSecrets.gdriveEmail ||
+      store.getUiPrefs().googleAccountEmail ||
+      (byId('sync-gdrive-email')?.value || '')
+    ).trim();
     if (email) {
       return deriveGoogleAccountBoundPassphrase(email);
     }
@@ -1300,6 +1437,31 @@ function resolveEffectiveSyncPassphrase(provider) {
   throw new Error('Vault passphrase unavailable. Unlock vault or enable Custom E2EE Passphrase.');
 }
 
+async function pullOrInitializeGoogleVault(accessToken, grantedScope, passphrase) {
+  try {
+    const pulled = await syncWithGoogleDriveAppData({
+      accessToken,
+      grantedScope: grantedScope || undefined,
+      localPayload: createEmptyVaultPayload(),
+      passphrase,
+      mode: 'pullOnly',
+    });
+    return { ...pulled, createdFresh: false };
+  } catch (err) {
+    if (err instanceof VaultCoreError && err.code === 'remote-vault-empty') {
+      const pushed = await syncWithGoogleDriveAppData({
+        accessToken,
+        grantedScope: grantedScope || undefined,
+        localPayload: createEmptyVaultPayload(),
+        passphrase,
+        mode: 'pushForce',
+      });
+      return { ...pushed, createdFresh: true };
+    }
+    throw err;
+  }
+}
+
 async function runCloudSync(mode) {
   if (appState.syncInFlight || !store.isUnlocked()) return;
   const payload = getPayloadSafe();
@@ -1307,6 +1469,17 @@ async function runCloudSync(mode) {
 
   const provider = appState.syncProvider;
   const statusMsg = byId('sync-status-message');
+
+  if (provider === 'googleDrive') {
+    const existingToken = (byId('sync-gdrive-token')?.value || ramSecrets.gdriveToken || '').trim();
+    if (!existingToken) {
+      const prefs = store.getUiPrefs();
+      const loginHint = (ramSecrets.gdriveEmail || prefs.googleAccountEmail || '').trim();
+      await handleStudioGoogleSignIn({ loginHint, prompt: '', autoSyncMode: mode });
+      return;
+    }
+  }
+
   appState.syncInFlight = true;
   if (statusMsg) statusMsg.textContent = `Running ${mode} with ${PROVIDER_LABELS[provider] || provider}...`;
 
@@ -1316,10 +1489,32 @@ async function runCloudSync(mode) {
 
     if (provider === 'googleDrive') {
       const token = (byId('sync-gdrive-token')?.value || ramSecrets.gdriveToken || '').trim();
-      const email = (byId('sync-gdrive-email')?.value || '').trim();
+      let email = (
+        ramSecrets.gdriveEmail ||
+        (byId('sync-gdrive-email')?.value || '') ||
+        store.getUiPrefs().googleAccountEmail ||
+        ''
+      ).trim();
       const clientId = (byId('sync-gdrive-client-id')?.value || '').trim();
       ramSecrets.gdriveToken = token;
-      store.saveUiPrefs({ syncProvider: 'googleDrive', googleAccountEmail: email, googleClientId: clientId, useCustomPassphrase: appState.useCustomPassphrase });
+      if (!email && token) {
+        try {
+          const info = await fetchGoogleUserInfo(token);
+          if (info.email) {
+            email = info.email;
+            ramSecrets.gdriveEmail = info.email;
+            ramSecrets.gdriveDisplayName = info.displayName;
+          }
+        } catch {
+          // Manual tokens without openid profile scope can still sync with passphrase
+        }
+      }
+      store.saveUiPrefs({
+        syncProvider: 'googleDrive',
+        googleAccountEmail: email,
+        googleClientId: clientId,
+        useCustomPassphrase: appState.useCustomPassphrase,
+      });
       result = await syncWithGoogleDriveAppData({
         accessToken: token,
         grantedScope: ramSecrets.gdriveScope || undefined,
@@ -1327,6 +1522,7 @@ async function runCloudSync(mode) {
         passphrase,
         mode,
       });
+      setSyncGoogleCallout(null);
     } else if (provider === 'githubGist') {
       const token = (byId('sync-gist-token')?.value || ramSecrets.gistToken || '').trim();
       const gistId = (byId('sync-gist-id')?.value || '').trim();
@@ -1367,32 +1563,340 @@ async function runCloudSync(mode) {
     const p = result.payload;
     const summary = `Sync (${mode}) complete via ${PROVIDER_LABELS[provider]} at ${new Date(result.syncedAtMs).toLocaleTimeString()} — ${(p.hosts || []).length} hosts, ${(p.totp || []).length} 2FA, ${(p.credentials || []).length} credentials.`;
     if (statusMsg) statusMsg.textContent = summary;
+    if (provider === 'googleDrive') {
+      setSyncGoogleCallout({
+        tone: 'ok',
+        title: 'Encrypted Sync Complete',
+        text: `${(p.hosts || []).length} hosts, ${(p.totp || []).length} 2FA tokens, and ${(p.credentials || []).length} credentials synced with Google Drive AppData.`,
+      });
+    }
     showToast(`${PROVIDER_LABELS[provider]} sync complete.`, 'ok');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (statusMsg) statusMsg.textContent = `Sync failed: ${msg}`;
+    if (provider === 'googleDrive') {
+      if (err instanceof VaultCoreError && err.code === 'gdrive-missing-scope') {
+        setSyncGoogleCallout({
+          tone: 'warn',
+          title: 'Google Drive Permission Needed',
+          text: 'Tick "See, create, and delete its own configuration data in your Google Drive" to complete sync.',
+          showGrant: true,
+        });
+      } else if (err instanceof VaultCoreError && err.code === 'gdrive-http-401') {
+        ramSecrets.gdriveToken = '';
+        ramSecrets.gdriveScope = '';
+        renderGoogleDriveStudioState();
+        setSyncGoogleCallout({
+          tone: 'warn',
+          title: 'Google Session Expired',
+          text: 'Your temporary browser OAuth token expired. Click Reconnect or Sync to refresh authorization.',
+        });
+      } else {
+        setSyncGoogleCallout({ tone: 'danger', title: 'Google Drive Sync Failed', text: msg });
+      }
+    }
     showToast(msg, 'danger');
   } finally {
     appState.syncInFlight = false;
   }
 }
 
-function launchGoogleOAuthPopup() {
-  const clientId = (byId('sync-gdrive-client-id')?.value || '').trim();
+async function handleOnboardGoogleSignIn(options = {}) {
+  if (appState.gdriveAuthInFlight) return;
+  setAlert('lock-error', '');
+  setAlert('lock-info', '');
+  const scopeCallout = byId('onboard-gdrive-scope-callout');
+  const setupNote = byId('onboard-gdrive-setup-note');
+  if (scopeCallout) scopeCallout.hidden = true;
+  if (setupNote) setupNote.hidden = true;
+
+  const prefs = store.getUiPrefs();
+  const customClientId = (byId('onboard-gdrive-client-id')?.value || '').trim();
+  if (customClientId && customClientId !== prefs.googleClientId) {
+    store.saveUiPrefs({ googleClientId: customClientId });
+  }
+  const clientId = resolveGoogleWebOAuthClientId(customClientId || prefs.googleClientId);
   if (!clientId) {
-    showToast('Enter a Google Web Client ID (GCP 749663705305) or paste an OAuth access token.', 'danger');
+    const originEl = byId('onboard-gdrive-origin');
+    if (originEl) originEl.textContent = getCurrentWebOrigin();
+    if (setupNote) setupNote.hidden = false;
+    const adv = byId('onboard-gdrive-advanced');
+    if (adv) adv.open = true;
+    byId('onboard-gdrive-client-id')?.focus();
     return;
   }
-  store.saveUiPrefs({ googleClientId: clientId });
-  const redirectUri = `${window.location.origin}${window.location.pathname}`;
-  const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-  authUrl.searchParams.set('client_id', clientId);
-  authUrl.searchParams.set('redirect_uri', redirectUri);
-  authUrl.searchParams.set('response_type', 'token');
-  authUrl.searchParams.set('scope', `${GOOGLE_DRIVE_APPDATA_SCOPE} openid email`);
-  authUrl.searchParams.set('include_granted_scopes', 'true');
-  authUrl.searchParams.set('prompt', 'consent');
-  window.open(authUrl.toString(), 'jaladesk-google-oauth', 'popup,width=520,height=640');
+
+  let customPass = '';
+  if (appState.onboardGdriveCustomPass) {
+    customPass = (byId('onboard-gdrive-custom-passphrase')?.value || '').trim();
+    if (customPass.length < 4) {
+      setAlert('lock-error', 'Custom E2EE passphrase must be at least 4 characters.');
+      byId('onboard-gdrive-custom-passphrase')?.focus();
+      return;
+    }
+  }
+
+  const signInBtn = byId('btn-onboard-gdrive-signin');
+  const signInLabel = byId('btn-onboard-gdrive-signin-label');
+  const grantBtn = byId('btn-onboard-gdrive-grant');
+  appState.gdriveAuthInFlight = true;
+  if (signInBtn) signInBtn.disabled = true;
+  if (grantBtn) grantBtn.disabled = true;
+  if (signInLabel) signInLabel.textContent = 'Signing in with Google...';
+
+  try {
+    const tokenRes = await requestGoogleWebAccessToken({
+      clientId,
+      loginHint: options.loginHint || '',
+      prompt: options.prompt || '',
+    });
+    ramSecrets.gdriveToken = tokenRes.accessToken;
+    ramSecrets.gdriveScope = tokenRes.grantedScope;
+
+    const userInfo = await fetchGoogleUserInfo(tokenRes.accessToken);
+    const email = userInfo.email;
+    const displayName = userInfo.displayName;
+    ramSecrets.gdriveEmail = email;
+    ramSecrets.gdriveDisplayName = displayName;
+    store.saveUiPrefs({
+      syncProvider: 'googleDrive',
+      googleAccountEmail: email,
+      googleAccountName: displayName,
+      googleClientId: customClientId || prefs.googleClientId,
+    });
+
+    if (!tokenRes.hasAppDataScope) {
+      appState.onboardGdrivePendingEmail = email;
+      const scopeText = byId('onboard-gdrive-scope-text');
+      if (scopeText) {
+        scopeText.textContent =
+          `Signed in as ${email || 'your Google account'}, but Google Drive AppData permission was left unchecked. Click below to grant access and unlock your vault.`;
+      }
+      if (scopeCallout) scopeCallout.hidden = false;
+      return;
+    }
+
+    const effectivePass = appState.onboardGdriveCustomPass
+      ? customPass
+      : deriveGoogleAccountBoundPassphrase(email);
+
+    let syncRes;
+    try {
+      syncRes = await pullOrInitializeGoogleVault(tokenRes.accessToken, tokenRes.grantedScope, effectivePass);
+    } catch (syncErr) {
+      if (syncErr instanceof VaultCoreError && syncErr.code === 'gdrive-missing-scope') {
+        appState.onboardGdrivePendingEmail = email;
+        if (scopeCallout) scopeCallout.hidden = false;
+        return;
+      }
+      if (syncErr instanceof VaultCoreError && syncErr.code === 'decrypt-failed' && !appState.onboardGdriveCustomPass) {
+        setAlert(
+          'lock-error',
+          'This Google Drive vault uses a Custom E2EE Passphrase. Toggle "Custom E2EE Passphrase" ON, enter it, and sign in again.',
+        );
+        return;
+      }
+      throw syncErr;
+    }
+
+    if (appState.onboardGdriveCustomPass) {
+      ramSecrets.customSyncPassphrase = customPass;
+    }
+    await store.createVault(effectivePass, syncRes.payload);
+    store.saveUiPrefs({
+      syncProvider: 'googleDrive',
+      googleAccountEmail: email,
+      googleAccountName: displayName,
+      useCustomPassphrase: appState.onboardGdriveCustomPass,
+      lastSyncedAtMs: syncRes.syncedAtMs,
+      activeView: 'connections',
+    });
+    enterUnlockedShell(effectivePass);
+    const h = (syncRes.payload.hosts || []).length;
+    const t = (syncRes.payload.totp || []).length;
+    showToast(
+      syncRes.createdFresh
+        ? `Signed in as ${email} — created encrypted Google Drive vault.`
+        : `Signed in as ${email} — unlocked ${h} hosts & ${t} 2FA tokens.`,
+      'ok',
+    );
+  } catch (err) {
+    setAlert('lock-error', err instanceof Error ? err.message : String(err));
+  } finally {
+    appState.gdriveAuthInFlight = false;
+    if (signInBtn) signInBtn.disabled = false;
+    if (grantBtn) grantBtn.disabled = false;
+    if (signInLabel) signInLabel.textContent = 'Sign in with Google';
+  }
+}
+
+async function handleOnboardGoogleManualPull() {
+  setAlert('lock-error', '');
+  const token = (byId('onboard-gdrive-token')?.value || '').trim();
+  if (!token) {
+    setAlert('lock-error', 'Paste a Google OAuth Access Token (ya29...) or use 1-Click Sign in with Google above.');
+    return;
+  }
+  let email = (byId('onboard-gdrive-email')?.value || '').trim();
+  let displayName = '';
+  if (!email) {
+    try {
+      const info = await fetchGoogleUserInfo(token);
+      email = info.email;
+      displayName = info.displayName;
+    } catch {
+      // Allow manual custom passphrase without userinfo scope
+    }
+  }
+  const customPass = appState.onboardGdriveCustomPass
+    ? (byId('onboard-gdrive-custom-passphrase')?.value || '').trim()
+    : '';
+  const effectivePass =
+    customPass.length >= 4
+      ? customPass
+      : email
+        ? deriveGoogleAccountBoundPassphrase(email)
+        : '';
+  if (effectivePass.length < 4) {
+    setAlert('lock-error', 'Enter your Google Account Email or toggle Custom E2EE Passphrase ON (min 4 chars).');
+    return;
+  }
+  const btn = byId('btn-onboard-gdrive-manual-submit');
+  if (btn) btn.disabled = true;
+  try {
+    const syncRes = await pullOrInitializeGoogleVault(token, '', effectivePass);
+    ramSecrets.gdriveToken = token;
+    ramSecrets.gdriveEmail = email;
+    ramSecrets.gdriveDisplayName = displayName;
+    await store.createVault(effectivePass, syncRes.payload);
+    store.saveUiPrefs({
+      syncProvider: 'googleDrive',
+      googleAccountEmail: email,
+      googleAccountName: displayName,
+      useCustomPassphrase: appState.onboardGdriveCustomPass,
+      lastSyncedAtMs: syncRes.syncedAtMs,
+      activeView: 'connections',
+    });
+    enterUnlockedShell(effectivePass);
+    showToast('Unlocked encrypted vault from Google Drive.', 'ok');
+  } catch (err) {
+    setAlert('lock-error', err instanceof Error ? err.message : String(err));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function handleStudioGoogleSignIn(options = {}) {
+  if (appState.gdriveAuthInFlight) return false;
+  setSyncGoogleCallout(null);
+
+  const prefs = store.getUiPrefs();
+  const customClientId = (byId('sync-gdrive-client-id')?.value || '').trim();
+  if (customClientId && customClientId !== prefs.googleClientId) {
+    store.saveUiPrefs({ googleClientId: customClientId });
+  }
+  const clientId = resolveGoogleWebOAuthClientId(customClientId || prefs.googleClientId);
+  if (!clientId) {
+    setSyncGoogleCallout({
+      tone: 'info',
+      title: 'Web OAuth Client ID Setup',
+      text:
+        `Add ${getCurrentWebOrigin()} as an Authorized JavaScript origin in GCP project ${GOOGLE_CLOUD_PROJECT_NUMBER} (Web application — no Client Secret needed), then paste the Client ID under Advanced below or set BUILTIN_GOOGLE_WEB_CLIENT_ID in web-oauth-config.js.`,
+    });
+    const adv = byId('sync-gdrive-advanced');
+    if (adv) adv.open = true;
+    byId('sync-gdrive-client-id')?.focus();
+    return false;
+  }
+
+  const signInBtn = byId('btn-sync-gdrive-signin');
+  const signInLabel = byId('btn-sync-gdrive-signin-label');
+  const reconnectBtn = byId('btn-sync-gdrive-reconnect');
+  const grantBtn = byId('btn-sync-gdrive-grant');
+  appState.gdriveAuthInFlight = true;
+  if (signInBtn) signInBtn.disabled = true;
+  if (reconnectBtn) reconnectBtn.disabled = true;
+  if (grantBtn) grantBtn.disabled = true;
+  if (signInLabel) signInLabel.textContent = 'Signing in with Google...';
+
+  try {
+    const tokenRes = await requestGoogleWebAccessToken({
+      clientId,
+      loginHint: options.loginHint || '',
+      prompt: options.prompt || '',
+    });
+    ramSecrets.gdriveToken = tokenRes.accessToken;
+    ramSecrets.gdriveScope = tokenRes.grantedScope;
+
+    const userInfo = await fetchGoogleUserInfo(tokenRes.accessToken);
+    const email = userInfo.email;
+    const displayName = userInfo.displayName;
+    ramSecrets.gdriveEmail = email;
+    ramSecrets.gdriveDisplayName = displayName;
+    const gEmailInput = byId('sync-gdrive-email');
+    if (gEmailInput && email) gEmailInput.value = email;
+
+    store.saveUiPrefs({
+      syncProvider: 'googleDrive',
+      googleAccountEmail: email,
+      googleAccountName: displayName,
+      googleClientId: customClientId || prefs.googleClientId,
+    });
+    renderGoogleDriveStudioState();
+    updateSecurityPill();
+
+    if (!tokenRes.hasAppDataScope) {
+      setSyncGoogleCallout({
+        tone: 'warn',
+        title: 'Google Drive Permission Needed',
+        text: 'Google Drive AppData permission was not ticked. Click Grant Drive Access & Sync to authorize and sync your encrypted vault.',
+        showGrant: true,
+      });
+      return false;
+    }
+
+    if (options.autoSyncMode) {
+      appState.gdriveAuthInFlight = false;
+      await runCloudSync(options.autoSyncMode);
+    } else {
+      setSyncGoogleCallout({
+        tone: 'ok',
+        title: 'Google Account Connected',
+        text: `Signed in as ${email || 'Google account'}. Click Smart Merge Sync to synchronize your encrypted vault.`,
+      });
+      showToast(`Signed in as ${email || 'Google account'}.`, 'ok');
+    }
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setSyncGoogleCallout({ tone: 'danger', title: 'Google Sign-In Failed', text: msg });
+    showToast(msg, 'danger');
+    return false;
+  } finally {
+    appState.gdriveAuthInFlight = false;
+    if (signInBtn) signInBtn.disabled = false;
+    if (reconnectBtn) reconnectBtn.disabled = false;
+    if (grantBtn) grantBtn.disabled = false;
+    if (signInLabel) signInLabel.textContent = 'Sign in with Google';
+  }
+}
+
+function handleStudioGoogleDisconnect() {
+  ramSecrets.gdriveToken = '';
+  ramSecrets.gdriveScope = '';
+  ramSecrets.gdriveEmail = '';
+  ramSecrets.gdriveDisplayName = '';
+  const gToken = byId('sync-gdrive-token');
+  if (gToken) gToken.value = '';
+  const gEmail = byId('sync-gdrive-email');
+  if (gEmail) gEmail.value = '';
+  store.saveUiPrefs({ googleAccountEmail: '', googleAccountName: '' });
+  setSyncGoogleCallout(null);
+  renderGoogleDriveStudioState();
+  updateSecurityPill();
+  const statusMsg = byId('sync-status-message');
+  if (statusMsg) statusMsg.textContent = 'Disconnected Google account. Local encrypted vault remains sealed in browser storage.';
+  showToast('Disconnected Google Drive account.', 'ok');
 }
 
 async function handleExportJvault() {
@@ -2662,28 +3166,51 @@ function wireEventListeners() {
   byId('onboard-cloud-provider')?.addEventListener('click', (e) => {
     const btn = e.target instanceof Element ? e.target.closest('[data-cloud-provider]') : null;
     if (!btn) return;
-    const prov = btn.getAttribute('data-cloud-provider') || 'githubGist';
-    appState.onboardCloudProvider = prov;
-    setSegmentedValue(byId('onboard-cloud-provider'), 'data-cloud-provider', prov);
-    for (const block of document.querySelectorAll('[data-onboard-provider-fields]')) {
-      block.hidden = block.getAttribute('data-onboard-provider-fields') !== prov;
+    const prov = btn.getAttribute('data-cloud-provider') || 'googleDrive';
+    updateOnboardCloudProviderUi(prov);
+    setAlert('lock-error', '');
+  });
+
+  byId('onboard-gdrive-custom-pass-switch')?.addEventListener('click', () => {
+    appState.onboardGdriveCustomPass = !appState.onboardGdriveCustomPass;
+    setSwitchState(byId('onboard-gdrive-custom-pass-switch'), appState.onboardGdriveCustomPass);
+    const wrap = byId('onboard-gdrive-custom-pass-wrap');
+    if (wrap) wrap.hidden = !appState.onboardGdriveCustomPass;
+    if (appState.onboardGdriveCustomPass) {
+      byId('onboard-gdrive-custom-passphrase')?.focus();
     }
+  });
+
+  byId('onboard-gdrive-client-id')?.addEventListener('change', (e) => {
+    const val = (e.target.value || '').trim();
+    store.saveUiPrefs({ googleClientId: val });
+  });
+
+  byId('btn-onboard-gdrive-signin')?.addEventListener('click', () => {
+    handleOnboardGoogleSignIn();
+  });
+
+  byId('btn-onboard-gdrive-grant')?.addEventListener('click', () => {
+    const hint = appState.onboardGdrivePendingEmail || ramSecrets.gdriveEmail || store.getUiPrefs().googleAccountEmail || '';
+    handleOnboardGoogleSignIn({ loginHint: hint, prompt: 'consent' });
+  });
+
+  byId('btn-onboard-gdrive-manual-submit')?.addEventListener('click', () => {
+    handleOnboardGoogleManualPull();
   });
 
   byId('form-onboard-cloud')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     setAlert('lock-error', '');
     const prov = appState.onboardCloudProvider;
-    const manualPass = (byId('onboard-cloud-passphrase')?.value || '').trim();
-    const gEmail = (byId('onboard-gdrive-email')?.value || '').trim();
-    const effectivePass =
-      manualPass.length >= 4
-        ? manualPass
-        : prov === 'googleDrive' && gEmail
-          ? deriveGoogleAccountBoundPassphrase(gEmail)
-          : '';
+    if (prov === 'googleDrive') {
+      await handleOnboardGoogleSignIn();
+      return;
+    }
+
+    const effectivePass = (byId('onboard-cloud-passphrase')?.value || '').trim();
     if (effectivePass.length < 4) {
-      setAlert('lock-error', 'Enter a vault E2EE passphrase (min 4 chars) or Google email for account-bound decryption.');
+      setAlert('lock-error', 'Enter a vault E2EE passphrase (min 4 characters).');
       return;
     }
 
@@ -2701,7 +3228,7 @@ function wireEventListeners() {
         });
         ramSecrets.gistToken = token;
         store.saveUiPrefs({ syncProvider: 'githubGist', githubGistId: result.gistId || gistId, lastSyncedAtMs: result.syncedAtMs });
-      } else if (prov === 'webdav') {
+      } else {
         const url = (byId('onboard-webdav-url')?.value || '').trim();
         const username = (byId('onboard-webdav-user')?.value || '').trim();
         const password = byId('onboard-webdav-pass')?.value || '';
@@ -2715,16 +3242,6 @@ function wireEventListeners() {
         });
         ramSecrets.webdavPassword = password;
         store.saveUiPrefs({ syncProvider: 'webdav', webdavUrl: url, webdavUsername: username, lastSyncedAtMs: result.syncedAtMs });
-      } else {
-        const token = (byId('onboard-gdrive-token')?.value || '').trim();
-        result = await syncWithGoogleDriveAppData({
-          accessToken: token,
-          localPayload: createEmptyVaultPayload(),
-          passphrase: effectivePass,
-          mode: 'pullOnly',
-        });
-        ramSecrets.gdriveToken = token;
-        store.saveUiPrefs({ syncProvider: 'googleDrive', googleAccountEmail: gEmail, lastSyncedAtMs: result.syncedAtMs });
       }
       await store.createVault(effectivePass, result.payload);
       enterUnlockedShell(effectivePass);
@@ -2813,7 +3330,27 @@ function wireEventListeners() {
     store.saveUiPrefs({ useCustomPassphrase: appState.useCustomPassphrase });
   });
 
-  byId('btn-gdrive-oauth')?.addEventListener('click', launchGoogleOAuthPopup);
+  byId('btn-sync-gdrive-signin')?.addEventListener('click', () => {
+    handleStudioGoogleSignIn({ autoSyncMode: 'smartMerge' });
+  });
+  byId('btn-sync-gdrive-reconnect')?.addEventListener('click', () => {
+    const hint = ramSecrets.gdriveEmail || store.getUiPrefs().googleAccountEmail || '';
+    handleStudioGoogleSignIn({ loginHint: hint, prompt: 'consent', autoSyncMode: 'smartMerge' });
+  });
+  byId('btn-sync-gdrive-grant')?.addEventListener('click', () => {
+    const hint = ramSecrets.gdriveEmail || store.getUiPrefs().googleAccountEmail || '';
+    handleStudioGoogleSignIn({ loginHint: hint, prompt: 'consent', autoSyncMode: 'smartMerge' });
+  });
+  byId('btn-sync-gdrive-disconnect')?.addEventListener('click', handleStudioGoogleDisconnect);
+  byId('sync-gdrive-client-id')?.addEventListener('change', (e) => {
+    store.saveUiPrefs({ googleClientId: (e.target.value || '').trim() });
+  });
+  byId('sync-gdrive-email')?.addEventListener('change', (e) => {
+    const email = (e.target.value || '').trim();
+    ramSecrets.gdriveEmail = email;
+    store.saveUiPrefs({ googleAccountEmail: email });
+    renderGoogleDriveStudioState();
+  });
   byId('btn-sync-merge')?.addEventListener('click', () => runCloudSync('smartMerge'));
   byId('btn-sync-pull')?.addEventListener('click', () => runCloudSync('pullOnly'));
   byId('btn-sync-push')?.addEventListener('click', () => runCloudSync('pushForce'));
@@ -3131,8 +3668,8 @@ function wireEventListeners() {
     if (event.data && event.data.type === 'jaladesk-gdrive-oauth' && typeof event.data.accessToken === 'string') {
       ramSecrets.gdriveToken = event.data.accessToken;
       ramSecrets.gdriveScope = typeof event.data.scope === 'string' ? event.data.scope : '';
-      const tokenInput = byId('sync-gdrive-token');
-      if (tokenInput) tokenInput.value = ramSecrets.gdriveToken;
+      renderGoogleDriveStudioState();
+      updateSecurityPill();
       showToast('Google OAuth token captured in memory. Click Smart Merge Sync.', 'ok');
     }
   });

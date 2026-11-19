@@ -129,6 +129,23 @@ interface VaultCoreModule {
     period?: number;
   }): string;
   hasGoogleDriveAppDataScope(scopeStr: string | undefined | null): boolean;
+  requestGoogleWebAccessToken(params: {
+    clientId: string;
+    loginHint?: string;
+    prompt?: string;
+    scope?: string;
+    gsiLoader?: () => Promise<unknown>;
+    windowObj?: unknown;
+  }): Promise<{
+    accessToken: string;
+    grantedScope: string;
+    expiresInSec: number;
+    hasAppDataScope: boolean;
+  }>;
+  fetchGoogleUserInfo(
+    accessToken: string,
+    options?: { userInfoUrl?: string; fetchImpl?: typeof fetch },
+  ): Promise<{ email: string; displayName: string }>;
   syncWithGoogleDriveAppData(params: {
     accessToken: string;
     localPayload: Record<string, unknown>;
@@ -192,7 +209,18 @@ interface VaultCoreModule {
   }) => WebSealedStoreInstance;
 }
 
+interface WebOAuthConfigModule {
+  GOOGLE_CLOUD_PROJECT_NUMBER: string;
+  BUILTIN_GOOGLE_WEB_CLIENT_ID: string;
+  resolveGoogleWebOAuthClientId(
+    customClientId?: string | null,
+    options?: { builtinClientId?: string },
+  ): string;
+}
+
 const VAULT_CORE_URL = new URL('../../docs/app/vault-core.js', import.meta.url);
+const WEB_OAUTH_CONFIG_URL = new URL('../../docs/app/web-oauth-config.js', import.meta.url);
+const INDEX_HTML_URL = new URL('../../docs/app/index.html', import.meta.url);
 const MANIFEST_URL = new URL('../../docs/app/manifest.webmanifest', import.meta.url);
 const SW_URL = new URL('../../docs/app/sw.js', import.meta.url);
 
@@ -200,6 +228,12 @@ let cachedCore: Promise<VaultCoreModule> | null = null;
 function loadVaultCore(): Promise<VaultCoreModule> {
   cachedCore ??= import(VAULT_CORE_URL.href) as Promise<VaultCoreModule>;
   return cachedCore;
+}
+
+let cachedWebOAuthConfig: Promise<WebOAuthConfigModule> | null = null;
+function loadWebOAuthConfig(): Promise<WebOAuthConfigModule> {
+  cachedWebOAuthConfig ??= import(WEB_OAUTH_CONFIG_URL.href) as Promise<WebOAuthConfigModule>;
+  return cachedWebOAuthConfig;
 }
 
 function createMemoryStorage(): MemoryStorage {
@@ -1131,10 +1165,301 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
   }
 
   const swRaw = await readFile(fileURLToPath(SW_URL), 'utf8');
-  for (const asset of ['./', './index.html', './app.css', './app.js', './vault-core.js', './manifest.webmanifest']) {
+  for (const asset of [
+    './',
+    './index.html',
+    './app.css',
+    './app.js',
+    './vault-core.js',
+    './web-oauth-config.js',
+    './manifest.webmanifest',
+  ]) {
     assert.ok(swRaw.includes(`'${asset}'`), `sw.js must precache ${asset}`);
   }
   assert.ok(swRaw.includes('www.googleapis.com'));
+  assert.ok(swRaw.includes('accounts.google.com'));
+  assert.ok(swRaw.includes('googleapis.com'));
   assert.ok(swRaw.includes('api.github.com'));
   assert.ok(swRaw.includes('Authorization'));
+
+  const indexRaw = await readFile(fileURLToPath(INDEX_HTML_URL), 'utf8');
+  assert.ok(indexRaw.includes('https://accounts.google.com/gsi/client'), 'CSP must allow GIS client script');
+  assert.ok(indexRaw.includes('frame-src https://accounts.google.com'), 'CSP must allow GIS popup frame');
+  assert.ok(indexRaw.includes('https://accounts.google.com/gsi/style'), 'CSP must allow GIS style');
+});
+
+test('g. 1-click Google Web OAuth config, fetchGoogleUserInfo & GIS sign-in flow with zero token persistence', async () => {
+  const core = await loadVaultCore();
+  const oauthCfg = await loadWebOAuthConfig();
+
+  // 1. resolveGoogleWebOAuthClientId precedence
+  assert.equal(oauthCfg.GOOGLE_CLOUD_PROJECT_NUMBER, '749663705305');
+  assert.equal(oauthCfg.BUILTIN_GOOGLE_WEB_CLIENT_ID, '');
+  assert.equal(oauthCfg.resolveGoogleWebOAuthClientId(), '');
+  assert.equal(oauthCfg.resolveGoogleWebOAuthClientId('   '), '');
+  assert.equal(
+    oauthCfg.resolveGoogleWebOAuthClientId('  749663705305-custom.apps.googleusercontent.com  '),
+    '749663705305-custom.apps.googleusercontent.com',
+  );
+  assert.equal(
+    oauthCfg.resolveGoogleWebOAuthClientId('', { builtinClientId: '749663705305-builtin.apps.googleusercontent.com' }),
+    '749663705305-builtin.apps.googleusercontent.com',
+  );
+  assert.equal(
+    oauthCfg.resolveGoogleWebOAuthClientId('749663705305-override.apps.googleusercontent.com', {
+      builtinClientId: '749663705305-builtin.apps.googleusercontent.com',
+    }),
+    '749663705305-override.apps.googleusercontent.com',
+  );
+
+  // 2. fetchGoogleUserInfo against loopback OpenID Connect endpoint
+  let userInfoMode: 'full' | 'givenOnly' | '401' = 'full';
+  const userInfoServer = await startLoopbackServer((req, res) => {
+    if (req.headers.authorization !== 'Bearer ya29.live-web-token' || userInfoMode === '401') {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid_token' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (userInfoMode === 'givenOnly') {
+      res.end(JSON.stringify({ email: 'ops@jaladesk.io', given_name: 'Ops' }));
+      return;
+    }
+    res.end(JSON.stringify({ email: 'ribato@jaladesk.io', name: 'Ribato Operator' }));
+  });
+
+  try {
+    const info = await core.fetchGoogleUserInfo('ya29.live-web-token', {
+      userInfoUrl: `${userInfoServer.baseUrl}/v1/userinfo`,
+    });
+    assert.deepStrictEqual(info, { email: 'ribato@jaladesk.io', displayName: 'Ribato Operator' });
+
+    userInfoMode = 'givenOnly';
+    const givenInfo = await core.fetchGoogleUserInfo('ya29.live-web-token', {
+      userInfoUrl: `${userInfoServer.baseUrl}/v1/userinfo`,
+    });
+    assert.deepStrictEqual(givenInfo, { email: 'ops@jaladesk.io', displayName: 'Ops' });
+
+    userInfoMode = '401';
+    await assert.rejects(
+      () => core.fetchGoogleUserInfo('ya29.live-web-token', { userInfoUrl: `${userInfoServer.baseUrl}/v1/userinfo` }),
+      (err: unknown) => err instanceof core.VaultCoreError && err.code === 'gdrive-http-401' && err.statusCode === 401,
+    );
+
+    await assert.rejects(
+      () => core.fetchGoogleUserInfo('   ', { userInfoUrl: `${userInfoServer.baseUrl}/v1/userinfo` }),
+      (err: unknown) => err instanceof core.VaultCoreError && err.code === 'gdrive-missing-token',
+    );
+  } finally {
+    await userInfoServer.close();
+  }
+
+  // 3. requestGoogleWebAccessToken (1-click GIS Token Client flow)
+  await assert.rejects(
+    () => core.requestGoogleWebAccessToken({ clientId: '   ' }),
+    (err: unknown) => err instanceof core.VaultCoreError && err.code === 'gdrive-missing-client-id',
+  );
+
+  const capturedInitCalls: Array<Record<string, unknown>> = [];
+  const capturedRequestCalls: Array<Record<string, unknown>> = [];
+
+  const fullGrant = await core.requestGoogleWebAccessToken({
+    clientId: '749663705305-web.apps.googleusercontent.com',
+    loginHint: 'ribato@jaladesk.io',
+    prompt: '',
+    gsiLoader: async () => ({
+      accounts: {
+        oauth2: {
+          initTokenClient(cfg: Record<string, unknown>) {
+            capturedInitCalls.push(cfg);
+            return {
+              requestAccessToken(reqOpts: Record<string, unknown>) {
+                capturedRequestCalls.push(reqOpts);
+                const cb = cfg.callback as (resp: Record<string, unknown>) => void;
+                cb({
+                  access_token: 'ya29.gis-full-token',
+                  scope: 'openid email profile https://www.googleapis.com/auth/drive.appdata',
+                  expires_in: 3599,
+                });
+              },
+            };
+          },
+        },
+      },
+    }),
+  });
+
+  assert.equal(capturedInitCalls.length, 1);
+  assert.equal(capturedInitCalls[0].client_id, '749663705305-web.apps.googleusercontent.com');
+  assert.equal(capturedInitCalls[0].scope, 'https://www.googleapis.com/auth/drive.appdata openid email profile');
+  assert.equal(capturedInitCalls[0].include_granted_scopes, true);
+  assert.equal(capturedInitCalls[0].hint, 'ribato@jaladesk.io');
+  assert.deepStrictEqual(capturedRequestCalls[0], { prompt: '' });
+  assert.deepStrictEqual(fullGrant, {
+    accessToken: 'ya29.gis-full-token',
+    grantedScope: 'openid email profile https://www.googleapis.com/auth/drive.appdata',
+    expiresInSec: 3599,
+    hasAppDataScope: true,
+  });
+
+  // Unchecked drive.appdata checkbox in consent popup -> hasAppDataScope: false (triggers 1-click re-consent)
+  const partialGrant = await core.requestGoogleWebAccessToken({
+    clientId: '749663705305-web.apps.googleusercontent.com',
+    gsiLoader: async () => ({
+      accounts: {
+        oauth2: {
+          initTokenClient(cfg: Record<string, unknown>) {
+            return {
+              requestAccessToken() {
+                const cb = cfg.callback as (resp: Record<string, unknown>) => void;
+                cb({
+                  access_token: 'ya29.gis-no-drive-scope',
+                  scope: 'openid email profile',
+                  expires_in: 3600,
+                });
+              },
+            };
+          },
+        },
+      },
+    }),
+  });
+  assert.equal(partialGrant.hasAppDataScope, false);
+  assert.equal(partialGrant.accessToken, 'ya29.gis-no-drive-scope');
+
+  // Popup closed & access denied error mapping
+  await assert.rejects(
+    () =>
+      core.requestGoogleWebAccessToken({
+        clientId: '749663705305-web.apps.googleusercontent.com',
+        gsiLoader: async () => ({
+          accounts: {
+            oauth2: {
+              initTokenClient(cfg: Record<string, unknown>) {
+                return {
+                  requestAccessToken() {
+                    const errCb = cfg.error_callback as (err: Record<string, unknown>) => void;
+                    errCb({ type: 'popup_closed' });
+                  },
+                };
+              },
+            },
+          },
+        }),
+      }),
+    (err: unknown) => err instanceof core.VaultCoreError && err.code === 'gdrive-popup-closed',
+  );
+
+  await assert.rejects(
+    () =>
+      core.requestGoogleWebAccessToken({
+        clientId: '749663705305-web.apps.googleusercontent.com',
+        gsiLoader: async () => ({
+          accounts: {
+            oauth2: {
+              initTokenClient(cfg: Record<string, unknown>) {
+                return {
+                  requestAccessToken() {
+                    const cb = cfg.callback as (resp: Record<string, unknown>) => void;
+                    cb({ error: 'access_denied' });
+                  },
+                };
+              },
+            },
+          },
+        }),
+      }),
+    (err: unknown) => err instanceof core.VaultCoreError && err.code === 'gdrive-oauth-denied',
+  );
+
+  // 4. End-to-end 1-click Google Sign-In -> Pull Desktop-encrypted vault -> Local Sealed Store (ZERO token in storage!)
+  const accountEmail = 'ribato@jaladesk.io';
+  const accountBoundPass = core.deriveGoogleAccountBoundPassphrase(accountEmail);
+  const desktopSealedForAccount = EncryptedVaultBackupCodec.sealJson({
+    payload: buildSampleVaultPayload() as unknown as Record<string, unknown>,
+    passphrase: accountBoundPass,
+  });
+
+  const e2eServer = await startLoopbackServer((req, res) => {
+    if (req.headers.authorization !== 'Bearer ya29.ephemeral-ram-only-secret') {
+      res.writeHead(401);
+      res.end();
+      return;
+    }
+    const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+    if (reqUrl.pathname === '/v1/userinfo') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ email: accountEmail, name: 'Ribato' }));
+      return;
+    }
+    if (reqUrl.pathname === '/drive/v3/files') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ files: [{ id: 'file-1click-01', name: GOOGLE_DRIVE_PRIMARY_VAULT_FILE }] }));
+      return;
+    }
+    if (reqUrl.pathname === '/drive/v3/files/file-1click-01' && reqUrl.searchParams.get('alt') === 'media') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(desktopSealedForAccount);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  try {
+    const tokenResult = await core.requestGoogleWebAccessToken({
+      clientId: '749663705305-web.apps.googleusercontent.com',
+      gsiLoader: async () => ({
+        accounts: {
+          oauth2: {
+            initTokenClient(cfg: Record<string, unknown>) {
+              return {
+                requestAccessToken() {
+                  (cfg.callback as (r: Record<string, unknown>) => void)({
+                    access_token: 'ya29.ephemeral-ram-only-secret',
+                    scope: 'https://www.googleapis.com/auth/drive.appdata openid email profile',
+                    expires_in: 3600,
+                  });
+                },
+              };
+            },
+          },
+        },
+      }),
+    });
+    assert.equal(tokenResult.hasAppDataScope, true);
+
+    const profile = await core.fetchGoogleUserInfo(tokenResult.accessToken, {
+      userInfoUrl: `${e2eServer.baseUrl}/v1/userinfo`,
+    });
+    const derivedKey = core.deriveGoogleAccountBoundPassphrase(profile.email);
+    const pulled = await core.syncWithGoogleDriveAppData({
+      accessToken: tokenResult.accessToken,
+      grantedScope: tokenResult.grantedScope,
+      localPayload: core.createEmptyVaultPayload(),
+      passphrase: derivedKey,
+      mode: 'pullOnly',
+      apiBaseUrl: e2eServer.baseUrl,
+    });
+    assert.equal(pulled.payload.hosts.length, 2);
+    assert.equal(pulled.payload.totp.length, 1);
+
+    const storage = createMemoryStorage();
+    const store = new core.SealedBrowserVaultStore({ storage });
+    await store.createVault(derivedKey, pulled.payload as unknown as Record<string, unknown>);
+    store.saveUiPrefs({
+      syncProvider: 'googleDrive',
+      googleAccountEmail: profile.email,
+      googleAccountName: profile.displayName,
+      lastSyncedAtMs: pulled.syncedAtMs,
+    });
+
+    const storageDump = JSON.stringify(storage.dump());
+    assert.equal(storageDump.includes('ya29.ephemeral-ram-only-secret'), false, 'OAuth token MUST NEVER touch storage');
+    assert.equal(storageDump.includes(derivedKey), false, 'Derived passphrase MUST NEVER touch storage');
+    assert.equal(storageDump.includes('BastionSecret#99'), false, 'Plaintext vault secret MUST NEVER touch storage');
+    assert.equal(store.getUiPrefs().syncProvider, 'googleDrive');
+  } finally {
+    await e2eServer.close();
+  }
 });

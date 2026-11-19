@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#05080F">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://www.googleapis.com https://accounts.google.com https://oauth2.googleapis.com https://openidconnect.googleapis.com https://api.github.com https: wss: ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*; manifest-src 'self'; worker-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' https://fonts.googleapis.com https://accounts.google.com/gsi/style; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; frame-src https://accounts.google.com; connect-src 'self' https: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* wss:; manifest-src 'self'; worker-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none';">
   <title>JalaDesk Web — Zero-Knowledge Vault, 2FA &amp; Web Gateway</title>
   <meta name="description" content="Installable zero-knowledge JalaDesk Web Companion PWA with client-side AES-256-GCM encrypted vault, RFC 6238 2FA authenticator, Cloud Sync, and self-hosted Web Gateway console.">
   <link rel="manifest" href="./manifest.webmanifest">
@@ -205,14 +205,104 @@
             <div class="field-group">
               <span class="field-label">Cloud Provider</span>
               <div class="segmented-control" role="radiogroup" aria-label="Onboarding cloud provider" id="onboard-cloud-provider">
-                <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-cloud-provider="githubGist">GitHub Gist</button>
+                <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-cloud-provider="googleDrive">Google Drive</button>
+                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-cloud-provider="githubGist">GitHub Gist</button>
                 <button class="seg-btn" type="button" role="radio" aria-checked="false" data-cloud-provider="webdav">WebDAV</button>
-                <button class="seg-btn" type="button" role="radio" aria-checked="false" data-cloud-provider="googleDrive">Google Drive</button>
               </div>
             </div>
 
+            <!-- Google Drive 1-Click Connect -->
+            <div class="stack-fields" data-onboard-provider-fields="googleDrive">
+              <div class="gdrive-connect-hero gdrive-connect-hero-compact">
+                <div class="gdrive-hero-copy">
+                  <strong class="gdrive-hero-title">Private Google Drive Vault</strong>
+                  <p class="gdrive-hero-desc">Sign in with your Google account to sync your AES-256-GCM encrypted vault automatically across JalaDesk Mobile, Desktop, and Web.</p>
+                </div>
+                <button class="btn btn-google btn-block" id="btn-onboard-gdrive-signin" type="button">
+                  <svg class="google-g-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82Z"></path>
+                    <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.31 24 12 24Z"></path>
+                    <path fill="#FBBC05" d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09Z"></path>
+                    <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96Z"></path>
+                  </svg>
+                  <span id="btn-onboard-gdrive-signin-label">Sign in with Google</span>
+                </button>
+              </div>
+
+              <!-- Amber Callout when Google Drive AppData checkbox was left unchecked -->
+              <div id="onboard-gdrive-scope-callout" class="gdrive-callout gdrive-callout-warn" role="alert" hidden>
+                <div class="gdrive-callout-body">
+                  <strong class="gdrive-callout-title">Google Drive Permission Needed</strong>
+                  <p id="onboard-gdrive-scope-text" class="gdrive-callout-text">Tick "See, create, and delete its own configuration data in your Google Drive" to unlock your synced vault.</p>
+                </div>
+                <button class="btn btn-primary btn-sm gdrive-callout-cta" id="btn-onboard-gdrive-grant" type="button">
+                  <span>Grant Drive Access &amp; Sync</span>
+                </button>
+              </div>
+
+              <!-- Subtle Setup Note when BUILTIN_GOOGLE_WEB_CLIENT_ID is empty -->
+              <div id="onboard-gdrive-setup-note" class="gdrive-callout gdrive-callout-info" role="status" hidden>
+                <div class="gdrive-callout-body">
+                  <strong class="gdrive-callout-title">Web OAuth Client ID Setup</strong>
+                  <p class="gdrive-callout-text">
+                    Add <code id="onboard-gdrive-origin" class="mono">https://ribato22.github.io</code> as an Authorized JavaScript origin in GCP project <code class="mono">749663705305</code> (Web application — no Client Secret needed), then paste the Client ID below or set <code class="mono">BUILTIN_GOOGLE_WEB_CLIENT_ID</code> in <code class="mono">web-oauth-config.js</code>.
+                  </p>
+                </div>
+              </div>
+
+              <!-- Custom E2EE Passphrase Switch (OFF = automatic Account-Bound AES-256-GCM key) -->
+              <div class="switch-row">
+                <div class="switch-copy">
+                  <span class="switch-title" id="label-onboard-gdrive-custom-pass">Custom E2EE Passphrase</span>
+                  <span class="switch-desc">OFF uses your automatic Google account-bound AES-256-GCM key matching Mobile &amp; Desktop.</span>
+                </div>
+                <button
+                  id="onboard-gdrive-custom-pass-switch"
+                  class="toggle-switch"
+                  type="button"
+                  role="switch"
+                  aria-checked="false"
+                  aria-labelledby="label-onboard-gdrive-custom-pass"
+                >
+                  <span class="toggle-thumb" aria-hidden="true"></span>
+                </button>
+              </div>
+
+              <div id="onboard-gdrive-custom-pass-wrap" class="field-group" hidden>
+                <label class="field-label" for="onboard-gdrive-custom-passphrase">Custom Vault E2EE Passphrase</label>
+                <input id="onboard-gdrive-custom-passphrase" class="text-input" type="password" autocomplete="off" placeholder="Enter your custom E2EE sync passphrase">
+              </div>
+
+              <details id="onboard-gdrive-advanced" class="studio-disclosure">
+                <summary class="studio-disclosure-summary">
+                  <span>Advanced: Custom Web Client ID or Manual Token</span>
+                  <svg class="icon-sm disclosure-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="9 18 15 12 9 6"></polyline>
+                  </svg>
+                </summary>
+                <div class="studio-disclosure-body">
+                  <div class="field-group">
+                    <label class="field-label" for="onboard-gdrive-client-id">Custom Google Web Client ID</label>
+                    <input id="onboard-gdrive-client-id" class="text-input mono" type="text" autocomplete="off" placeholder="749663705305-xxxx.apps.googleusercontent.com">
+                  </div>
+                  <div class="panel-divider" aria-hidden="true"></div>
+                  <div class="field-group">
+                    <label class="field-label" for="onboard-gdrive-token">Manual OAuth Access Token (Memory-Only)</label>
+                    <input id="onboard-gdrive-token" class="text-input mono" type="password" autocomplete="off" placeholder="ya29... (drive.appdata scope)">
+                  </div>
+                  <div class="field-group">
+                    <label class="field-label" for="onboard-gdrive-email">Google Account Email</label>
+                    <input id="onboard-gdrive-email" class="text-input" type="email" autocomplete="email" placeholder="Optional for account-bound E2EE key">
+                  </div>
+                  <button class="btn btn-secondary btn-block" id="btn-onboard-gdrive-manual-submit" type="button">
+                    <span>Pull &amp; Unlock with Manual Token</span>
+                  </button>
+                </div>
+              </details>
+            </div>
+
             <!-- GitHub Gist fields -->
-            <div class="stack-fields" data-onboard-provider-fields="githubGist">
+            <div class="stack-fields" data-onboard-provider-fields="githubGist" hidden>
               <div class="field-group">
                 <label class="field-label" for="onboard-gist-token">GitHub Personal Access Token</label>
                 <input id="onboard-gist-token" class="text-input mono" type="password" autocomplete="off" placeholder="ghp_... (gist scope, memory-only)">
@@ -241,26 +331,16 @@
               </div>
             </div>
 
-            <!-- Google Drive fields -->
-            <div class="stack-fields" data-onboard-provider-fields="googleDrive" hidden>
+            <div id="onboard-non-google-footer" class="stack-fields" hidden>
               <div class="field-group">
-                <label class="field-label" for="onboard-gdrive-token">Google OAuth Access Token</label>
-                <input id="onboard-gdrive-token" class="text-input mono" type="password" autocomplete="off" placeholder="ya29... (drive.appdata scope)">
+                <label class="field-label" for="onboard-cloud-passphrase">Vault E2EE Passphrase</label>
+                <input id="onboard-cloud-passphrase" class="text-input" type="password" autocomplete="off" placeholder="Enter your vault E2EE passphrase (min 4 chars)">
               </div>
-              <div class="field-group">
-                <label class="field-label" for="onboard-gdrive-email">Google Account Email</label>
-                <input id="onboard-gdrive-email" class="text-input" type="email" autocomplete="email" placeholder="Optional for account-bound E2EE key">
-              </div>
-            </div>
 
-            <div class="field-group">
-              <label class="field-label" for="onboard-cloud-passphrase">Vault E2EE Passphrase</label>
-              <input id="onboard-cloud-passphrase" class="text-input" type="password" autocomplete="off" placeholder="Required unless using Google account-bound key">
+              <button class="btn btn-primary btn-block" id="btn-onboard-cloud-submit" type="submit">
+                <span>Pull &amp; Unlock Cloud Vault</span>
+              </button>
             </div>
-
-            <button class="btn btn-primary btn-block" id="btn-onboard-cloud-submit" type="submit">
-              <span>Pull &amp; Unlock Cloud Vault</span>
-            </button>
           </form>
         </div>
       </div>
@@ -545,26 +625,79 @@
                 </div>
               </div>
 
-              <!-- Google Drive Config -->
+              <!-- Google Drive Config (1-Click Sign in with Google matching Desktop v1.16) -->
               <div class="stack-fields" data-sync-provider-panel="googleDrive">
-                <div class="info-callout">
-                  <p>Google Drive stores <code class="mono">jaladesk-vault-v1.jvault</code> inside hidden <code class="mono">appDataFolder</code>. Add an Authorized JavaScript Origin Web Client ID in GCP project <code class="mono">749663705305</code> for popup sign-in, or paste an OAuth access token directly for instant sync.</p>
+                <!-- Signed-Out Hero -->
+                <div id="sync-gdrive-signed-out" class="gdrive-connect-hero">
+                  <div class="gdrive-hero-copy">
+                    <strong class="gdrive-hero-title">Private Google Drive AppData Vault</strong>
+                    <p class="gdrive-hero-desc">Sign in with your Google account to sync your AES-256-GCM encrypted vault automatically across JalaDesk Mobile, Desktop, and Web.</p>
+                  </div>
+                  <button class="btn btn-google" id="btn-sync-gdrive-signin" type="button">
+                    <svg class="google-g-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82Z"></path>
+                      <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.31 24 12 24Z"></path>
+                      <path fill="#FBBC05" d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09Z"></path>
+                      <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96Z"></path>
+                    </svg>
+                    <span id="btn-sync-gdrive-signin-label">Sign in with Google</span>
+                  </button>
                 </div>
-                <div class="field-group">
-                  <label class="field-label" for="sync-gdrive-client-id">Google Web Client ID (Optional)</label>
-                  <div class="input-with-btn-row">
-                    <input id="sync-gdrive-client-id" class="text-input mono" type="text" autocomplete="off" placeholder="749663705305-xxxx.apps.googleusercontent.com">
-                    <button class="btn btn-secondary btn-sm" id="btn-gdrive-oauth" type="button">Connect OAuth</button>
+
+                <!-- Signed-In Account Identity Bar -->
+                <div id="sync-gdrive-account-bar" class="gdrive-account-bar" hidden>
+                  <div class="gdrive-account-lead">
+                    <div id="sync-gdrive-avatar" class="gdrive-account-avatar" aria-hidden="true">G</div>
+                    <div class="gdrive-account-meta">
+                      <div class="gdrive-account-title-row">
+                        <strong id="sync-gdrive-account-email" class="gdrive-account-email"></strong>
+                        <span id="sync-gdrive-account-pill" class="status-pill status-pill-ok">Bound</span>
+                      </div>
+                      <span id="sync-gdrive-account-sub" class="gdrive-account-sub">Google Drive AppData &middot; AES-256-GCM</span>
+                    </div>
+                  </div>
+                  <div class="gdrive-account-actions">
+                    <button class="btn btn-ghost btn-sm" id="btn-sync-gdrive-reconnect" type="button">Reconnect</button>
+                    <button class="btn btn-ghost btn-ghost-danger btn-sm" id="btn-sync-gdrive-disconnect" type="button">Disconnect</button>
                   </div>
                 </div>
-                <div class="field-group">
-                  <label class="field-label" for="sync-gdrive-token">OAuth Access Token (Memory-Only)</label>
-                  <input id="sync-gdrive-token" class="text-input mono" type="password" autocomplete="off" placeholder="ya29... (drive.appdata scope)">
+
+                <!-- Single Unified Google Drive Status Callout -->
+                <div id="sync-gdrive-callout" class="gdrive-callout" role="status" aria-live="polite" hidden>
+                  <div class="gdrive-callout-body">
+                    <strong id="sync-gdrive-callout-title" class="gdrive-callout-title"></strong>
+                    <p id="sync-gdrive-callout-text" class="gdrive-callout-text"></p>
+                  </div>
+                  <button class="btn btn-primary btn-sm gdrive-callout-cta" id="btn-sync-gdrive-grant" type="button" hidden>
+                    <span>Grant Drive Access &amp; Sync</span>
+                  </button>
                 </div>
-                <div class="field-group">
-                  <label class="field-label" for="sync-gdrive-email">Google Account Email</label>
-                  <input id="sync-gdrive-email" class="text-input" type="email" autocomplete="email" placeholder="name@gmail.com (for account-bound E2EE key)">
-                </div>
+
+                <!-- Collapsed Advanced Disclosure -->
+                <details id="sync-gdrive-advanced" class="studio-disclosure">
+                  <summary class="studio-disclosure-summary">
+                    <span>Advanced: Custom Web Client ID or Manual Token</span>
+                    <svg class="icon-sm disclosure-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polyline points="9 18 15 12 9 6"></polyline>
+                    </svg>
+                  </summary>
+                  <div class="studio-disclosure-body">
+                    <div class="field-group">
+                      <label class="field-label" for="sync-gdrive-client-id">Custom Google Web Client ID</label>
+                      <input id="sync-gdrive-client-id" class="text-input mono" type="text" autocomplete="off" placeholder="749663705305-xxxx.apps.googleusercontent.com">
+                      <span class="field-hint">Authorized JavaScript origin: <code id="sync-gdrive-origin" class="mono">https://ribato22.github.io</code></span>
+                    </div>
+                    <div class="panel-divider" aria-hidden="true"></div>
+                    <div class="field-group">
+                      <label class="field-label" for="sync-gdrive-token">Manual OAuth Access Token (Memory-Only)</label>
+                      <input id="sync-gdrive-token" class="text-input mono" type="password" autocomplete="off" placeholder="ya29... (drive.appdata scope)">
+                    </div>
+                    <div class="field-group">
+                      <label class="field-label" for="sync-gdrive-email">Manual Google Account Email</label>
+                      <input id="sync-gdrive-email" class="text-input" type="email" autocomplete="email" placeholder="name@gmail.com (for account-bound E2EE key)">
+                    </div>
+                  </div>
+                </details>
               </div>
 
               <!-- GitHub Gist Config -->
@@ -604,7 +737,7 @@
               <div class="switch-row">
                 <div class="switch-copy">
                   <span class="switch-title" id="label-custom-passphrase">Custom E2EE Passphrase</span>
-                  <span class="switch-desc">Use a dedicated sync passphrase instead of the local vault passphrase or Google account key.</span>
+                  <span class="switch-desc">OFF uses the automatic Google account-bound AES-256-GCM key matching Mobile &amp; Desktop.</span>
                 </div>
                 <button
                   id="sync-custom-passphrase-switch"

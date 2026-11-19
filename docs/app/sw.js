@@ -7,7 +7,7 @@
  */
 
 const CACHE_PREFIX = 'jaladesk-web-pwa-';
-const CACHE_NAME = `${CACHE_PREFIX}v2`;
+const CACHE_NAME = `${CACHE_PREFIX}v3`;
 
 const PRECACHE_PATHS = [
   './',
@@ -16,6 +16,7 @@ const PRECACHE_PATHS = [
   './app.js',
   './gateway-client.js',
   './vault-core.js',
+  './web-oauth-config.js',
   './manifest.webmanifest',
   '../assets/jaladesk-oauth-logo-120.png',
   '../assets/jaladesk-logo.png',
@@ -72,8 +73,15 @@ self.addEventListener('activate', (event) => {
 function isCacheableShellRequest(request, url) {
   if (request.method !== 'GET') return false;
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  const host = url.hostname.toLowerCase();
+  if (
+    NEVER_CACHE_HOSTS.has(host) ||
+    host.endsWith('.googleapis.com') ||
+    host.endsWith('.accounts.google.com')
+  ) {
+    return false;
+  }
   if (url.origin !== self.location.origin) return false;
-  if (NEVER_CACHE_HOSTS.has(url.hostname.toLowerCase())) return false;
   if (request.headers && request.headers.has('Authorization')) return false;
   if (url.search && url.search.length > 0) return false;
 
