@@ -7,7 +7,7 @@
  */
 
 const CACHE_PREFIX = 'jaladesk-web-pwa-';
-const CACHE_NAME = `${CACHE_PREFIX}v3`;
+const CACHE_NAME = `${CACHE_PREFIX}v4`;
 
 const PRECACHE_PATHS = [
   './',

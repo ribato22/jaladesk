@@ -214,7 +214,7 @@ interface WebOAuthConfigModule {
   BUILTIN_GOOGLE_WEB_CLIENT_ID: string;
   resolveGoogleWebOAuthClientId(
     customClientId?: string | null,
-    options?: { builtinClientId?: string },
+    options?: { builtinClientId?: string; builtinClientIdOverride?: string },
   ): string;
 }
 
@@ -1181,6 +1181,10 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
   assert.ok(swRaw.includes('googleapis.com'));
   assert.ok(swRaw.includes('api.github.com'));
   assert.ok(swRaw.includes('Authorization'));
+  assert.ok(
+    swRaw.includes('`${CACHE_PREFIX}v4`') || swRaw.includes("'jaladesk-web-pwa-v4'"),
+    'sw.js must bump CACHE_NAME to jaladesk-web-pwa-v4',
+  );
 
   const indexRaw = await readFile(fileURLToPath(INDEX_HTML_URL), 'utf8');
   assert.ok(indexRaw.includes('https://accounts.google.com/gsi/client'), 'CSP must allow GIS client script');
@@ -1192,11 +1196,15 @@ test('g. 1-click Google Web OAuth config, fetchGoogleUserInfo & GIS sign-in flow
   const core = await loadVaultCore();
   const oauthCfg = await loadWebOAuthConfig();
 
-  // 1. resolveGoogleWebOAuthClientId precedence
+  // 1. resolveGoogleWebOAuthClientId precedence (built-in default, unconfigured fallback & custom override)
+  const expectedBuiltinClientId = '749663705305-aatpuo0m1f11se7kii0afaspgion454d.apps.googleusercontent.com';
   assert.equal(oauthCfg.GOOGLE_CLOUD_PROJECT_NUMBER, '749663705305');
-  assert.equal(oauthCfg.BUILTIN_GOOGLE_WEB_CLIENT_ID, '');
-  assert.equal(oauthCfg.resolveGoogleWebOAuthClientId(), '');
-  assert.equal(oauthCfg.resolveGoogleWebOAuthClientId('   '), '');
+  assert.equal(oauthCfg.BUILTIN_GOOGLE_WEB_CLIENT_ID, expectedBuiltinClientId);
+  assert.equal(oauthCfg.resolveGoogleWebOAuthClientId(), expectedBuiltinClientId);
+  assert.equal(oauthCfg.resolveGoogleWebOAuthClientId('   '), expectedBuiltinClientId);
+  assert.equal(oauthCfg.resolveGoogleWebOAuthClientId('', { builtinClientIdOverride: '' }), '');
+  assert.equal(oauthCfg.resolveGoogleWebOAuthClientId('   ', { builtinClientIdOverride: '' }), '');
+  assert.equal(oauthCfg.resolveGoogleWebOAuthClientId('', { builtinClientId: '' }), '');
   assert.equal(
     oauthCfg.resolveGoogleWebOAuthClientId('  749663705305-custom.apps.googleusercontent.com  '),
     '749663705305-custom.apps.googleusercontent.com',
