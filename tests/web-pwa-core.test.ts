@@ -221,6 +221,7 @@ interface WebOAuthConfigModule {
 const VAULT_CORE_URL = new URL('../../docs/app/vault-core.js', import.meta.url);
 const WEB_OAUTH_CONFIG_URL = new URL('../../docs/app/web-oauth-config.js', import.meta.url);
 const INDEX_HTML_URL = new URL('../../docs/app/index.html', import.meta.url);
+const APP_JS_URL = new URL('../../docs/app/app.js', import.meta.url);
 const MANIFEST_URL = new URL('../../docs/app/manifest.webmanifest', import.meta.url);
 const SW_URL = new URL('../../docs/app/sw.js', import.meta.url);
 
@@ -1182,14 +1183,41 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
   assert.ok(swRaw.includes('api.github.com'));
   assert.ok(swRaw.includes('Authorization'));
   assert.ok(
-    swRaw.includes('`${CACHE_PREFIX}v4`') || swRaw.includes("'jaladesk-web-pwa-v4'"),
-    'sw.js must bump CACHE_NAME to jaladesk-web-pwa-v4',
+    swRaw.includes('`${CACHE_PREFIX}v5`') || swRaw.includes("'jaladesk-web-pwa-v5'"),
+    'sw.js must bump CACHE_NAME to jaladesk-web-pwa-v5',
   );
 
   const indexRaw = await readFile(fileURLToPath(INDEX_HTML_URL), 'utf8');
   assert.ok(indexRaw.includes('https://accounts.google.com/gsi/client'), 'CSP must allow GIS client script');
   assert.ok(indexRaw.includes('frame-src https://accounts.google.com'), 'CSP must allow GIS popup frame');
   assert.ok(indexRaw.includes('https://accounts.google.com/gsi/style'), 'CSP must allow GIS style');
+  assert.equal(/\sstyle\s*=\s*["']/.test(indexRaw), false, 'index.html must contain zero inline style="" attributes');
+
+  for (const requiredId of [
+    'id="modal-confirm-delete"',
+    'id="btn-confirm-delete-cancel"',
+    'id="btn-confirm-delete-submit"',
+    'id="gateway-selected-target-banner"',
+    'id="gateway-local-probe-pill"',
+    'id="gateway-setup-guidance"',
+    'id="btn-check-local-gateway"',
+    'id="btn-copy-gw-npm"',
+    'id="btn-copy-gw-docker"',
+    'id="gateway-cred-prompt"',
+  ]) {
+    assert.ok(indexRaw.includes(requiredId), `index.html must include ${requiredId}`);
+  }
+
+  const appJsRaw = await readFile(fileURLToPath(APP_JS_URL), 'utf8');
+  assert.equal(/\binnerHTML\b/.test(appJsRaw), false, 'app.js must contain zero innerHTML usage');
+  assert.equal(appJsRaw.includes('Open in Gateway'), false, 'host cards must replace ambiguous Open in Gateway with Connect');
+  assert.ok(appJsRaw.includes("el('span', '', 'Connect')"), 'host cards must render Connect button');
+  assert.ok(appJsRaw.includes('btn-toast-undo'), 'app.js must render undo toast button #btn-toast-undo');
+  assert.ok(appJsRaw.includes('UNDO_DELETE_WINDOW_MS = 6000'), 'app.js must keep 6-second undo snapshot in RAM');
+  assert.ok(appJsRaw.includes('clearPendingUndo()'), 'app.js must clear RAM undo snapshot on Lock Vault');
+  assert.ok(appJsRaw.includes('http://127.0.0.1:8443'), 'app.js must probe local gateway on 127.0.0.1:8443');
+  assert.ok(appJsRaw.includes('/healthz'), 'app.js must probe /healthz endpoint');
+  assert.ok(appJsRaw.includes('openConfirmDeleteModal'), 'app.js must route destructive deletes through confirmation modal');
 });
 
 test('g. 1-click Google Web OAuth config, fetchGoogleUserInfo & GIS sign-in flow with zero token persistence', async () => {

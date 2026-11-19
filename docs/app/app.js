@@ -62,6 +62,15 @@ const PROVIDER_LABELS = Object.freeze({
   webdav: 'WebDAV',
 });
 
+const LOCAL_GATEWAY_DEFAULT_URL = 'http://127.0.0.1:8443';
+const LOCAL_GATEWAY_PROBE_TIMEOUT_MS = 1200;
+const UNDO_DELETE_WINDOW_MS = 6000;
+
+const GATEWAY_QUICK_COMMANDS = Object.freeze({
+  npm: 'npm run gateway -- --host 127.0.0.1 --port 8443',
+  docker: 'docker compose -f docker-compose.gateway.yml up -d',
+});
+
 const store = new SealedBrowserVaultStore();
 
 /** All sensitive credentials, passphrases, and tokens live ONLY in RAM and are zeroed on lock(). */
@@ -76,6 +85,8 @@ const ramSecrets = {
   customSyncPassphrase: '',
   gatewayToken: '',
   gatewayPairing: '',
+  gatewayRuntimePassword: '',
+  gatewayRuntimeKey: '',
 };
 
 const appState = {
@@ -111,6 +122,12 @@ const appState = {
   gatewayFragmentScrubbed: false,
   dockerTab: 'run',
   activeModalId: null,
+  lastModalTriggerEl: null,
+  pendingConfirmAction: null,
+  pendingUndo: null,
+  gatewayProbeSeq: 0,
+  gatewayLocalReachable: null,
+  gatewayCredPromptHostId: '',
   totpRafId: 0,
   totpLastTickMs: 0,
   totpCardRefs: new Map(),
@@ -165,6 +182,140 @@ function showToast(message, tone = 'default') {
   setTimeout(() => {
     item.remove();
   }, 3400);
+}
+
+function scrubSnapshotSecrets(obj) {
+  if (!obj || typeof obj !== 'object') return;
+  for (const key of ['password', 'privateKeyPem', 'secretBase32', 'secret', 'passphrase', 'token']) {
+    if (Object.hasOwn(obj, key)) {
+      obj[key] = '';
+    }
+  }
+}
+
+function clearPendingUndo() {
+  const pending = appState.pendingUndo;
+  if (!pending) return;
+  if (pending.timerId) {
+    clearTimeout(pending.timerId);
+  }
+  if (pending.toastEl && pending.toastEl.isConnected) {
+    pending.toastEl.remove();
+  }
+  scrubSnapshotSecrets(pending.item);
+  pending.item = null;
+  pending.detachedChildren = null;
+  pending.unlinkedHosts = null;
+  appState.pendingUndo = null;
+}
+
+function showUndoToast(message, onUndo) {
+  const region = byId('jala-toast-region');
+  if (!region) return null;
+
+  const toast = el('div', 'toast-item toast-item-undo');
+  toast.setAttribute('role', 'status');
+
+  const row = el('div', 'toast-undo-row');
+  row.appendChild(el('span', 'toast-undo-message', message));
+
+  const undoBtn = el('button', 'btn-toast-undo', 'Undo');
+  undoBtn.id = 'btn-toast-undo';
+  undoBtn.type = 'button';
+  undoBtn.addEventListener('click', () => {
+    onUndo();
+  });
+  row.appendChild(undoBtn);
+  toast.appendChild(row);
+
+  const track = el('div', 'toast-undo-track');
+  track.setAttribute('aria-hidden', 'true');
+  track.appendChild(el('div', 'toast-undo-bar'));
+  toast.appendChild(track);
+
+  region.appendChild(toast);
+  return toast;
+}
+
+function registerPendingUndo(snapshot) {
+  clearPendingUndo();
+  const toastEl = showUndoToast(snapshot.toastMessage, () => {
+    undoPendingDelete();
+  });
+  const timerId = setTimeout(() => {
+    clearPendingUndo();
+  }, UNDO_DELETE_WINDOW_MS);
+
+  appState.pendingUndo = {
+    ...snapshot,
+    timerId,
+    toastEl,
+  };
+}
+
+async function undoPendingDelete() {
+  const pending = appState.pendingUndo;
+  if (!pending || !store.isUnlocked()) {
+    clearPendingUndo();
+    return;
+  }
+
+  // Take ownership of snapshot before clearing timers/DOM
+  const snapshot = {
+    kind: pending.kind,
+    item: pending.item ? { ...pending.item } : null,
+    tombstoneKey: pending.tombstoneKey,
+    previousTombstoneValue: pending.previousTombstoneValue,
+    detachedChildren: Array.isArray(pending.detachedChildren) ? [...pending.detachedChildren] : [],
+    unlinkedHosts: Array.isArray(pending.unlinkedHosts) ? [...pending.unlinkedHosts] : [],
+    restoreLabel: pending.restoreLabel,
+  };
+  clearPendingUndo();
+
+  const payload = getPayloadSafe();
+  if (!payload || !snapshot.item) return;
+
+  const now = Date.now();
+  const restoredItem = { ...snapshot.item, updatedAtMs: now };
+
+  if (snapshot.kind === 'host') {
+    if (!payload.hosts.some((h) => h.id === restoredItem.id)) {
+      payload.hosts.push(restoredItem);
+    }
+    if (snapshot.detachedChildren.length > 0) {
+      const childMap = new Map(snapshot.detachedChildren.map((c) => [c.id, c.prevJumpHostId]));
+      payload.hosts = payload.hosts.map((h) =>
+        childMap.has(h.id) ? { ...h, jumpHostId: childMap.get(h.id), updatedAtMs: now } : h,
+      );
+    }
+  } else if (snapshot.kind === 'totp') {
+    if (!payload.totp.some((t) => t.id === restoredItem.id)) {
+      payload.totp.push(restoredItem);
+    }
+  } else if (snapshot.kind === 'credential') {
+    if (!payload.credentials.some((c) => c.id === restoredItem.id)) {
+      payload.credentials.push(restoredItem);
+    }
+    if (snapshot.unlinkedHosts.length > 0) {
+      const hostMap = new Map(snapshot.unlinkedHosts.map((h) => [h.id, h.prevCredentialId]));
+      payload.hosts = payload.hosts.map((h) =>
+        hostMap.has(h.id) ? { ...h, credentialId: hostMap.get(h.id), updatedAtMs: now } : h,
+      );
+    }
+  }
+
+  if (payload.tombstones && snapshot.tombstoneKey) {
+    if (snapshot.previousTombstoneValue !== undefined) {
+      payload.tombstones[snapshot.tombstoneKey] = snapshot.previousTombstoneValue;
+    } else {
+      delete payload.tombstones[snapshot.tombstoneKey];
+    }
+  }
+  payload.updatedAtMs = now;
+
+  await store.savePayload(payload);
+  renderAllViews();
+  showToast(`${snapshot.restoreLabel} restored.`, 'ok');
 }
 
 function setAlert(id, message) {
@@ -403,6 +554,13 @@ function zeroSensitiveInputsAndDom(options = {}) {
   ramSecrets.customSyncPassphrase = '';
   ramSecrets.gatewayToken = pendingToken;
   ramSecrets.gatewayPairing = '';
+  ramSecrets.gatewayRuntimePassword = '';
+  ramSecrets.gatewayRuntimeKey = '';
+  clearPendingUndo();
+  appState.pendingConfirmAction = null;
+  appState.gatewayProbeSeq += 1;
+  appState.gatewayLocalReachable = null;
+  appState.gatewayCredPromptHostId = '';
   appState.onboardGdrivePendingEmail = '';
   appState.onboardGdriveCustomPass = false;
   appState.gdriveAuthInFlight = false;
@@ -439,6 +597,8 @@ function zeroSensitiveInputsAndDom(options = {}) {
     'confirm-new-vault-passphrase',
     'gateway-pairing-code',
     'gateway-session-token',
+    'gateway-runtime-password',
+    'gateway-runtime-key',
     'gateway-ssh-input',
     'global-search',
     'conn-id',
@@ -509,6 +669,15 @@ function zeroSensitiveInputsAndDom(options = {}) {
   const previewCode = byId('totp-preview-code');
   if (previewCode) previewCode.textContent = '--- ---';
   setAlert('gateway-fragment-notice', '');
+  for (const hiddenId of [
+    'gateway-selected-target-banner',
+    'gateway-local-probe-pill',
+    'gateway-setup-guidance',
+    'gateway-cred-prompt',
+  ]) {
+    const hNode = byId(hiddenId);
+    if (hNode) hNode.hidden = true;
+  }
   for (const calloutId of ['onboard-gdrive-scope-callout', 'onboard-gdrive-setup-note', 'sync-gdrive-callout']) {
     const cNode = byId(calloutId);
     if (cNode) cNode.hidden = true;
@@ -569,8 +738,6 @@ function showLockScreen(reasonMessage = '', options = {}) {
       : 'AES-256-GCM · Zero Plaintext';
   }
 
-  const resetConfirm = byId('lock-reset-confirm');
-  if (resetConfirm) resetConfirm.hidden = true;
   setAlert('lock-error', '');
   setAlert('lock-info', reasonMessage);
   updateOnboardCloudProviderUi('googleDrive');
@@ -696,7 +863,7 @@ function updateSecurityPill() {
    Navigation & View Switching
    ========================================================================== */
 
-function switchWorkspaceView(viewName, persist = true) {
+function switchWorkspaceView(viewName, persist = true, options = {}) {
   const valid = ['connections', 'totp', 'credentials', 'sync', 'gateway'];
   const next = valid.includes(viewName) ? viewName : 'connections';
   appState.activeView = next;
@@ -732,6 +899,13 @@ function switchWorkspaceView(viewName, persist = true) {
     renderCredentialsView();
   } else if (next === 'gateway') {
     renderGatewayTargets();
+    if (
+      !options.skipGatewayProbe &&
+      !hasPairedGatewayToken() &&
+      !(appState.gatewayClient && appState.gatewayClient.connected)
+    ) {
+      probeLocalGatewayHealth({ autoFocusPairing: false });
+    }
   }
 }
 
@@ -927,15 +1101,21 @@ function renderConnectionsView() {
     const actions = el('div', 'host-card-actions');
     const copySpec = buildSshOrEndpointCommand(host, hosts, creds);
 
+    const connectBtn = el('button', 'btn btn-connect');
+    connectBtn.type = 'button';
+    connectBtn.appendChild(
+      createSvgIcon([
+        { tag: 'polygon', attrs: { points: '6 4 20 12 6 20 6 4' } },
+      ]),
+    );
+    connectBtn.appendChild(el('span', '', 'Connect'));
+    connectBtn.addEventListener('click', () => openHostInGateway(host.id));
+    actions.appendChild(connectBtn);
+
     const copyBtn = el('button', 'btn btn-secondary', copySpec.buttonText);
     copyBtn.type = 'button';
     copyBtn.addEventListener('click', () => copyText(copySpec.value, copySpec.label, false));
     actions.appendChild(copyBtn);
-
-    const gwBtn = el('button', 'btn btn-ghost', 'Open in Gateway');
-    gwBtn.type = 'button';
-    gwBtn.addEventListener('click', () => openHostInGateway(host.id));
-    actions.appendChild(gwBtn);
 
     const editBtn = el('button', 'btn btn-ghost', 'Edit');
     editBtn.type = 'button';
@@ -944,7 +1124,7 @@ function renderConnectionsView() {
 
     const delBtn = el('button', 'btn btn-ghost btn-ghost-danger', 'Delete');
     delBtn.type = 'button';
-    delBtn.addEventListener('click', () => deleteHost(host.id));
+    delBtn.addEventListener('click', () => requestDeleteHost(host.id));
     actions.appendChild(delBtn);
 
     card.appendChild(actions);
@@ -962,34 +1142,181 @@ async function toggleHostFavorite(hostId) {
   renderAllViews();
 }
 
-async function deleteHost(hostId) {
+function requestDeleteHost(hostId) {
   const payload = getPayloadSafe();
   if (!payload) return;
+  const hosts = Array.isArray(payload.hosts) ? payload.hosts : [];
+  const creds = Array.isArray(payload.credentials) ? payload.credentials : [];
+  const host = hosts.find((h) => h.id === hostId);
+  if (!host) return;
+
+  const proto = String(host.protocol || 'rdp').toLowerCase();
+  const port = Number(host.port) || DEFAULT_PORTS[proto] || 22;
+  const linkedCred = host.credentialId ? creds.find((c) => c.id === host.credentialId) : null;
+  const user = String(host.username || (linkedCred && linkedCred.username) || '').trim();
+  const displayName = String(host.name || host.address || 'Unnamed Host');
+  const endpointMeta = `${proto.toUpperCase()} · ${user ? `${user}@` : ''}${host.address || 'unknown'}:${port}`;
+
+  const childHosts = hosts.filter((h) => h.jumpHostId === hostId);
+  let warning = '';
+  if (childHosts.length > 0) {
+    const listedNames = childHosts
+      .slice(0, 3)
+      .map((c) => c.name || c.address || 'Unnamed')
+      .join(', ');
+    const overflow = childHosts.length > 3 ? ` +${childHosts.length - 3} more` : '';
+    warning = `Jump Host in use: ${childHosts.length} child ${childHosts.length === 1 ? 'connection' : 'connections'} (${listedNames}${overflow}) route through this gateway. Deleting it resets their route to Direct.`;
+  } else if (host.isJumpHost) {
+    warning = 'This entry is configured as a Jump Host gateway. Removing it removes it from bastion route selectors.';
+  }
+
+  openConfirmDeleteModal({
+    title: host.isJumpHost ? 'Delete Jump Host?' : 'Delete Connection?',
+    itemName: displayName,
+    itemMeta: endpointMeta,
+    description: 'Remove this host from your encrypted vault?',
+    warning,
+    syncNote: 'A deletion tombstone will propagate to your other devices on the next Cloud Sync. You can undo for 6 seconds.',
+    confirmLabel: host.isJumpHost ? 'Delete Jump Host' : 'Delete Connection',
+    onConfirm: () => executeDeleteHost(hostId),
+  });
+}
+
+async function executeDeleteHost(hostId) {
+  const payload = getPayloadSafe();
+  if (!payload) return;
+  const target = (payload.hosts || []).find((h) => h.id === hostId);
+  if (!target) return;
+
   const now = Date.now();
+  const tombstoneKey = makeTombstoneKey('host', hostId);
+  const previousTombstoneValue =
+    payload.tombstones && Object.hasOwn(payload.tombstones, tombstoneKey)
+      ? payload.tombstones[tombstoneKey]
+      : undefined;
+
+  const detachedChildren = (payload.hosts || [])
+    .filter((h) => h.jumpHostId === hostId)
+    .map((h) => ({ id: h.id, prevJumpHostId: h.jumpHostId }));
+
+  const itemCopy = { ...target };
+  const label = String(target.name || target.address || 'Connection');
+
   payload.hosts = payload.hosts
     .filter((h) => h.id !== hostId)
     .map((h) => (h.jumpHostId === hostId ? { ...h, jumpHostId: null, updatedAtMs: now } : h));
-  payload.tombstones[makeTombstoneKey('host', hostId)] = now;
+  payload.tombstones[tombstoneKey] = now;
   payload.updatedAtMs = now;
+
+  if (appState.gatewayTargetHostId === hostId) {
+    appState.gatewayTargetHostId = '__demo__';
+  }
+
   await store.savePayload(payload);
   renderAllViews();
-  showToast('Connection deleted & tombstone recorded.', 'ok');
+
+  registerPendingUndo({
+    kind: 'host',
+    item: itemCopy,
+    tombstoneKey,
+    previousTombstoneValue,
+    detachedChildren,
+    unlinkedHosts: [],
+    restoreLabel: label,
+    toastMessage: `Deleted "${label}".`,
+  });
+}
+
+function hasPairedGatewayToken() {
+  const tok = String(ramSecrets.gatewayToken || byId('gateway-session-token')?.value || '').trim();
+  return tok.length >= 4;
+}
+
+function hostHasStoredSecret(host, creds) {
+  if (!host) return false;
+  if (String(host.password || '').trim().length > 0) return true;
+  if (String(host.privateKeyPem || '').trim().length > 0) return true;
+  const linkedCred = host.credentialId ? (creds || []).find((c) => c.id === host.credentialId) : null;
+  if (linkedCred) {
+    if (String(linkedCred.password || '').trim().length > 0) return true;
+    if (String(linkedCred.privateKeyPem || '').trim().length > 0) return true;
+  }
+  return false;
+}
+
+function clearGatewayRuntimeCredentials() {
+  ramSecrets.gatewayRuntimePassword = '';
+  ramSecrets.gatewayRuntimeKey = '';
+  appState.gatewayCredPromptHostId = '';
+  const pwInput = byId('gateway-runtime-password');
+  const keyInput = byId('gateway-runtime-key');
+  const promptEl = byId('gateway-cred-prompt');
+  if (pwInput) pwInput.value = '';
+  if (keyInput) keyInput.value = '';
+  if (promptEl) promptEl.hidden = true;
 }
 
 function openHostInGateway(hostId) {
-  appState.gatewayTargetHostId = hostId;
-  switchWorkspaceView('gateway', true);
+  if (appState.gatewayCredPromptHostId !== String(hostId)) {
+    clearGatewayRuntimeCredentials();
+  }
+  appState.gatewayTargetHostId = String(hostId);
+  switchWorkspaceView('gateway', true, { skipGatewayProbe: true });
   setGatewaySetupVisible(true);
   const select = byId('gateway-host-select');
   if (select) {
-    select.value = hostId;
+    select.value = String(hostId);
     updateGatewayTargetBadge();
   }
+
   const payload = getPayloadSafe();
-  const host = payload && payload.hosts.find((h) => h.id === hostId);
-  if (host) {
-    appendGatewayLog(`Selected target ${host.name} (${String(host.protocol || 'rdp').toUpperCase()} ${host.address}:${host.port}).`, 'ok');
+  const hosts = payload && Array.isArray(payload.hosts) ? payload.hosts : [];
+  const creds = payload && Array.isArray(payload.credentials) ? payload.credentials : [];
+  const host = hosts.find((h) => String(h.id) === String(hostId));
+  if (!host) return;
+
+  const proto = String(host.protocol || 'rdp').toLowerCase();
+  const port = Number(host.port) || DEFAULT_PORTS[proto] || 22;
+  const linkedCred = host.credentialId ? creds.find((c) => c.id === host.credentialId) : null;
+  const user = String(host.username || (linkedCred && linkedCred.username) || '').trim();
+  const endpointStr = `${user ? `${user}@` : ''}${host.address}:${port}`;
+
+  appendGatewayLog(`Selected target ${host.name || host.address} (${proto.toUpperCase()} ${endpointStr}).`, 'ok');
+
+  if (hasPairedGatewayToken()) {
+    const token = String(ramSecrets.gatewayToken || byId('gateway-session-token')?.value || '').trim();
+    ramSecrets.gatewayToken = token;
+    const tokInput = byId('gateway-session-token');
+    if (tokInput && !tokInput.value) tokInput.value = token;
+    setGatewayAuthMode('token');
+
+    const guidanceEl = byId('gateway-setup-guidance');
+    if (guidanceEl) guidanceEl.hidden = true;
+
+    if (hostHasStoredSecret(host, creds)) {
+      clearGatewayRuntimeCredentials();
+      appendGatewayLog(`Gateway already paired — launching live ${proto.toUpperCase()} session to ${host.name || host.address}...`, 'ok');
+      connectGatewayBridge();
+    } else {
+      appState.gatewayCredPromptHostId = String(host.id);
+      const promptEl = byId('gateway-cred-prompt');
+      const descEl = byId('gateway-cred-prompt-desc');
+      const keyWrap = byId('gateway-runtime-key-wrap');
+      if (descEl) {
+        descEl.textContent = `Gateway is paired. Enter a RAM-only password${proto === 'ssh' || proto === 'sftp' ? ' or SSH private key' : ''} for ${endpointStr}, or connect without one.`;
+      }
+      if (keyWrap) {
+        keyWrap.hidden = proto !== 'ssh' && proto !== 'sftp';
+      }
+      if (promptEl) promptEl.hidden = false;
+      setTimeout(() => byId('gateway-runtime-password')?.focus(), 40);
+    }
+    return;
   }
+
+  clearGatewayRuntimeCredentials();
+  setGatewayAuthMode('pairing');
+  probeLocalGatewayHealth({ autoFocusPairing: true });
 }
 
 /* ==========================================================================
@@ -1068,7 +1395,7 @@ function renderTotpView() {
 
     const delBtn = el('button', 'btn btn-ghost btn-ghost-danger btn-sm', 'Delete');
     delBtn.type = 'button';
-    delBtn.addEventListener('click', () => deleteTotp(item.id));
+    delBtn.addEventListener('click', () => requestDeleteTotp(item.id));
     rightGroup.appendChild(delBtn);
     footer.appendChild(rightGroup);
     card.appendChild(footer);
@@ -1155,16 +1482,65 @@ function stopTotpLoop() {
   }
 }
 
-async function deleteTotp(totpId) {
+function requestDeleteTotp(totpId) {
   const payload = getPayloadSafe();
   if (!payload) return;
+  const item = (payload.totp || []).find((t) => t.id === totpId);
+  if (!item) return;
+
+  const issuer = String(item.issuer || '').trim();
+  const account = String(item.accountName || item.label || '').trim();
+  const algo = String(item.algorithm || 'SHA1').toUpperCase();
+  const digits = Number(item.digits || 6);
+  const period = Number(item.period || item.periodSeconds || 30);
+
+  const itemName = issuer ? `${issuer}${account ? ` — ${account}` : ''}` : account || '2FA Token';
+  const itemMeta = `${algo} · ${digits} digits · ${period}s`;
+
+  openConfirmDeleteModal({
+    title: 'Delete 2FA Token?',
+    itemName,
+    itemMeta,
+    description: 'Remove this TOTP authenticator token from your encrypted vault?',
+    warning: 'Losing a TOTP secret cannot be undone unless you have a .jvault backup or account recovery codes.',
+    syncNote: 'A deletion tombstone will propagate to your other devices on the next Cloud Sync. You can undo for 6 seconds.',
+    confirmLabel: 'Delete 2FA Token',
+    onConfirm: () => executeDeleteTotp(totpId),
+  });
+}
+
+async function executeDeleteTotp(totpId) {
+  const payload = getPayloadSafe();
+  if (!payload) return;
+  const target = (payload.totp || []).find((t) => t.id === totpId);
+  if (!target) return;
+
   const now = Date.now();
+  const tombstoneKey = makeTombstoneKey('totp', totpId);
+  const previousTombstoneValue =
+    payload.tombstones && Object.hasOwn(payload.tombstones, tombstoneKey)
+      ? payload.tombstones[tombstoneKey]
+      : undefined;
+
+  const itemCopy = { ...target };
+  const label = [target.issuer, target.accountName || target.label].filter(Boolean).join(' · ') || '2FA token';
+
   payload.totp = payload.totp.filter((t) => t.id !== totpId);
-  payload.tombstones[makeTombstoneKey('totp', totpId)] = now;
+  payload.tombstones[tombstoneKey] = now;
   payload.updatedAtMs = now;
   await store.savePayload(payload);
   renderAllViews();
-  showToast('2FA token deleted & tombstone recorded.', 'ok');
+
+  registerPendingUndo({
+    kind: 'totp',
+    item: itemCopy,
+    tombstoneKey,
+    previousTombstoneValue,
+    detachedChildren: [],
+    unlinkedHosts: [],
+    restoreLabel: label,
+    toastMessage: `Deleted 2FA "${label}".`,
+  });
 }
 
 /* ==========================================================================
@@ -1267,7 +1643,7 @@ function renderCredentialsView() {
 
     const delBtn = el('button', 'btn btn-ghost btn-ghost-danger btn-sm', 'Delete');
     delBtn.type = 'button';
-    delBtn.addEventListener('click', () => deleteCredential(cred.id));
+    delBtn.addEventListener('click', () => requestDeleteCredential(cred.id));
     actions.appendChild(delBtn);
 
     row.appendChild(actions);
@@ -1275,18 +1651,77 @@ function renderCredentialsView() {
   }
 }
 
-async function deleteCredential(credId) {
+function requestDeleteCredential(credId) {
   const payload = getPayloadSafe();
   if (!payload) return;
+  const cred = (payload.credentials || []).find((c) => c.id === credId);
+  if (!cred) return;
+
+  const kind = resolveCredentialKind(cred);
+  const kindLabel = kind === 'sshKey' ? 'SSH Key' : kind === 'domain' ? 'Domain' : 'Password';
+  const accountStr = cred.domain ? `${cred.domain}\\${cred.username || ''}` : String(cred.username || 'No username');
+  const linkedHosts = (payload.hosts || []).filter((h) => h.credentialId === credId);
+
+  let warning = '';
+  if (linkedHosts.length > 0) {
+    const names = linkedHosts
+      .slice(0, 3)
+      .map((h) => h.name || h.address || 'Unnamed')
+      .join(', ');
+    const overflow = linkedHosts.length > 3 ? ` +${linkedHosts.length - 3} more` : '';
+    warning = `This credential is linked to ${linkedHosts.length} ${linkedHosts.length === 1 ? 'connection' : 'connections'} (${names}${overflow}). Deleting it will unlink those hosts.`;
+  }
+
+  openConfirmDeleteModal({
+    title: 'Delete Credential?',
+    itemName: String(cred.label || 'Unnamed Credential'),
+    itemMeta: `${kindLabel} · ${accountStr}`,
+    description: 'Remove this saved credential from your encrypted enclave?',
+    warning,
+    syncNote: 'A deletion tombstone will propagate to your other devices on the next Cloud Sync. You can undo for 6 seconds.',
+    confirmLabel: 'Delete Credential',
+    onConfirm: () => executeDeleteCredential(credId),
+  });
+}
+
+async function executeDeleteCredential(credId) {
+  const payload = getPayloadSafe();
+  if (!payload) return;
+  const target = (payload.credentials || []).find((c) => c.id === credId);
+  if (!target) return;
+
   const now = Date.now();
+  const tombstoneKey = makeTombstoneKey('cred', credId);
+  const previousTombstoneValue =
+    payload.tombstones && Object.hasOwn(payload.tombstones, tombstoneKey)
+      ? payload.tombstones[tombstoneKey]
+      : undefined;
+
+  const unlinkedHosts = (payload.hosts || [])
+    .filter((h) => h.credentialId === credId)
+    .map((h) => ({ id: h.id, prevCredentialId: h.credentialId }));
+
+  const itemCopy = { ...target };
+  const label = String(target.label || target.username || 'Credential');
+
   payload.credentials = payload.credentials.filter((c) => c.id !== credId);
   payload.hosts = payload.hosts.map((h) => (h.credentialId === credId ? { ...h, credentialId: null, updatedAtMs: now } : h));
-  payload.tombstones[makeTombstoneKey('cred', credId)] = now;
+  payload.tombstones[tombstoneKey] = now;
   payload.updatedAtMs = now;
   appState.revealedCredIds.delete(String(credId));
   await store.savePayload(payload);
   renderAllViews();
-  showToast('Credential deleted & tombstone recorded.', 'ok');
+
+  registerPendingUndo({
+    kind: 'credential',
+    item: itemCopy,
+    tombstoneKey,
+    previousTombstoneValue,
+    detachedChildren: [],
+    unlinkedHosts,
+    restoreLabel: label,
+    toastMessage: `Deleted "${label}".`,
+  });
 }
 
 /* ==========================================================================
@@ -2165,6 +2600,173 @@ function renderGatewayTargets() {
   renderGatewayTotpSelect();
 }
 
+function updateSelectedTargetBanner() {
+  const banner = byId('gateway-selected-target-banner');
+  const protoEl = byId('gateway-selected-target-proto');
+  const titleEl = byId('gateway-selected-target-title');
+  const subEl = byId('gateway-selected-target-sub');
+  const routeEl = byId('gateway-selected-target-route');
+  const connectBtn = byId('btn-gateway-connect');
+
+  const selectedId = appState.gatewayTargetHostId || '__demo__';
+  if (!banner || selectedId === '__demo__') {
+    if (banner) banner.hidden = true;
+    if (connectBtn) connectBtn.textContent = 'Connect Bridge';
+    clearGatewayRuntimeCredentials();
+    return;
+  }
+
+  const payload = getPayloadSafe();
+  const hosts = payload && Array.isArray(payload.hosts) ? payload.hosts : [];
+  const creds = payload && Array.isArray(payload.credentials) ? payload.credentials : [];
+  const host = hosts.find((h) => String(h.id) === String(selectedId));
+  if (!host) {
+    banner.hidden = true;
+    if (connectBtn) connectBtn.textContent = 'Connect Bridge';
+    clearGatewayRuntimeCredentials();
+    return;
+  }
+
+  const proto = String(host.protocol || 'rdp').toLowerCase();
+  const safeProto = ['rdp', 'vnc', 'ssh', 'sftp', 'hypervisor'].includes(proto) ? proto : 'ssh';
+  const port = Number(host.port) || DEFAULT_PORTS[safeProto] || 22;
+  const linkedCred = host.credentialId ? creds.find((c) => c.id === host.credentialId) : null;
+  const user = String(host.username || (linkedCred && linkedCred.username) || '').trim();
+  const endpointStr = `${user ? `${user}@` : ''}${host.address}:${port}`;
+
+  if (protoEl) {
+    protoEl.className = `proto-badge proto-${safeProto} mono`;
+    protoEl.textContent = proto.toUpperCase();
+  }
+  if (titleEl) {
+    titleEl.textContent = `Ready to connect: ${proto.toUpperCase()} · ${endpointStr}`;
+  }
+  if (subEl) {
+    const label = String(host.name || '').trim();
+    subEl.textContent = label && label !== host.address ? label : '';
+    subEl.hidden = !subEl.textContent;
+  }
+  if (routeEl) {
+    const bastion = host.jumpHostId ? hosts.find((b) => b.id === host.jumpHostId) : null;
+    if (bastion) {
+      routeEl.textContent = `via ${bastion.name || bastion.address}`;
+      routeEl.hidden = false;
+    } else {
+      routeEl.textContent = '';
+      routeEl.hidden = true;
+    }
+  }
+  if (connectBtn) {
+    connectBtn.textContent = `Connect to ${host.name || host.address}`;
+  }
+  banner.hidden = false;
+}
+
+async function probeLocalGatewayHealth(options = {}) {
+  const autoFocusPairing = Boolean(options.autoFocusPairing);
+  const userTriggered = Boolean(options.userTriggered);
+  const probeSeq = ++appState.gatewayProbeSeq;
+
+  const pill = byId('gateway-local-probe-pill');
+  const dot = byId('gateway-local-probe-dot');
+  const textEl = byId('gateway-local-probe-text');
+  const guidance = byId('gateway-setup-guidance');
+  const checkBtn = byId('btn-check-local-gateway');
+
+  if (userTriggered) {
+    if (pill) {
+      pill.hidden = false;
+      pill.className = 'gateway-probe-pill is-checking';
+    }
+    if (dot) dot.className = 'status-dot status-dot-idle';
+    if (textEl) textEl.textContent = 'Checking Local Gateway (127.0.0.1:8443)...';
+    if (checkBtn) {
+      checkBtn.disabled = true;
+      checkBtn.textContent = 'Checking...';
+    }
+  }
+
+  let reachable = false;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timeoutId = setTimeout(() => {
+    if (controller) controller.abort();
+  }, LOCAL_GATEWAY_PROBE_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${LOCAL_GATEWAY_DEFAULT_URL}/healthz`, {
+      method: 'GET',
+      cache: 'no-store',
+      credentials: 'omit',
+      signal: controller ? controller.signal : undefined,
+    });
+    if (res.ok) {
+      const body = await res.json().catch(() => null);
+      reachable = Boolean(body && body.ok === true);
+    }
+  } catch {
+    reachable = false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (probeSeq !== appState.gatewayProbeSeq || !store.isUnlocked()) {
+    return reachable;
+  }
+
+  appState.gatewayLocalReachable = reachable;
+  if (checkBtn) {
+    checkBtn.disabled = false;
+    checkBtn.textContent = 'Check Local Gateway';
+  }
+
+  if (reachable) {
+    if (pill) {
+      pill.hidden = false;
+      pill.className = 'gateway-probe-pill is-ready';
+    }
+    if (dot) dot.className = 'status-dot status-dot-ok';
+    if (textEl) {
+      textEl.textContent = 'Local Gateway Ready (127.0.0.1:8443) — Enter 6-Digit Pairing Code to Connect';
+    }
+    if (guidance) guidance.hidden = true;
+
+    const urlInput = byId('gateway-ws-url');
+    if (urlInput) {
+      const currentUrl = urlInput.value.trim();
+      if (!currentUrl || currentUrl === 'wss://gateway.local:8443') {
+        urlInput.value = LOCAL_GATEWAY_DEFAULT_URL;
+      }
+    }
+
+    if (!hasPairedGatewayToken()) {
+      setGatewayAuthMode('pairing');
+      if (autoFocusPairing) {
+        setTimeout(() => byId('gateway-pairing-code')?.focus(), 40);
+      }
+    }
+    if (userTriggered) {
+      showToast('Local Gateway ready on 127.0.0.1:8443.', 'ok');
+    }
+  } else {
+    if (pill) {
+      pill.hidden = false;
+      pill.className = 'gateway-probe-pill is-offline';
+    }
+    if (dot) dot.className = 'status-dot status-dot-warn';
+    if (textEl) {
+      textEl.textContent = 'Local Gateway not detected on 127.0.0.1:8443';
+    }
+    if (guidance) {
+      guidance.hidden = hasPairedGatewayToken();
+    }
+    if (userTriggered) {
+      showToast('No local gateway responded on 127.0.0.1:8443.', 'danger');
+    }
+  }
+
+  return reachable;
+}
+
 function updateGatewayTargetBadge() {
   const select = byId('gateway-host-select');
   const badge = byId('gateway-target-badge');
@@ -2173,9 +2775,14 @@ function updateGatewayTargetBadge() {
     modeBadge.textContent = appState.gatewayViewOnly ? 'VIEW-ONLY OBSERVER' : 'INTERACTIVE';
   }
   if (!select || !badge) return;
-  appState.gatewayTargetHostId = select.value || '__demo__';
+  const nextId = select.value || '__demo__';
+  if (appState.gatewayTargetHostId !== nextId && appState.gatewayCredPromptHostId !== nextId) {
+    clearGatewayRuntimeCredentials();
+  }
+  appState.gatewayTargetHostId = nextId;
   if (appState.gatewayTargetHostId === '__demo__') {
     badge.textContent = 'DEMO SESSION · SYNTHETIC';
+    updateSelectedTargetBanner();
     return;
   }
   const payload = getPayloadSafe();
@@ -2185,6 +2792,7 @@ function updateGatewayTargetBadge() {
   } else {
     badge.textContent = 'DEMO SESSION · SYNTHETIC';
   }
+  updateSelectedTargetBanner();
 }
 
 function buildGatewayOpenParamsFromVault(selectedTargetId) {
@@ -2223,10 +2831,19 @@ function buildGatewayOpenParamsFromVault(selectedTargetId) {
   const rawProto = String(host.protocol || 'rdp').toLowerCase();
   const protocol = ['rdp', 'vnc', 'ssh', 'sftp'].includes(rawProto) ? rawProto : 'ssh';
   const port = Number(host.port) || DEFAULT_PORTS[protocol] || 22;
+  const useRuntimeCreds = appState.gatewayCredPromptHostId === String(host.id);
   const username = host.username || (linkedCred ? linkedCred.username : '') || '';
-  const password = host.password || (linkedCred ? linkedCred.password : '') || '';
+  const password =
+    host.password ||
+    (linkedCred ? linkedCred.password : '') ||
+    (useRuntimeCreds ? ramSecrets.gatewayRuntimePassword : '') ||
+    '';
   const domain = host.domain || (linkedCred ? linkedCred.domain : '') || '';
-  const privateKey = host.privateKeyPem || (linkedCred ? linkedCred.privateKeyPem : '') || '';
+  const privateKey =
+    host.privateKeyPem ||
+    (linkedCred ? linkedCred.privateKeyPem : '') ||
+    (useRuntimeCreds ? ramSecrets.gatewayRuntimeKey : '') ||
+    '';
 
   let jumpHost = '';
   let jumpPassword = '';
@@ -2320,6 +2937,10 @@ async function connectGatewayBridge() {
   if (discBtn) discBtn.disabled = false;
 
   const selectedTargetId = byId('gateway-host-select')?.value || '__demo__';
+  if (appState.gatewayCredPromptHostId === String(selectedTargetId)) {
+    ramSecrets.gatewayRuntimePassword = byId('gateway-runtime-password')?.value || ramSecrets.gatewayRuntimePassword || '';
+    ramSecrets.gatewayRuntimeKey = byId('gateway-runtime-key')?.value || ramSecrets.gatewayRuntimeKey || '';
+  }
   const built = buildGatewayOpenParamsFromVault(selectedTargetId);
   const { displayLabel, ...openParams } = built;
   const canvasEl = byId('gateway-canvas');
@@ -2329,11 +2950,18 @@ async function connectGatewayBridge() {
     onStatus: (label, tone) => setGatewayStatus(label, tone),
     onTokenExchanged: (token) => {
       ramSecrets.gatewayToken = token;
+      ramSecrets.gatewayPairing = '';
       const tokInput = byId('gateway-session-token');
       if (tokInput) tokInput.value = token;
+      setGatewayAuthMode('token');
+      const guidance = byId('gateway-setup-guidance');
+      if (guidance) guidance.hidden = true;
+      const probePill = byId('gateway-local-probe-pill');
+      if (probePill) probePill.hidden = true;
     },
     onLog: (msg, tone) => appendGatewayLog(msg, tone),
     onOpened: (msg) => {
+      clearGatewayRuntimeCredentials();
       appState.gatewaySessionProtocol = msg.protocol || openParams.protocol;
       const liveStage = byId('gateway-live-stage');
       const toggleBtn = byId('btn-gateway-toggle-setup');
@@ -2429,6 +3057,13 @@ async function connectGatewayBridge() {
     setGatewayStatus('DISCONNECTED', 'idle');
     appendGatewayLog(`Connection failed: ${message}`, 'err');
     showToast(message, 'danger');
+    if (appState.gatewayAuthMode === 'token' && /401|unauthorized|expired|invalid token/i.test(message)) {
+      ramSecrets.gatewayToken = '';
+      const tokInput = byId('gateway-session-token');
+      if (tokInput) tokInput.value = '';
+      setGatewayAuthMode('pairing');
+      probeLocalGatewayHealth({ autoFocusPairing: true });
+    }
   }
 }
 
@@ -2558,9 +3193,9 @@ async function refreshGatewaySftpList(overridePath) {
         actions.appendChild(dlBtn);
       }
 
-      const delBtn = el('button', 'btn btn-ghost btn-sm', 'Delete');
+      const delBtn = el('button', 'btn btn-ghost btn-ghost-danger btn-sm', 'Delete');
       delBtn.type = 'button';
-      delBtn.addEventListener('click', () => handleGatewaySftpDelete(fullPath, entry.name));
+      delBtn.addEventListener('click', () => requestDeleteSftpFile(fullPath, entry.name));
       actions.appendChild(delBtn);
 
       row.appendChild(nameWrap);
@@ -2596,6 +3231,19 @@ async function handleGatewaySftpDownload(remotePath, fileName) {
   } catch (err) {
     showToast(err instanceof Error ? err.message : 'SFTP download failed.', 'danger');
   }
+}
+
+function requestDeleteSftpFile(remotePath, fileName) {
+  openConfirmDeleteModal({
+    title: 'Delete Remote File?',
+    itemName: String(fileName || remotePath || 'Remote file'),
+    itemMeta: String(remotePath || '/'),
+    description: 'Delete this file directly on the remote SFTP host?',
+    warning: 'Remote SFTP deletion is immediate on the server and cannot be undone.',
+    syncNote: '',
+    confirmLabel: 'Delete File',
+    onConfirm: () => handleGatewaySftpDelete(remotePath, fileName),
+  });
 }
 
 async function handleGatewaySftpDelete(remotePath, fileName) {
@@ -2644,11 +3292,17 @@ async function handleGatewaySftpUpload(file) {
 function openModal(modalId) {
   const backdrop = byId('jala-modal-backdrop');
   if (!backdrop) return;
+  appState.lastModalTriggerEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   for (const dlg of backdrop.querySelectorAll('.modal-dialog')) {
     dlg.hidden = dlg.id !== modalId;
   }
   backdrop.hidden = false;
   appState.activeModalId = modalId;
+  if (modalId === 'modal-confirm-delete') {
+    const cancelBtn = byId('btn-confirm-delete-cancel');
+    if (cancelBtn) setTimeout(() => cancelBtn.focus(), 20);
+    return;
+  }
   const firstInput = byId(modalId)?.querySelector('input:not([type="hidden"]), select, textarea');
   if (firstInput) setTimeout(() => firstInput.focus(), 30);
 }
@@ -2656,11 +3310,61 @@ function openModal(modalId) {
 function closeActiveModal() {
   const backdrop = byId('jala-modal-backdrop');
   if (!backdrop) return;
+  const trigger = appState.lastModalTriggerEl;
   backdrop.hidden = true;
   for (const dlg of backdrop.querySelectorAll('.modal-dialog')) {
     dlg.hidden = true;
   }
   appState.activeModalId = null;
+  appState.pendingConfirmAction = null;
+  appState.lastModalTriggerEl = null;
+  if (trigger && trigger.isConnected) {
+    setTimeout(() => {
+      if (trigger.isConnected) trigger.focus();
+    }, 0);
+  }
+}
+
+function openConfirmDeleteModal({
+  title = 'Delete Item?',
+  itemName = '',
+  itemMeta = '',
+  description = 'Are you sure you want to delete this item?',
+  warning = '',
+  syncNote = '',
+  confirmLabel = 'Delete',
+  onConfirm = null,
+}) {
+  const titleEl = byId('confirm-delete-title');
+  const nameEl = byId('confirm-delete-item-name');
+  const metaEl = byId('confirm-delete-item-meta');
+  const descEl = byId('confirm-delete-desc');
+  const warnEl = byId('confirm-delete-warning');
+  const syncEl = byId('confirm-delete-sync-note');
+  const submitBtn = byId('btn-confirm-delete-submit');
+
+  if (titleEl) titleEl.textContent = title;
+  if (nameEl) nameEl.textContent = itemName;
+  if (metaEl) {
+    metaEl.textContent = itemMeta;
+    metaEl.hidden = !itemMeta;
+  }
+  if (descEl) descEl.textContent = description;
+  if (warnEl) {
+    warnEl.textContent = warning;
+    warnEl.hidden = !warning;
+  }
+  if (syncEl) {
+    syncEl.textContent = syncNote;
+    syncEl.hidden = !syncNote;
+  }
+  if (submitBtn) {
+    submitBtn.disabled = false;
+    submitBtn.textContent = confirmLabel;
+  }
+
+  appState.pendingConfirmAction = typeof onConfirm === 'function' ? onConfirm : null;
+  openModal('modal-confirm-delete');
 }
 
 function openConnectionModal(existingHost = null, defaultJumpHost = false) {
@@ -3079,18 +3783,19 @@ function wireEventListeners() {
   });
 
   byId('btn-returning-reset')?.addEventListener('click', () => {
-    const strip = byId('lock-reset-confirm');
-    if (strip) strip.hidden = false;
-  });
-
-  byId('btn-cancel-reset')?.addEventListener('click', () => {
-    const strip = byId('lock-reset-confirm');
-    if (strip) strip.hidden = true;
-  });
-
-  byId('btn-confirm-reset')?.addEventListener('click', () => {
-    store.resetVault({ clearPrefs: false });
-    showLockScreen('Local sealed browser vault erased. Create a new vault or import a .jvault backup.');
+    openConfirmDeleteModal({
+      title: 'Reset Local Browser Vault?',
+      itemName: 'Sealed Local Vault',
+      itemMeta: 'AES-256-GCM browser storage envelope',
+      description: 'Permanently erase the sealed vault stored in this browser?',
+      warning: 'This cannot be undone. Export a .jvault backup or confirm your Cloud Sync copy exists before erasing.',
+      syncNote: 'Cloud Sync copies on Google Drive, GitHub Gist, or WebDAV are not deleted by resetting this browser.',
+      confirmLabel: 'Erase Local Vault',
+      onConfirm: () => {
+        store.resetVault({ clearPrefs: false });
+        showLockScreen('Local sealed browser vault erased. Create a new vault or import a .jvault backup.');
+      },
+    });
   });
 
   // Lock screen — Onboarding tabs
@@ -3445,6 +4150,39 @@ function wireEventListeners() {
     connectGatewayBridge();
   });
 
+  byId('btn-copy-gw-npm')?.addEventListener('click', () => {
+    copyText(GATEWAY_QUICK_COMMANDS.npm, 'Gateway npm command', false);
+  });
+
+  byId('btn-copy-gw-docker')?.addEventListener('click', () => {
+    copyText(GATEWAY_QUICK_COMMANDS.docker, 'Gateway Docker command', false);
+  });
+
+  byId('btn-check-local-gateway')?.addEventListener('click', () => {
+    probeLocalGatewayHealth({ userTriggered: true, autoFocusPairing: true });
+  });
+
+  byId('btn-gateway-launch-with-creds')?.addEventListener('click', () => {
+    ramSecrets.gatewayRuntimePassword = byId('gateway-runtime-password')?.value || '';
+    ramSecrets.gatewayRuntimeKey = byId('gateway-runtime-key')?.value || '';
+    connectGatewayBridge();
+  });
+
+  byId('btn-gateway-launch-no-creds')?.addEventListener('click', () => {
+    ramSecrets.gatewayRuntimePassword = '';
+    ramSecrets.gatewayRuntimeKey = '';
+    connectGatewayBridge();
+  });
+
+  byId('gateway-runtime-password')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      ramSecrets.gatewayRuntimePassword = byId('gateway-runtime-password')?.value || '';
+      ramSecrets.gatewayRuntimeKey = byId('gateway-runtime-key')?.value || '';
+      connectGatewayBridge();
+    }
+  });
+
   byId('btn-gateway-disconnect')?.addEventListener('click', () => disconnectGatewaySession(false));
   byId('btn-gateway-hud-disconnect')?.addEventListener('click', () => disconnectGatewaySession(false));
 
@@ -3661,6 +4399,24 @@ function wireEventListeners() {
   });
 
   byId('form-credential')?.addEventListener('submit', handleSaveCredential);
+
+  // Modal 4: Confirm Delete
+  byId('btn-confirm-delete-submit')?.addEventListener('click', async () => {
+    const action = appState.pendingConfirmAction;
+    const submitBtn = byId('btn-confirm-delete-submit');
+    if (typeof action !== 'function') {
+      closeActiveModal();
+      return;
+    }
+    if (submitBtn) submitBtn.disabled = true;
+    appState.pendingConfirmAction = null;
+    try {
+      await action();
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+      closeActiveModal();
+    }
+  });
 
   // Google OAuth Popup Message Listener
   window.addEventListener('message', (event) => {

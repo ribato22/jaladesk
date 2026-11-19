@@ -80,14 +80,6 @@
             <button class="btn btn-ghost" id="btn-returning-cloud" type="button">Connect Cloud</button>
             <button class="btn btn-ghost btn-ghost-danger" id="btn-returning-reset" type="button">Reset Local Vault</button>
           </div>
-
-          <div id="lock-reset-confirm" class="confirm-strip" hidden>
-            <p class="confirm-strip-text">Erase the sealed local browser vault? Export a .jvault backup first if not cloud-synced.</p>
-            <div class="confirm-strip-actions">
-              <button class="btn btn-ghost" id="btn-cancel-reset" type="button">Cancel</button>
-              <button class="btn btn-danger" id="btn-confirm-reset" type="button">Erase Local Vault</button>
-            </div>
-          </div>
         </div>
 
         <!-- First-Run / Alternative Onboarding Panel -->
@@ -942,6 +934,18 @@
             </div>
           </div>
 
+          <!-- Selected Host Target Banner -->
+          <div id="gateway-selected-target-banner" class="gateway-target-banner" role="status" hidden>
+            <div class="gateway-target-banner-main">
+              <span id="gateway-selected-target-proto" class="proto-badge proto-ssh mono">SSH</span>
+              <div class="gateway-target-banner-copy">
+                <strong id="gateway-selected-target-title" class="gateway-target-banner-title">Ready to connect: SSH</strong>
+                <span id="gateway-selected-target-sub" class="gateway-target-banner-sub mono"></span>
+              </div>
+            </div>
+            <span id="gateway-selected-target-route" class="meta-pill meta-pill-bastion mono" hidden></span>
+          </div>
+
           <!-- Collapsible Gateway Setup & Docker Quickstart -->
           <div id="gateway-setup-grid" class="gateway-two-col">
             <!-- Connection Console -->
@@ -950,6 +954,66 @@
                 <h2>Gateway Session Console</h2>
                 <p class="panel-desc">Authenticate with a 6-digit pairing code or RAM-only token, acquire a 60s single-use WebSocket ticket, and stream targets from your unlocked Vault without storing credentials on the Gateway.</p>
               </div>
+
+              <!-- Automatic Local Gateway Health Status Pill -->
+              <div id="gateway-local-probe-pill" class="gateway-probe-pill" role="status" aria-live="polite" hidden>
+                <span id="gateway-local-probe-dot" class="status-dot status-dot-idle" aria-hidden="true"></span>
+                <span id="gateway-local-probe-text" class="gateway-probe-text">Checking Local Gateway (127.0.0.1:8443)...</span>
+              </div>
+
+              <!-- 2-Step Inline Guidance When No Local Gateway Is Running -->
+              <section id="gateway-setup-guidance" class="gateway-guidance-block" aria-label="Local gateway setup steps" hidden>
+                <p class="gateway-guidance-reason">Browsers block raw TCP :22/:3389/:5900 sockets; run JalaDesk Gateway locally on your Mac/PC or Docker server, then enter the 6-digit Pairing Code.</p>
+                <ol class="gateway-guidance-steps">
+                  <li class="gateway-guidance-step">
+                    <span class="gateway-step-label">Start JalaDesk Gateway locally or with Docker:</span>
+                    <div class="gateway-cmd-list">
+                      <div class="gateway-cmd-row">
+                        <code class="gateway-cmd-code mono" id="gateway-cmd-npm">npm run gateway -- --host 127.0.0.1 --port 8443</code>
+                        <button class="btn btn-secondary btn-sm" id="btn-copy-gw-npm" type="button">Copy Command</button>
+                      </div>
+                      <div class="gateway-cmd-row">
+                        <code class="gateway-cmd-code mono" id="gateway-cmd-docker">docker compose -f docker-compose.gateway.yml up -d</code>
+                        <button class="btn btn-secondary btn-sm" id="btn-copy-gw-docker" type="button">Copy Command</button>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="gateway-guidance-step">
+                    <span class="gateway-step-label">Detect your running gateway, then enter the 6-digit Pairing Code below to launch this host automatically.</span>
+                  </li>
+                </ol>
+                <div class="gateway-guidance-actions">
+                  <button class="btn btn-secondary btn-sm" id="btn-check-local-gateway" type="button">Check Local Gateway</button>
+                </div>
+              </section>
+
+              <!-- RAM-Only Missing Credentials Prompt (when Gateway is already paired) -->
+              <section id="gateway-cred-prompt" class="gateway-cred-prompt" aria-label="Target credentials prompt" hidden>
+                <div class="gateway-cred-prompt-head">
+                  <strong class="gateway-cred-prompt-title">Target Credentials Needed</strong>
+                  <p id="gateway-cred-prompt-desc" class="gateway-cred-prompt-desc">Gateway is paired. Enter a RAM-only password or SSH key for this session (never stored in browser storage).</p>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="gateway-runtime-password">Session Password (RAM-Only)</label>
+                  <div class="input-with-action">
+                    <input id="gateway-runtime-password" class="text-input" type="password" autocomplete="off" placeholder="Enter password for this target">
+                    <button class="input-action-btn" type="button" data-toggle-visibility="gateway-runtime-password" aria-label="Show session password" aria-pressed="false">
+                      <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path>
+                        <circle cx="12" cy="12" r="3"></circle>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="field-group" id="gateway-runtime-key-wrap" hidden>
+                  <label class="field-label" for="gateway-runtime-key">Or SSH Private Key (PEM, RAM-Only)</label>
+                  <textarea id="gateway-runtime-key" class="text-input text-area mono" rows="3" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+                </div>
+                <div class="gateway-cred-prompt-actions">
+                  <button class="btn btn-primary btn-sm" id="btn-gateway-launch-with-creds" type="button">Launch Session</button>
+                  <button class="btn btn-ghost btn-sm" id="btn-gateway-launch-no-creds" type="button">Connect Without Password</button>
+                </div>
+              </section>
 
               <div id="gateway-fragment-notice" class="inline-alert inline-alert-info" role="status" hidden></div>
 
@@ -1382,6 +1446,46 @@
           <button class="btn btn-primary" id="btn-save-credential" type="submit">Save Credential</button>
         </footer>
       </form>
+    </div>
+
+    <!-- Modal 4: Confirm Destructive Action -->
+    <div id="modal-confirm-delete" class="modal-dialog modal-dialog-compact" role="alertdialog" aria-modal="true" aria-labelledby="confirm-delete-title" aria-describedby="confirm-delete-desc" hidden>
+      <div class="modal-header">
+        <div class="modal-title-with-icon">
+          <span class="modal-danger-icon" aria-hidden="true">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path>
+              <line x1="12" y1="9" x2="12" y2="13"></line>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+          </span>
+          <h2 id="confirm-delete-title">Delete Item?</h2>
+        </div>
+        <button class="modal-close-btn" type="button" data-modal-close aria-label="Close modal">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="confirm-target-summary">
+          <strong id="confirm-delete-item-name" class="confirm-target-name"></strong>
+          <span id="confirm-delete-item-meta" class="confirm-target-meta mono"></span>
+        </div>
+
+        <p id="confirm-delete-desc" class="confirm-delete-desc"></p>
+
+        <div id="confirm-delete-warning" class="inline-alert inline-alert-warn" role="alert" hidden></div>
+
+        <p id="confirm-delete-sync-note" class="confirm-sync-note" hidden></p>
+      </div>
+
+      <footer class="modal-footer">
+        <button class="btn btn-ghost" id="btn-confirm-delete-cancel" type="button" data-modal-close>Cancel</button>
+        <button class="btn btn-danger" id="btn-confirm-delete-submit" type="button">Delete</button>
+      </footer>
     </div>
   </div>
 
