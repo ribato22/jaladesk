@@ -1,0 +1,110 @@
+# syntax=docker/dockerfile:1.7
+# JalaDesk Self-Hosted Web Gateway (Tier 2) — Multi-Stage Linux Build
+# Stage 1 compiles FreeRDP 3 + native/rdp/bridge.cpp (C++17) + TypeScript Gateway.
+# Stage 2 ships a minimal non-root Debian Bookworm runtime with zero external npm runtime deps.
+
+FROM node:24-bookworm AS builder
+
+ARG FREERDP_VERSION=3.32.2
+ARG FREERDP_SHA256=e95a505c0057e4d06a3b120477c421028769deba4db9c639ef3465d050f0955c
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    libssl-dev \
+    pkg-config \
+    zlib1g-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+# Build pinned headless FreeRDP 3 client-common libraries
+WORKDIR /tmp/freerdp-src
+RUN curl -fsSL "https://pub.freerdp.com/releases/freerdp-${FREERDP_VERSION}.tar.gz" -o freerdp.tar.gz \
+  && echo "${FREERDP_SHA256}  freerdp.tar.gz" | sha256sum -c - \
+  && tar -xzf freerdp.tar.gz \
+  && cmake -S "freerdp-${FREERDP_VERSION}" -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/opt/freerdp3 \
+    -DWITH_CLIENT=OFF \
+    -DWITH_CLIENT_COMMON=ON \
+    -DWITH_SERVER=OFF \
+    -DWITH_X11=OFF \
+    -DWITH_SDL=OFF \
+    -DWITH_SDL3=OFF \
+    -DWITH_FFMPEG=OFF \
+    -DWITH_DSP_FFMPEG=OFF \
+    -DWITH_VIDEO_FFMPEG=OFF \
+    -DWITH_SWSCALE=OFF \
+    -DWITH_OPENH264=OFF \
+    -DWITH_OPUS=OFF \
+    -DWITH_CUPS=OFF \
+    -DWITH_PCSC=OFF \
+    -DWITH_FUSE=OFF \
+    -DCHANNEL_URBDRC=OFF \
+    -DWITH_AAD=OFF \
+    -DWITH_JSON_DISABLED=ON \
+    -DBUILD_TESTING=OFF \
+    -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON \
+  && cmake --build build --parallel "$(nproc)" \
+  && cmake --install build \
+  && rm -rf /tmp/freerdp-src
+
+# Compile native/rdp/bridge.cpp and TypeScript gateway
+WORKDIR /build
+COPY package.json package-lock.json tsconfig.json ./
+COPY src ./src
+COPY tests ./tests
+COPY native ./native
+COPY docs/app ./docs/app
+COPY docs/assets ./docs/assets
+
+RUN cmake -S native/rdp -B /tmp/bridge-build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH=/opt/freerdp3 \
+    -DJSON_INCLUDE_DIR=/build/native/third-party \
+    -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON \
+  && cmake --build /tmp/bridge-build --target rdp-bridge --parallel "$(nproc)" \
+  && cmake --install /tmp/bridge-build --prefix /opt/jaladesk \
+  && rm -rf /tmp/bridge-build
+
+RUN npm ci --ignore-scripts \
+  && npm run build
+
+# Stage 2: Minimal non-root runtime image
+FROM node:24-bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    openssh-client \
+    zlib1g \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd -r jaladesk \
+  && useradd -r -g jaladesk -m -d /home/jaladesk -s /usr/sbin/nologin jaladesk
+
+COPY --from=builder /opt/freerdp3/lib /opt/freerdp3/lib
+RUN echo "/opt/freerdp3/lib" > /etc/ld.so.conf.d/freerdp3.conf && ldconfig
+
+COPY --from=builder /opt/jaladesk/bin/rdp-bridge /usr/local/bin/rdp-bridge
+RUN chmod 0755 /usr/local/bin/rdp-bridge
+
+WORKDIR /app
+COPY --from=builder --chown=jaladesk:jaladesk /build/package.json ./package.json
+COPY --from=builder --chown=jaladesk:jaladesk /build/dist ./dist
+COPY --from=builder --chown=jaladesk:jaladesk /build/docs/app ./docs/app
+COPY --from=builder --chown=jaladesk:jaladesk /build/docs/assets ./docs/assets
+
+USER jaladesk
+
+ENV NODE_ENV=production \
+    JALADESK_GATEWAY_HOST=0.0.0.0 \
+    JALADESK_GATEWAY_PORT=8443 \
+    JALADESK_RDP_HELPER=/usr/local/bin/rdp-bridge
+
+EXPOSE 8443
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "const p=process.env.JALADESK_GATEWAY_PORT||8443;fetch('http://127.0.0.1:'+p+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "dist/src/gateway/server.js"]

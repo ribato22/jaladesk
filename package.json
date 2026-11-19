@@ -6,6 +6,7 @@
   "main": "dist/src/desktop/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "gateway": "npm run build && node dist/src/gateway/server.js",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "test:electron": "npm run build && node scripts/test-electron.mjs",
     "start": "npm run build && node scripts/start.mjs",

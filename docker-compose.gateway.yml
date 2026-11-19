@@ -1,0 +1,43 @@
+services:
+  jaladesk-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    image: ghcr.io/ribato22/jaladesk-gateway:1.17.0
+    container_name: jaladesk-gateway
+    restart: unless-stopped
+    ports:
+      - "${JALADESK_GATEWAY_BIND:-127.0.0.1:8443}:8443"
+    environment:
+      JALADESK_GATEWAY_HOST: "0.0.0.0"
+      JALADESK_GATEWAY_PORT: "8443"
+      # Leave JALADESK_GATEWAY_TOKEN empty to generate a random 256-bit token on startup
+      JALADESK_GATEWAY_TOKEN: "${JALADESK_GATEWAY_TOKEN:-}"
+      # Comma-separated browser origins allowed to connect (GitHub Pages PWA + localhost)
+      JALADESK_GATEWAY_CORS_ORIGINS: "${JALADESK_GATEWAY_CORS_ORIGINS:-https://ribato22.github.io}"
+      # Optional IPv4/IPv6 CIDR allowlist/denylist for internal LAN/VPC targets
+      JALADESK_GATEWAY_ALLOW_CIDRS: "${JALADESK_GATEWAY_ALLOW_CIDRS:-}"
+      JALADESK_GATEWAY_DENY_CIDRS: "${JALADESK_GATEWAY_DENY_CIDRS:-}"
+      # Set to "1" to also serve the static PWA directly from this container
+      JALADESK_GATEWAY_SERVE_UI: "${JALADESK_GATEWAY_SERVE_UI:-0}"
+      # Set to "1" to enable the built-in synthetic demo session for testing
+      JALADESK_GATEWAY_DEMO: "${JALADESK_GATEWAY_DEMO:-0}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8443/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

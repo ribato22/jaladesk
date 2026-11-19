@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#05080F">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://www.googleapis.com https://accounts.google.com https://oauth2.googleapis.com https://openidconnect.googleapis.com https://api.github.com https: wss: ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*; manifest-src 'self'; worker-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://www.googleapis.com https://accounts.google.com https://oauth2.googleapis.com https://openidconnect.googleapis.com https://api.github.com https: wss: ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*; manifest-src 'self'; worker-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none';">
   <title>JalaDesk Web — Zero-Knowledge Vault, 2FA &amp; Web Gateway</title>
   <meta name="description" content="Installable zero-knowledge JalaDesk Web Companion PWA with client-side AES-256-GCM encrypted vault, RFC 6238 2FA authenticator, Cloud Sync, and self-hosted Web Gateway console.">
   <link rel="manifest" href="./manifest.webmanifest">
@@ -713,39 +713,123 @@
           </div>
         </section>
 
-        <!-- VIEW 5: Self-Hosted Web Gateway (Phase 3 Ready) -->
+        <!-- VIEW 5: Self-Hosted Web Gateway (Live JSR1 Studio) -->
         <section id="view-gateway" class="stage-view" aria-labelledby="heading-gateway" hidden>
           <div class="view-head">
             <div class="view-title-block">
               <h1 id="heading-gateway">Web Gateway</h1>
-              <p class="view-summary">Self-hosted browser bridge for live RDP, VNC, SSH &amp; SFTP sessions.</p>
+              <p class="view-summary">Self-hosted browser bridge for live RDP, VNC, SSH &amp; SFTP sessions over JSR1 binary WebSocket.</p>
             </div>
-            <div class="gateway-state-pill mono" id="gateway-state-pill">
-              <span class="status-dot status-dot-idle" id="gateway-state-dot" aria-hidden="true"></span>
-              <span id="gateway-state-text">DISCONNECTED</span>
+            <div class="gateway-head-actions">
+              <button class="btn btn-secondary btn-sm" id="btn-gateway-toggle-setup" type="button" hidden>Show Setup &amp; Docker</button>
+              <div class="gateway-state-pill mono" id="gateway-state-pill">
+                <span class="status-dot status-dot-idle" id="gateway-state-dot" aria-hidden="true"></span>
+                <span id="gateway-state-text">DISCONNECTED</span>
+              </div>
             </div>
           </div>
 
-          <div class="gateway-two-col">
+          <!-- Live Interactive Session Stage -->
+          <div id="gateway-live-stage" class="gateway-live-stage" hidden>
+            <div class="gateway-hud-bar">
+              <div class="gateway-hud-left">
+                <span class="status-dot status-dot-ok" id="hud-live-dot" aria-hidden="true"></span>
+                <span class="gateway-hud-target mono" id="hud-target-badge">DEMO &middot; 1280&times;720</span>
+                <div class="gateway-telemetry-strip mono" aria-label="Live stream telemetry">
+                  <span class="hud-metric" id="hud-metric-fps">0 FPS</span>
+                  <span class="hud-metric-sep" aria-hidden="true">&middot;</span>
+                  <span class="hud-metric" id="hud-metric-rtt">0 ms</span>
+                  <span class="hud-metric-sep" aria-hidden="true">&middot;</span>
+                  <span class="hud-metric" id="hud-metric-kbps">0 KB/s</span>
+                  <span class="hud-metric-sep" aria-hidden="true">&middot;</span>
+                  <span class="hud-metric" id="hud-metric-tiles">0 tiles</span>
+                </div>
+              </div>
+
+              <div class="gateway-hud-controls">
+                <div class="segmented-control hud-seg" role="tablist" aria-label="Session surface" id="gateway-pane-tabs">
+                  <button class="seg-btn is-active" type="button" role="tab" aria-selected="true" data-gateway-pane="desktop">Desktop</button>
+                  <button class="seg-btn" type="button" role="tab" aria-selected="false" data-gateway-pane="ssh">SSH</button>
+                  <button class="seg-btn" type="button" role="tab" aria-selected="false" data-gateway-pane="sftp">SFTP</button>
+                </div>
+
+                <div class="segmented-control hud-seg" role="radiogroup" aria-label="Canvas proportional scaling" id="gateway-scale-group">
+                  <button class="seg-btn is-active" type="button" role="radio" aria-checked="true" data-gateway-scale="fit">Fit</button>
+                  <button class="seg-btn" type="button" role="radio" aria-checked="false" data-gateway-scale="fill">Fill</button>
+                  <button class="seg-btn" type="button" role="radio" aria-checked="false" data-gateway-scale="native">1:1</button>
+                </div>
+
+                <button class="btn btn-secondary btn-sm" id="btn-gateway-control-toggle" type="button" aria-pressed="true">Interactive &middot; Release</button>
+
+                <div class="gateway-totp-autotype" id="gateway-totp-autotype-group">
+                  <select id="gateway-totp-select" class="select-compact gateway-totp-select" aria-label="2FA token to auto-type">
+                    <option value="">No 2FA tokens</option>
+                  </select>
+                  <button class="btn btn-secondary btn-sm" id="btn-gateway-autotype-2fa" type="button">2FA Auto-Type</button>
+                </div>
+
+                <button class="btn btn-ghost btn-sm" id="btn-gateway-cad" type="button">Ctrl+Alt+Del</button>
+                <button class="btn btn-ghost btn-sm" id="btn-gateway-fullscreen" type="button">Fullscreen</button>
+                <button class="btn btn-danger btn-sm" id="btn-gateway-hud-disconnect" type="button">Disconnect</button>
+              </div>
+            </div>
+
+            <!-- Live Desktop Canvas Pane (RDP / VNC / Demo) -->
+            <div id="gateway-desktop-pane" class="gateway-desktop-pane">
+              <div id="gateway-canvas-stage" class="gateway-canvas-stage" data-scale="fit">
+                <canvas id="gateway-canvas" class="gateway-canvas" width="1280" height="720" tabindex="0" aria-label="Live remote desktop session canvas"></canvas>
+              </div>
+              <div id="gateway-viewonly-banner" class="gateway-viewonly-banner" role="status" hidden>
+                <span>View-Only Observer active &mdash; pointer and keyboard input are blocked until you click Take Control.</span>
+              </div>
+            </div>
+
+            <!-- Live SSH Terminal Pane -->
+            <div id="gateway-ssh-pane" class="gateway-ssh-pane" hidden>
+              <pre id="gateway-ssh-console" class="gateway-ssh-console mono" tabindex="0" aria-label="Live SSH terminal console"></pre>
+              <form id="form-gateway-ssh-input" class="gateway-ssh-form" novalidate>
+                <input id="gateway-ssh-input" class="text-input mono" type="text" autocomplete="off" placeholder="Type command (e.g. help, whoami, uname -a, ls) and press Enter...">
+                <button class="btn btn-primary btn-sm" id="btn-gateway-ssh-send" type="submit">Send</button>
+                <button class="btn btn-secondary btn-sm" id="btn-gateway-ssh-ctrlc" type="button">Ctrl+C</button>
+                <button class="btn btn-ghost btn-sm" id="btn-gateway-ssh-clear" type="button">Clear</button>
+              </form>
+            </div>
+
+            <!-- Live SFTP File Browser Pane -->
+            <div id="gateway-sftp-pane" class="gateway-sftp-pane" hidden>
+              <form id="form-gateway-sftp-path" class="gateway-sftp-toolbar" novalidate>
+                <input id="gateway-sftp-path" class="text-input mono" type="text" value="/" autocomplete="off" aria-label="Remote SFTP directory path">
+                <button class="btn btn-secondary btn-sm" id="btn-gateway-sftp-list" type="submit">Refresh</button>
+                <button class="btn btn-ghost btn-sm" id="btn-gateway-sftp-up" type="button">Parent Dir</button>
+                <input id="gateway-sftp-file-input" class="sr-only" type="file">
+                <button class="btn btn-primary btn-sm" id="btn-gateway-sftp-upload" type="button">Upload File</button>
+              </form>
+              <p id="gateway-sftp-status" class="gateway-sftp-status mono">Ready. Click Refresh to list files over SFTP.</p>
+              <div id="gateway-sftp-list" class="gateway-sftp-list" aria-live="polite"></div>
+            </div>
+          </div>
+
+          <!-- Collapsible Gateway Setup & Docker Quickstart -->
+          <div id="gateway-setup-grid" class="gateway-two-col">
             <!-- Connection Console -->
             <div class="studio-panel">
               <div class="panel-head">
                 <h2>Gateway Session Console</h2>
-                <p class="panel-desc">Connect to your own JalaDesk Docker Gateway over TLS WebSocket. Ephemeral tokens stay in RAM and URL fragments are scrubbed automatically.</p>
+                <p class="panel-desc">Authenticate with a 6-digit pairing code or RAM-only token, acquire a 60s single-use WebSocket ticket, and stream targets from your unlocked Vault without storing credentials on the Gateway.</p>
               </div>
 
               <div id="gateway-fragment-notice" class="inline-alert inline-alert-info" role="status" hidden></div>
 
               <form id="form-gateway-connect" class="stack-form" novalidate>
                 <div class="field-group">
-                  <label class="field-label" for="gateway-ws-url">Gateway WebSocket URL</label>
-                  <input id="gateway-ws-url" class="text-input mono" type="url" autocomplete="off" value="wss://gateway.local:8443" placeholder="wss://gateway.local:8443" required>
+                  <label class="field-label" for="gateway-ws-url">Gateway URL</label>
+                  <input id="gateway-ws-url" class="text-input mono" type="url" autocomplete="off" value="wss://gateway.local:8443" placeholder="wss://gateway.local:8443 or http://127.0.0.1:8443" required>
                 </div>
 
                 <div class="field-group">
-                  <label class="field-label" for="gateway-host-select">Vault Target Host</label>
+                  <label class="field-label" for="gateway-host-select">Session Target</label>
                   <select id="gateway-host-select" class="text-input">
-                    <option value="">Select a target from unlocked vault...</option>
+                    <option value="__demo__">Demo Session (Live Synthetic Desktop, SSH &amp; SFTP)</option>
                   </select>
                 </div>
 
@@ -763,7 +847,7 @@
                     id="gateway-pairing-code"
                     class="text-input mono pairing-input"
                     type="text"
-                    inputmode="text"
+                    inputmode="numeric"
                     maxlength="7"
                     autocomplete="off"
                     placeholder="482 910"
@@ -784,7 +868,7 @@
                 <div class="switch-row">
                   <div class="switch-copy">
                     <span class="switch-title" id="label-view-only">View-Only Observer</span>
-                    <span class="switch-desc">Block pointer clicks and keyboard input while auditing a live desktop session.</span>
+                    <span class="switch-desc">Connect in read-only observer mode and acquire exclusive control only when needed.</span>
                   </div>
                   <button
                     id="gateway-view-only-switch"
@@ -806,11 +890,11 @@
 
               <div class="gateway-viewport" id="gateway-viewport">
                 <div class="gateway-viewport-bar">
-                  <span class="mono" id="gateway-target-badge">NO TARGET SELECTED</span>
+                  <span class="mono" id="gateway-target-badge">DEMO SESSION &middot; SYNTHETIC</span>
                   <span class="mono" id="gateway-mode-badge">INTERACTIVE</span>
                 </div>
                 <div class="gateway-console-body mono" id="gateway-log" role="log" aria-live="polite">
-                  <p class="console-line">Ready. Select a Vault host and enter a 6-digit pairing code or #token= fragment.</p>
+                  <p class="console-line">Ready. Select Demo Session or a Vault host and enter a 6-digit pairing code or session token.</p>
                 </div>
               </div>
             </div>
@@ -819,7 +903,7 @@
             <div class="studio-panel">
               <div class="panel-head">
                 <h2>Self-Hosted Docker Gateway</h2>
-                <p class="panel-desc">Deploy your own zero-trust protocol bridge in seconds. Browsers connect over WSS while raw RDP, VNC, SSH, and SFTP stay inside your private network.</p>
+                <p class="panel-desc">Deploy your own zero-trust JSR1 protocol bridge in seconds. Browsers authenticate via 60s single-use WebSocket tickets while raw RDP, VNC, SSH, and SFTP stay inside your private network.</p>
               </div>
 
               <div class="segmented-control" role="tablist" aria-label="Docker quickstart format" id="docker-quickstart-tabs">
@@ -828,21 +912,21 @@
               </div>
 
               <div class="code-well">
-                <pre class="code-block mono" id="docker-snippet-code">docker run --rm -p 8443:8443 \
-  -e JALADESK_PAIRING=true \
-  -e JALADESK_ORIGIN=https://ribato22.github.io \
-  ghcr.io/ribato22/jaladesk-gateway:latest</pre>
+                <pre class="code-block mono" id="docker-snippet-code">docker run --rm -p 127.0.0.1:8443:8443 \
+  -e JALADESK_GATEWAY_CORS_ORIGINS=https://ribato22.github.io \
+  -e JALADESK_GATEWAY_DEMO=1 \
+  ghcr.io/ribato22/jaladesk-gateway:1.17.0</pre>
                 <button class="btn btn-secondary btn-sm code-copy-btn" id="btn-copy-docker" type="button">Copy Snippet</button>
               </div>
 
               <div class="capability-list" aria-label="Gateway protocol capabilities">
                 <div class="capability-row">
                   <span class="proto-badge proto-rdp mono">RDP</span>
-                  <span class="capability-copy">Native FreeRDP 3.x dirty-rect stream &amp; opt-in clipboard</span>
+                  <span class="capability-copy">Native FreeRDP 3.x dirty-rect PNG tiles &amp; closed-loop ACK flow control</span>
                 </div>
                 <div class="capability-row">
                   <span class="proto-badge proto-vnc mono">VNC</span>
-                  <span class="capability-copy">RFB 3.3 / 3.8 &amp; Apple Remote Desktop tile relay</span>
+                  <span class="capability-copy">RFB 3.3 / 3.8 &amp; Apple Remote Desktop tile relay with proportional input</span>
                 </div>
                 <div class="capability-row">
                   <span class="proto-badge proto-ssh mono">SSH</span>
@@ -850,7 +934,7 @@
                 </div>
                 <div class="capability-row">
                   <span class="proto-badge proto-sftp mono">SFTP</span>
-                  <span class="capability-copy">Chunked streaming upload &amp; download over WSS</span>
+                  <span class="capability-copy">Chunked streaming upload, download &amp; directory listing over JSR1</span>
                 </div>
               </div>
             </div>
