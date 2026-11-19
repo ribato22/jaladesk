@@ -835,6 +835,7 @@ class TermiusInteractiveTerminal extends StatefulWidget {
   final VoidCallback onOpenSnippetsStudio;
   final void Function(int cols, int rows)? onTerminalResize;
   final bool showAccessoryDeck;
+  final FocusNode? focusNode;
   final ValueChanged<double>? onFontSizeChanged;
   final VoidCallback? onUserInteraction;
 
@@ -851,6 +852,7 @@ class TermiusInteractiveTerminal extends StatefulWidget {
     required this.onOpenSnippetsStudio,
     this.onTerminalResize,
     this.showAccessoryDeck = true,
+    this.focusNode,
     this.onFontSizeChanged,
     this.onUserInteraction,
   });
@@ -863,7 +865,8 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
   static const String _kSentinel = '\u200B\u200B';
 
   late final TextEditingController _imeController;
-  final FocusNode _imeFocusNode = FocusNode();
+  FocusNode? _ownedImeFocusNode;
+  FocusNode get _imeFocusNode => widget.focusNode ?? (_ownedImeFocusNode ??= FocusNode());
   final ScrollController _scrollController = ScrollController();
 
   bool _stickyCtrl = false;
@@ -878,6 +881,10 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
   int _lastRows = 0;
   Timer? _blinkTimer;
 
+  void _onFocusChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
@@ -889,9 +896,7 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
       ),
     );
     widget.buffer.addListener(_onBufferUpdated);
-    _imeFocusNode.addListener(() {
-      if (mounted) setState(() {});
-    });
+    _imeFocusNode.addListener(_onFocusChanged);
     _blinkTimer = Timer.periodic(const Duration(milliseconds: 530), (_) {
       if (mounted && _imeFocusNode.hasFocus) {
         setState(() => _cursorBlinkVisible = !_cursorBlinkVisible);
@@ -906,14 +911,19 @@ class _TermiusInteractiveTerminalState extends State<TermiusInteractiveTerminal>
       oldWidget.buffer.removeListener(_onBufferUpdated);
       widget.buffer.addListener(_onBufferUpdated);
     }
+    if (oldWidget.focusNode != widget.focusNode) {
+      (oldWidget.focusNode ?? _ownedImeFocusNode)?.removeListener(_onFocusChanged);
+      _imeFocusNode.addListener(_onFocusChanged);
+    }
   }
 
   @override
   void dispose() {
     _blinkTimer?.cancel();
     widget.buffer.removeListener(_onBufferUpdated);
+    _imeFocusNode.removeListener(_onFocusChanged);
     _imeController.dispose();
-    _imeFocusNode.dispose();
+    _ownedImeFocusNode?.dispose();
     _scrollController.dispose();
     super.dispose();
   }

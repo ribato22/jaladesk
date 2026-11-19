@@ -23,6 +23,8 @@ import 'terminal/sftp_explorer_view.dart';
 import 'terminal/sftp_transfer_service.dart';
 import 'terminal/termius_terminal.dart';
 import 'ui/jala_enterprise_components.dart';
+import 'ui/jala_flex_decks.dart';
+import 'ui/jala_foldable_posture.dart';
 import 'ui/jala_user_guide_screen.dart';
 
 void main() {
@@ -685,6 +687,11 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   Timer? _fullScreenAutoHideTimer;
   bool _landscapeLocked = false;
   bool _showTabletSidebar = true;
+  bool _flexModeOverrideOff = false;
+  bool _flexDragLockActive = false;
+  bool _flexTermCtrlLatched = false;
+  bool _flexTermAltLatched = false;
+  final FocusNode _terminalImeFocusNode = FocusNode(debugLabel: 'TerminalFlexKeyboard');
   final TransformationController _canvasTransformCtrl = TransformationController();
   Size _lastMeasuredCanvasSize = const Size(1280, 800);
   Size _lastAppliedSessionViewportSize = Size.zero;
@@ -1607,6 +1614,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     _desktopKeyInputCtrl.dispose();
     _desktopImeCtrl.dispose();
     _desktopImeFocusNode.dispose();
+    _terminalImeFocusNode.dispose();
     _closeDesktopSession();
     _closeSshClient();
     final authProvider = _googleAuthProvider;
@@ -7231,6 +7239,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     required double normY,
     bool click = false,
     bool rightClick = false,
+    bool middleClick = false,
     bool doubleClick = false,
     bool isDragging = false,
   }) {
@@ -7238,13 +7247,22 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     final ry = (normY.clamp(0.0, 1.0) * _desktopServerHeight).round().clamp(0, _desktopServerHeight - 1);
 
     if (_rdpFfiClient != null && _rdpFfiClient!.isConnected) {
-      if (click || rightClick || doubleClick) {
-        _rdpFfiClient!.sendMouseClick(rx, ry, rightClick: rightClick, doubleClick: doubleClick);
+      if (click || rightClick || middleClick || doubleClick) {
+        _rdpFfiClient!.sendMouseClick(
+          rx,
+          ry,
+          rightClick: rightClick,
+          middleClick: middleClick,
+          doubleClick: doubleClick,
+        );
       } else {
         _rdpFfiClient!.sendMouseMove(rx, ry);
       }
     } else if (_vncRfbClient != null && _vncRfbClient!.isConnected) {
-      if (rightClick) {
+      if (middleClick) {
+        _vncRfbClient!.sendPointerEvent(rx, ry, 2);
+        _vncRfbClient!.sendPointerEvent(rx, ry, 0);
+      } else if (rightClick) {
         _vncRfbClient!.sendPointerEvent(rx, ry, 4);
         _vncRfbClient!.sendPointerEvent(rx, ry, 0);
       } else if (doubleClick) {
@@ -7495,6 +7513,245 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       _lastRdpAction = 'Pasted ${text.length} character(s) to remote desktop';
     });
   }
+
+  List<JalaFlexTotpEntry> _buildFlexTotpEntries() {
+    final nowEpochSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    return [
+      for (final item in _totpItems)
+        JalaFlexTotpEntry(
+          id: item.id,
+          issuer: item.issuer.isNotEmpty ? item.issuer : 'Vault 2FA',
+          account: item.label,
+          code: Rfc6238Totp.generateCode(
+            item.secretBase32,
+            periodSeconds: item.periodSeconds,
+            algorithm: item.algorithm,
+            digits: item.digits,
+          ),
+          remainingSeconds: item.periodSeconds.clamp(10, 120) -
+              (nowEpochSec % item.periodSeconds.clamp(10, 120)),
+        ),
+    ];
+  }
+
+  List<JalaFlexSnippetEntry> _buildFlexSnippetEntries() {
+    final combined = [..._customSnippets, ...TerminalSnippetItem.builtIn];
+    return [
+      for (final s in combined)
+        JalaFlexSnippetEntry(
+          id: s.id,
+          label: s.label,
+          command: s.command,
+          category: s.category,
+        ),
+    ];
+  }
+
+  void _handleFlexPointerDelta(Offset delta) {
+    if (_viewOnly) return;
+    final refW = _lastMeasuredCanvasSize.width.clamp(320.0, 4096.0);
+    final refH = _lastMeasuredCanvasSize.height.clamp(200.0, 4096.0);
+    final nextX = (_cursorNorm.dx + (delta.dx / refW)).clamp(0.0, 1.0);
+    final nextY = (_cursorNorm.dy + (delta.dy / refH)).clamp(0.0, 1.0);
+    final nextNorm = Offset(nextX, nextY);
+    setState(() => _cursorNorm = nextNorm);
+    _dispatchDesktopPointer(
+      normX: nextX,
+      normY: nextY,
+      isDragging: _flexDragLockActive,
+    );
+  }
+
+  void _handleFlexMouseClick({bool right = false, bool middle = false}) {
+    if (_viewOnly) return;
+    final label = middle ? 'Middle Click' : (right ? 'Right Click' : 'Left Click');
+    setState(() {
+      _lastRdpAction =
+          '$label @ (${(_cursorNorm.dx * _desktopServerWidth).round()}, ${(_cursorNorm.dy * _desktopServerHeight).round()})';
+    });
+    _dispatchDesktopPointer(
+      normX: _cursorNorm.dx,
+      normY: _cursorNorm.dy,
+      click: !right && !middle,
+      rightClick: right,
+      middleClick: middle,
+    );
+  }
+
+  void _handleFlexToggleDragLock() {
+    if (_viewOnly) return;
+    final next = !_flexDragLockActive;
+    setState(() {
+      _flexDragLockActive = next;
+      _lastRdpAction = next ? 'Drag-Lock Active' : 'Drag-Lock Released';
+    });
+    _dispatchDesktopLeftDragButton(_cursorNorm, down: next);
+  }
+
+  void _handleFlexScrollDelta(double dy) {
+    if (_viewOnly) return;
+    final wheelDelta = (dy * -2.0).round().clamp(-120, 120);
+    if (wheelDelta == 0) return;
+    _dispatchDesktopWheel(_cursorNorm, wheelDelta);
+  }
+
+  void _handleFlexPinchScale(double scaleRatio) {
+    final currentScale = _canvasTransformCtrl.value.storage[0].clamp(1.0, 5.0);
+    final nextScale = (currentScale * scaleRatio).clamp(1.0, 4.0);
+    if (nextScale <= 1.02) {
+      _canvasTransformCtrl.value = Matrix4.identity();
+      return;
+    }
+    final vpW = _lastMeasuredCanvasSize.width.clamp(160.0, 4096.0);
+    final vpH = _lastMeasuredCanvasSize.height.clamp(120.0, 4096.0);
+    final focusX = _cursorNorm.dx.clamp(0.0, 1.0) * vpW;
+    final focusY = _cursorNorm.dy.clamp(0.0, 1.0) * vpH;
+    final tx = (focusX - focusX * nextScale).clamp(vpW * (1.0 - nextScale), 0.0);
+    final ty = (focusY - focusY * nextScale).clamp(vpH * (1.0 - nextScale), 0.0);
+    _canvasTransformCtrl.value = Matrix4.identity()
+      ..translateByDouble(tx, ty, 0.0, 1.0)
+      ..scaleByDouble(nextScale, nextScale, 1.0, 1.0);
+  }
+
+  void _handleFlexDesktopSpecialKey(String keyLabel) {
+    if (_viewOnly) return;
+    _dispatchDesktopKey(keyLabel);
+    setState(() {
+      _lastRdpAction =
+          'Sent Key: [${_activeModifierSummary()}$keyLabel] to ${_activeRdpHost?.name ?? "session"}';
+    });
+  }
+
+  void _handleFlexToggleDesktopModifier(String mod) {
+    if (_viewOnly) return;
+    setState(() {
+      switch (mod) {
+        case 'Ctrl':
+          _ctrlLocked = !_ctrlLocked;
+          break;
+        case 'Alt':
+          _altLocked = !_altLocked;
+          break;
+        case 'Win':
+          _winLocked = !_winLocked;
+          break;
+        case 'Shift':
+          _shiftLocked = !_shiftLocked;
+          break;
+      }
+    });
+  }
+
+  void _handleFlexAutoTypeDesktopTotp(String code) {
+    if (_viewOnly || code.isEmpty) return;
+    for (int i = 0; i < code.length; i++) {
+      _dispatchDesktopKey(code[i], autoClearStickyModifiers: false);
+    }
+    setState(() {
+      _lastRdpAction = '2FA Auto-Typed (${code.length} digits)';
+    });
+  }
+
+  void _handleFlexCycleFitMode() {
+    const modes = JumpCanvasFitMode.values;
+    final next = modes[(_canvasFitMode.index + 1) % modes.length];
+    setState(() {
+      _setCanvasFitMode(next);
+      _lastRdpAction = 'Fit Mode: ${next.label}';
+    });
+  }
+
+  void _handleFlexToggleTerminalModifier(String mod) {
+    setState(() {
+      if (mod == 'Ctrl') _flexTermCtrlLatched = !_flexTermCtrlLatched;
+      if (mod == 'Alt') _flexTermAltLatched = !_flexTermAltLatched;
+    });
+  }
+
+  void _handleFlexTerminalSendKey(String raw) {
+    String payload = raw;
+    if (raw.length == 1 && (_flexTermCtrlLatched || _flexTermAltLatched)) {
+      final code = raw.codeUnitAt(0);
+      if (_flexTermCtrlLatched && code >= 64 && code <= 122) {
+        final upper = raw.toUpperCase().codeUnitAt(0);
+        if (upper >= 65 && upper <= 90) {
+          payload = String.fromCharCode(upper - 64);
+        }
+      }
+      if (_flexTermAltLatched) {
+        payload = '\x1b$payload';
+      }
+      setState(() {
+        _flexTermCtrlLatched = false;
+        _flexTermAltLatched = false;
+      });
+    }
+    _sendRawTerminalInput(payload);
+  }
+
+  void _handleFlexToggleTerminalSoftKeyboard() {
+    if (_terminalImeFocusNode.hasFocus) {
+      _terminalImeFocusNode.unfocus();
+      SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    } else {
+      _terminalImeFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+    }
+  }
+
+  Future<void> _pasteClipboardToTerminal() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text ?? '';
+    if (text.isNotEmpty) {
+      _sendRawTerminalInput(text);
+    }
+  }
+
+  Future<void> _showCreateSftpFolderDialog() async {
+    final ctrl = TextEditingController();
+    final folderName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => JalaStudioDialog(
+        dialogKey: const Key('dialog_flex_sftp_new_folder'),
+        title: 'New Remote Folder',
+        subtitle: _sftpCurrentPath,
+        icon: Icons.create_new_folder_outlined,
+        onClose: () => Navigator.of(ctx).pop(),
+        body: TextField(
+          controller: ctrl,
+          autofocus: true,
+          style: const TextStyle(fontSize: 13, color: JalaPalette.text),
+          decoration: const InputDecoration(
+            hintText: 'Folder name (e.g. backups)',
+            isDense: true,
+          ),
+          onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+        ),
+        footer: JalaDialogFooterBar(
+          onCancel: () => Navigator.of(ctx).pop(),
+          primaryIcon: Icons.create_new_folder_rounded,
+          primaryLabel: 'Create Folder',
+          onPrimary: () => Navigator.of(ctx).pop(ctrl.text.trim()),
+        ),
+      ),
+    );
+    ctrl.dispose();
+    if (folderName != null && folderName.isNotEmpty && mounted) {
+      await _createSftpFolder(folderName);
+    }
+  }
+
+  void _handleFlexToggleOverride() {
+    setState(() {
+      _flexModeOverrideOff = !_flexModeOverrideOff;
+    });
+  }
+
+  String get lastRdpActionForVerification => _lastRdpAction;
+  Offset get cursorNormForVerification => _cursorNorm;
+  bool get flexDragLockForVerification => _flexDragLockActive;
+  bool get flexModeOverrideOffForVerification => _flexModeOverrideOff;
+  AnsiTerminalBuffer get terminalBufferForVerification => _terminalBuffer;
 
   void _showQrPairDialog() {
     final controller = TextEditingController(
@@ -7823,24 +8080,48 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       onPointerDown: (_) => _resetVaultInactivityTimer(),
       child: LayoutBuilder(
         builder: (context, windowConstraints) {
+          final MediaQueryData rootMq = MediaQuery.of(context);
+          final JalaFoldablePosture flexPosture = JalaFoldablePosture.fromMediaQuery(
+            rootMq,
+            overrideDisabled: _flexModeOverrideOff,
+          );
           final double winW = windowConstraints.maxWidth;
-          final bool isTrueTablet = MediaQuery.sizeOf(context).shortestSide >= 600;
+          final bool isTrueTablet = rootMq.size.shortestSide >= 600;
           final bool isPhoneLandscape = winW >= 600 && !isTrueTablet;
           final bool isWideScreen = winW >= 600;
           final bool showLeftNavRail = isTrueTablet;
           final bool isLargeTablet = isTrueTablet && winW >= 840;
           final bool isFullTablet = isTrueTablet && winW >= 960;
           final bool activeFullScreen = _isFullScreen && (_tabIndex == 1 || _tabIndex == 2);
+          final bool isTabletopSession = flexPosture.isTabletop && (_tabIndex == 1 || _tabIndex == 2);
           final bool showCompactSessionLandscape = isPhoneLandscape && (_tabIndex == 1 || _tabIndex == 2);
-          final EdgeInsets rootMediaPadding = MediaQuery.paddingOf(context);
+          final EdgeInsets rootMediaPadding = rootMq.padding;
           final double appBarSymPadX = max(rootMediaPadding.left, rootMediaPadding.right) + 8.0;
-          final double rootKeyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+          final double rootKeyboardInset = rootMq.viewInsets.bottom;
           final bool keyboardOpenInSession = rootKeyboardInset > 0 && (_tabIndex == 1 || _tabIndex == 2);
+          final double topChromeOffset = showCompactSessionLandscape
+              ? 0.0
+              : ((isPhoneLandscape ? 48.0 : 56.0) + rootMediaPadding.top);
+
+          // Root-aligned Android Foldable Tabletop Mini-Laptop Mode for RDP/VNC (Tab 1) & SSH/SFTP (Tab 2)
+          if (isTabletopSession) {
+            return _buildTabletopFlexSessionScaffold(
+              flexPosture: flexPosture,
+              isWideScreen: isWideScreen,
+              activeFullScreen: activeFullScreen,
+              rootKeyboardInset: rootKeyboardInset,
+            );
+          }
 
           final Widget activeTabBody = IndexedStack(
             index: _tabIndex,
             children: [
-              RepaintBoundary(child: _buildConnectionsTab()),
+              RepaintBoundary(
+                child: _buildConnectionsTab(
+                  flexPosture: flexPosture,
+                  topChromeOffset: topChromeOffset,
+                ),
+              ),
               RepaintBoundary(
                 child: _buildJumpRdpCanvasTab(
                   isFullScreen: activeFullScreen,
@@ -7853,9 +8134,15 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                   isFullScreen: activeFullScreen,
                   isWideScreen: isWideScreen,
                   isPhoneLandscape: isPhoneLandscape,
+                  flexPosture: flexPosture,
                 ),
               ),
-              RepaintBoundary(child: _buildSecurityVaultTab()),
+              RepaintBoundary(
+                child: _buildSecurityVaultTab(
+                  flexPosture: flexPosture,
+                  topChromeOffset: topChromeOffset,
+                ),
+              ),
             ],
           );
 
@@ -8030,7 +8317,50 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         ),
                         const SizedBox(width: 6),
                       ],
-                      if (isLargeTablet && (_tabIndex == 1 || _tabIndex == 2)) ...[
+                      if (flexPosture.isOverridden && flexPosture.hasPhysicalFlexPosture) ...[
+                        Tooltip(
+                          message: 'Restore Flex Mode',
+                          child: InkWell(
+                            key: const Key('btn_restore_flex_mode'),
+                            borderRadius: BorderRadius.circular(8),
+                            onTap: _handleFlexToggleOverride,
+                            child: Container(
+                              height: 30,
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: JalaPalette.selected,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: JalaPalette.brandGold.withValues(alpha: 0.65),
+                                  width: 0.9,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.unfold_more_rounded,
+                                    size: 14,
+                                    color: JalaPalette.brandGold,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    winW >= 420 ? 'Restore Flex Mode' : 'Flex',
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                      color: JalaPalette.brandGold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 5),
+                      ],
+                      if (isLargeTablet && !flexPosture.isBook && (_tabIndex == 1 || _tabIndex == 2)) ...[
                         IconButton(
                           tooltip: _showTabletSidebar ? 'Hide Host Sidebar' : 'Show Host Sidebar',
                           onPressed: () => setState(() => _showTabletSidebar = !_showTabletSidebar),
@@ -8164,7 +8494,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                         ),
                       ),
                     ),
-                    if (isLargeTablet && _showTabletSidebar && (_tabIndex == 1 || _tabIndex == 2))
+                    if (isLargeTablet && _showTabletSidebar && !flexPosture.isBook && (_tabIndex == 1 || _tabIndex == 2))
                       _buildTabletQuickHostSidebar(),
                     Expanded(child: activeTabBody),
                   ],
@@ -8244,6 +8574,180 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           Positioned.fill(
             child: _buildVaultPinLockScreen(),
           ),
+      ],
+    );
+  }
+
+  /// Root-aligned Android Foldable Tabletop Mini-Laptop workspace for Tab 1 (RDP/VNC) & Tab 2 (SSH/SFTP).
+  /// Top display pane is strictly anchored to `0 .. flexPosture.gapStart`, protected by `JalaCreaseDivider`,
+  /// and paired with the bottom tactile Flex control deck (`resizeToAvoidBottomInset: false` locks top viewport height!).
+  Widget _buildTabletopFlexSessionScaffold({
+    required JalaFoldablePosture flexPosture,
+    required bool isWideScreen,
+    required bool activeFullScreen,
+    required double rootKeyboardInset,
+  }) {
+    final bool isDesktopTab = _tabIndex == 1;
+    final Widget topPane = isDesktopTab
+        ? _buildJumpRdpCanvasTab(
+            isFullScreen: false,
+            isWideScreen: isWideScreen,
+            isPhoneLandscape: false,
+            flexTopPaneOnly: true,
+          )
+        : _buildFlexSshTopPane();
+
+    final Widget bottomDeck = ValueListenableBuilder<int>(
+      valueListenable: _totpSecondsNotifier,
+      builder: (context, _, __) {
+        final totpEntries = _buildFlexTotpEntries();
+        if (isDesktopTab) {
+          return JalaFlexDesktopTrackpadDeck(
+            hostTitle: _activeRdpHost?.name ?? 'No Host Selected',
+            protocolLabel: _activeRdpHost?.protocol.name.toUpperCase() ?? 'RDP',
+            isLiveConnected: _desktopLiveConnected,
+            isFullScreen: activeFullScreen,
+            viewInsetsBottom: rootKeyboardInset,
+            ctrlLatched: _ctrlLocked,
+            altLatched: _altLocked,
+            winLatched: _winLocked,
+            shiftLatched: _shiftLocked,
+            dragLockActive: _flexDragLockActive,
+            fitModeLabel: _canvasFitMode.shortLabel,
+            totpEntries: totpEntries,
+            activeTabIndex: 1,
+            onSelectTab: (idx) => setState(() => _tabIndex = idx),
+            onPointerMoveDelta: _handleFlexPointerDelta,
+            onLeftClick: () => _handleFlexMouseClick(),
+            onMiddleClick: () => _handleFlexMouseClick(middle: true),
+            onRightClick: () => _handleFlexMouseClick(right: true),
+            onToggleDragLock: _handleFlexToggleDragLock,
+            onScrollDelta: _handleFlexScrollDelta,
+            onPinchScale: _handleFlexPinchScale,
+            onSpecialKey: _handleFlexDesktopSpecialKey,
+            onToggleModifier: _handleFlexToggleDesktopModifier,
+            onToggleSoftKeyboard: () => _toggleDesktopLiveKeyboard(),
+            onCycleFitMode: _handleFlexCycleFitMode,
+            onOpenDisplaySizing: _showDisplaySizingModal,
+            onPasteClipboard: _pasteClipboardToRemoteDesktop,
+            onAutoTypeTotp: _handleFlexAutoTypeDesktopTotp,
+            onToggleFlexOverride: _handleFlexToggleOverride,
+            onDisconnect: _disconnectDesktopSession,
+            onConnect: () {
+              if (_activeRdpHost != null) {
+                _connectToHost(_activeRdpHost!);
+              } else {
+                setState(() => _tabIndex = 0);
+              }
+            },
+          );
+        }
+
+        return JalaFlexTerminalDeck(
+          hostTitle: _activeSshHost?.name ?? 'No Active Session',
+          isLiveConnected: _sshLiveConnected || _sshOfflineSessionOpen,
+          subMode: _sshSubMode == 'sftp' ? 'sftp' : 'terminal',
+          viewInsetsBottom: rootKeyboardInset,
+          ctrlLatched: _flexTermCtrlLatched,
+          altLatched: _flexTermAltLatched,
+          snippets: _buildFlexSnippetEntries(),
+          totpEntries: totpEntries,
+          activeTabIndex: 2,
+          onSelectTab: (idx) => setState(() => _tabIndex = idx),
+          onSwitchSubMode: (mode) {
+            setState(() => _sshSubMode = mode);
+            if (mode == 'sftp' && _sshLiveConnected) {
+              _browseRemoteSftpPath(_sftpCurrentPath);
+            }
+          },
+          onSendKey: _handleFlexTerminalSendKey,
+          onToggleModifier: _handleFlexToggleTerminalModifier,
+          onRunSnippet: (cmd) {
+            if (_sshSubMode == 'sftp') {
+              setState(() => _sshSubMode = 'terminal');
+            }
+            _sendRawTerminalInput(
+              cmd.endsWith('\n') || cmd.endsWith('\r') ? cmd : '$cmd\r',
+            );
+          },
+          onPasteClipboard: _pasteClipboardToTerminal,
+          onAutoTypeTotp: (code) => _sendRawTerminalInput(code),
+          onToggleSoftKeyboard: _handleFlexToggleTerminalSoftKeyboard,
+          onOpenPortForward: () => _showPortForwardStudioSheet(initialSshHost: _activeSshHost),
+          onOpenTheme: _showTerminalThemeSheet,
+          onToggleFlexOverride: _handleFlexToggleOverride,
+          onDisconnect: _disconnectSshSession,
+          onSftpUpload: _uploadSftpFilesFromDevice,
+          onSftpNewFolder: _showCreateSftpFolderDialog,
+          onSftpRefresh: () => _browseRemoteSftpPath(_sftpCurrentPath),
+        );
+      },
+    );
+
+    return Scaffold(
+      resizeToAvoidBottomInset: false,
+      backgroundColor: JalaPalette.splashBg,
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            key: Key(isDesktopTab ? 'flex_desktop_top_pane' : 'flex_ssh_top_pane'),
+            height: flexPosture.gapStart,
+            width: double.infinity,
+            child: topPane,
+          ),
+          JalaCreaseDivider(
+            height: flexPosture.gapHeight,
+            label: isDesktopTab ? 'FLEX MINI-LAPTOP • RDP' : 'FLEX MINI-LAPTOP • SSH',
+          ),
+          Expanded(child: bottomDeck),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFlexSshTopPane() {
+    final bool hasActiveSession = _sshLiveConnected || _sshOfflineSessionOpen;
+    final activeTheme = TerminalThemePreset.byId(_terminalThemeId);
+    final Widget content;
+    if (_sshSubMode == 'sftp') {
+      content = _buildSftpMobileBrowser();
+    } else if (!hasActiveSession) {
+      content = _buildSshDisconnectedEmptyState();
+    } else {
+      content = TermiusInteractiveTerminal(
+        buffer: _terminalBuffer,
+        theme: activeTheme,
+        fontSize: _terminalFontSize,
+        isLiveSshConnected: _sshLiveConnected,
+        showAccessoryDeck: false,
+        focusNode: _terminalImeFocusNode,
+        snippets: [..._customSnippets, ...TerminalSnippetItem.builtIn],
+        onSendRaw: _sendRawTerminalInput,
+        onRunSnippet: _runTerminalSnippet,
+        onOpenThemePicker: _showTerminalThemeSheet,
+        onOpenSnippetsStudio: _showSnippetsStudioSheet,
+        onFontSizeChanged: (nextSize) {
+          setState(() => _terminalFontSize = nextSize.clamp(10.0, 20.0));
+          unawaited(_saveScalarSettingsOnly());
+        },
+        onTerminalResize: (cols, rows) {
+          try {
+            _sshPtySession?.resizeTerminal(cols, rows);
+          } catch (_) {}
+        },
+      );
+    }
+
+    return Column(
+      children: [
+        if (_sshBusy)
+          const LinearProgressIndicator(
+            minHeight: 2,
+            color: JalaEnterpriseTokens.accentPrimary,
+            backgroundColor: Color(0xFF0B111A),
+          ),
+        Expanded(child: content),
       ],
     );
   }
@@ -8526,7 +9030,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     );
   }
 
-  Widget _buildConnectionsTab() {
+  Widget _buildConnectionsTab({
+    JalaFoldablePosture? flexPosture,
+    double topChromeOffset = 0.0,
+  }) {
     final filtered = _hosts.where((h) {
       if (_protocolFilter == 'JUMP') {
         if (!_isJumpHostGateway(h)) return false;
@@ -8598,10 +9105,19 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             : ((availW - horizontalPad * 2 - spacing * (columns - 1)) / columns);
 
         final bool appBarVisible = Scaffold.maybeOf(ctx)?.hasAppBar ?? true;
+        final double exactLeftOffset = flexPosture != null
+            ? (flexPosture.screenSize.width - availW).clamp(0.0, flexPosture.screenSize.width)
+            : 0.0;
+        final JalaFoldablePosture localPosture = flexPosture != null
+            ? flexPosture.adjustForInsets(
+                topOffset: topChromeOffset,
+                leftOffset: exactLeftOffset,
+                viewportWidth: availW,
+                viewportHeight: constraints.maxHeight,
+              )
+            : const JalaFoldablePosture.flat();
 
-        return ListView(
-          padding: EdgeInsets.fromLTRB(horizontalPad, 12, horizontalPad, 24 + mediaPadding.bottom),
-          children: [
+        final List<Widget> searchAndFilterWidgets = [
             // Search + Icon-Only Quick Actions Row (Termius / Jump Desktop clarity)
             Row(
               children: [
@@ -8851,10 +9367,49 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                 ),
               ),
             ],
-            const SizedBox(height: 12),
-            if (_hosts.isEmpty && _folderConfigs.isEmpty && _vaultLoaded)
-              _buildEmptyConnectionsCard()
-            else if (filtered.isEmpty && groupedByFolder.isEmpty)
+        ];
+
+        List<Widget> buildPinnedFavoritesWidgets(int cols, double cw) {
+          if (pinnedFavorites.isEmpty) return const <Widget>[];
+          return [
+            _buildFolderGroupHeader(
+              'Pinned Favorites',
+              pinnedFavorites.length,
+              iconOverride: Icons.star_rounded,
+            ),
+            if (!_collapsedFolders.contains('Pinned Favorites')) ...[
+              if (cols == 1)
+                for (final host in pinnedFavorites) _buildHostCard(host)
+              else
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Wrap(
+                    spacing: spacing,
+                    runSpacing: 0,
+                    children: [
+                      for (final host in pinnedFavorites)
+                        SizedBox(
+                          width: cw,
+                          child: _buildHostCard(host),
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+            const SizedBox(height: 4),
+          ];
+        }
+
+        List<Widget> buildHostsAndGatewaysWidgets(
+          int cols,
+          double cw, {
+          required bool includeFavorites,
+        }) {
+          if (_hosts.isEmpty && _folderConfigs.isEmpty && _vaultLoaded) {
+            return [_buildEmptyConnectionsCard()];
+          }
+          if (filtered.isEmpty && groupedByFolder.isEmpty) {
+            return [
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
@@ -8868,149 +9423,214 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                     style: TextStyle(fontSize: 12.5, color: JalaPalette.muted),
                   ),
                 ),
-              )
-            else ...[
-              if (jumpGateways.isNotEmpty) ...[
-                Column(
-                  key: const Key('section_jump_gateways'),
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+              ),
+            ];
+          }
+          return [
+            if (jumpGateways.isNotEmpty) ...[
+              Column(
+                key: const Key('section_jump_gateways'),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.alt_route_rounded,
+                          size: 15,
+                          color: JalaPalette.brandGold,
+                        ),
+                        const SizedBox(width: 6),
+                        const Expanded(
+                          child: Text(
+                            'Jump Host Gateways',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w800,
+                              color: JalaPalette.text,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 1.5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: JalaPalette.header,
+                            borderRadius: BorderRadius.circular(99),
+                          ),
+                          child: Text(
+                            '${jumpGateways.length}',
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              fontFeatures: [FontFeature.tabularFigures()],
+                              color: JalaPalette.brandGold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (cols == 1)
+                    for (final gw in jumpGateways) _buildJumpGatewayCard(gw)
+                  else
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
-                      child: Row(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Wrap(
+                        spacing: spacing,
+                        runSpacing: 0,
                         children: [
-                          const Icon(
-                            Icons.alt_route_rounded,
-                            size: 15,
-                            color: JalaPalette.brandGold,
-                          ),
-                          const SizedBox(width: 6),
-                          const Expanded(
-                            child: Text(
-                              'Jump Host Gateways',
-                              style: TextStyle(
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w800,
-                                color: JalaPalette.text,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                          for (final gw in jumpGateways)
+                            SizedBox(
+                              width: cw,
+                              child: _buildJumpGatewayCard(gw),
                             ),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 1.5,
-                            ),
-                            decoration: BoxDecoration(
-                              color: JalaPalette.header,
-                              borderRadius: BorderRadius.circular(99),
-                            ),
-                            child: Text(
-                              '${jumpGateways.length}',
-                              style: const TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                fontFeatures: [FontFeature.tabularFigures()],
-                                color: JalaPalette.brandGold,
-                              ),
-                            ),
-                          ),
                         ],
                       ),
                     ),
-                    if (columns == 1)
-                      for (final gw in jumpGateways) _buildJumpGatewayCard(gw)
-                    else
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Wrap(
-                          spacing: spacing,
-                          runSpacing: 0,
-                          children: [
-                            for (final gw in jumpGateways)
-                              SizedBox(
-                                width: cardW,
-                                child: _buildJumpGatewayCard(gw),
-                              ),
-                          ],
-                        ),
+                  const SizedBox(height: 6),
+                ],
+              ),
+            ],
+            if (includeFavorites) ...buildPinnedFavoritesWidgets(cols, cw),
+            for (final folderEntry in groupedByFolder.entries) ...[
+              _buildFolderGroupHeader(folderEntry.key, folderEntry.value.length),
+              if (!_collapsedFolders.contains(folderEntry.key)) ...[
+                if (folderEntry.value.isEmpty)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: JalaPalette.surface,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: JalaPalette.line),
+                    ),
+                    child: Text(
+                      'Empty folder • New connections inherit "${folderEntry.key}" routing.',
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        color: JalaPalette.muted,
                       ),
-                    const SizedBox(height: 6),
+                    ),
+                  )
+                else if (cols == 1)
+                  for (final host in folderEntry.value) _buildHostCard(host)
+                else
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Wrap(
+                      spacing: spacing,
+                      runSpacing: 0,
+                      children: [
+                        for (final host in folderEntry.value)
+                          SizedBox(
+                            width: cw,
+                            child: _buildHostCard(host),
+                          ),
+                      ],
+                    ),
+                  ),
+              ],
+              const SizedBox(height: 4),
+            ],
+          ];
+        }
+
+        if (localPosture.isBook) {
+          final double leftW = localPosture.leftPaneWidth;
+          final double rightW = localPosture.rightPaneWidth;
+          final int rightCols = rightW >= 620 ? 2 : 1;
+          final double rightCardW = rightCols == 1
+              ? max(120.0, rightW - 24.0)
+              : max(120.0, (rightW - 24.0 - spacing) / 2.0);
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                key: const Key('connections_book_left_pane'),
+                width: leftW,
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(12, 12, 12, 24 + mediaPadding.bottom),
+                  children: [
+                    ...searchAndFilterWidgets,
+                    if (pinnedFavorites.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      ...buildPinnedFavoritesWidgets(1, max(120.0, leftW - 24.0)),
+                    ],
                   ],
                 ),
-              ],
-              if (pinnedFavorites.isNotEmpty) ...[
-                _buildFolderGroupHeader(
-                  'Pinned Favorites',
-                  pinnedFavorites.length,
-                  iconOverride: Icons.star_rounded,
+              ),
+              JalaCreaseDivider(
+                axis: Axis.vertical,
+                width: localPosture.gapWidth,
+              ),
+              Expanded(
+                key: const Key('connections_book_right_pane'),
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(12, 12, 12 + mediaPadding.right, 24 + mediaPadding.bottom),
+                  children: buildHostsAndGatewaysWidgets(
+                    rightCols,
+                    rightCardW,
+                    includeFavorites: false,
+                  ),
                 ),
-                if (!_collapsedFolders.contains('Pinned Favorites')) ...[
-                  if (columns == 1)
-                    for (final host in pinnedFavorites) _buildHostCard(host)
-                  else
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Wrap(
-                        spacing: spacing,
-                        runSpacing: 0,
-                        children: [
-                          for (final host in pinnedFavorites)
-                            SizedBox(
-                              width: cardW,
-                              child: _buildHostCard(host),
-                            ),
-                        ],
-                      ),
-                    ),
-                ],
-                const SizedBox(height: 4),
-              ],
-              for (final folderEntry in groupedByFolder.entries) ...[
-                _buildFolderGroupHeader(folderEntry.key, folderEntry.value.length),
-                if (!_collapsedFolders.contains(folderEntry.key)) ...[
-                  if (folderEntry.value.isEmpty)
-                    Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        color: JalaPalette.surface,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: JalaPalette.line),
-                      ),
-                      child: Text(
-                        'Empty folder • New connections inherit "${folderEntry.key}" routing.',
-                        style: const TextStyle(
-                          fontSize: 11.5,
-                          color: JalaPalette.muted,
-                        ),
-                      ),
-                    )
-                  else if (columns == 1)
-                    for (final host in folderEntry.value) _buildHostCard(host)
-                  else
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Wrap(
-                        spacing: spacing,
-                        runSpacing: 0,
-                        children: [
-                          for (final host in folderEntry.value)
-                            SizedBox(
-                              width: cardW,
-                              child: _buildHostCard(host),
-                            ),
-                        ],
-                      ),
-                    ),
-                ],
-                const SizedBox(height: 4),
-              ],
+              ),
             ],
+          );
+        }
+
+        if (localPosture.isTabletop) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                key: const Key('connections_tabletop_top_pane'),
+                height: localPosture.topPaneHeight,
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(horizontalPad, 10, horizontalPad, 10),
+                  children: [
+                    ...searchAndFilterWidgets,
+                    if (pinnedFavorites.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      ...buildPinnedFavoritesWidgets(columns, cardW),
+                    ],
+                  ],
+                ),
+              ),
+              JalaCreaseDivider(
+                axis: Axis.horizontal,
+                height: localPosture.gapHeight,
+                label: 'FLEX TABLETOP • CONNECTIONS',
+              ),
+              Expanded(
+                key: const Key('connections_tabletop_bottom_pane'),
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(horizontalPad, 10, horizontalPad, 24 + mediaPadding.bottom),
+                  children: buildHostsAndGatewaysWidgets(
+                    columns,
+                    cardW,
+                    includeFavorites: false,
+                  ),
+                ),
+              ),
+            ],
+          );
+        }
+
+        return ListView(
+          padding: EdgeInsets.fromLTRB(horizontalPad, 12, horizontalPad, 24 + mediaPadding.bottom),
+          children: [
+            ...searchAndFilterWidgets,
+            const SizedBox(height: 12),
+            ...buildHostsAndGatewaysWidgets(columns, cardW, includeFavorites: true),
           ],
         );
       },
@@ -10614,6 +11234,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     bool isFullScreen = false,
     bool isWideScreen = false,
     bool isPhoneLandscape = false,
+    bool flexTopPaneOnly = false,
   }) {
     final hostTitle = _activeRdpHost != null
         ? '${_activeRdpHost!.name} (${_activeRdpHost!.address}:${_activeRdpHost!.port})'
@@ -10623,14 +11244,16 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     final double symCutoutInset = max(mediaPadding.left, mediaPadding.right);
     final double symPadX = symCutoutInset + 8.0;
     final double keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
-    final bool overlayBottomShortcuts = isFullScreen && keyboardInset == 0;
-    final showBottomShortcuts = !isFullScreen || (_showFullScreenModifierBar && _fullScreenChromeVisible);
-    final showTopKeyboardBar = _showDesktopKeyboardBar && (!isFullScreen || _fullScreenChromeVisible);
+    final bool overlayBottomShortcuts = isFullScreen && keyboardInset == 0 && !flexTopPaneOnly;
+    final showBottomShortcuts =
+        !flexTopPaneOnly && (!isFullScreen || (_showFullScreenModifierBar && _fullScreenChromeVisible));
+    final showTopKeyboardBar =
+        !flexTopPaneOnly && _showDesktopKeyboardBar && (!isFullScreen || _fullScreenChromeVisible);
 
     return Column(
       children: [
-        // Top HUD bar (hidden in Full Screen mode for 100% edge-to-edge canvas)
-        if (!isFullScreen)
+        // Top HUD bar (hidden in Full Screen & Flex Tabletop top pane for 100% edge-to-edge canvas)
+        if (!isFullScreen && !flexTopPaneOnly)
           Container(
             decoration: const BoxDecoration(
               color: Color(0xFF0B111A),
@@ -10915,7 +11538,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
         Expanded(
           child: LayoutBuilder(
             builder: (ctx, constraints) {
-              final margin = (isFullScreen || isPhoneLandscape || _remoteDesktopFrame != null)
+              final margin = (isFullScreen || isPhoneLandscape || flexTopPaneOnly || _remoteDesktopFrame != null)
                   ? 0.0
                   : (isWideScreen ? 6.0 : 8.0);
               final canvasW = (constraints.maxWidth - margin * 2).clamp(160.0, 4096.0);
@@ -11054,9 +11677,9 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
                       decoration: BoxDecoration(
                         color: const Color(0xFF080C12),
                         borderRadius: BorderRadius.circular(
-                          (isFullScreen || isPhoneLandscape || _remoteDesktopFrame != null) ? 0 : 12,
+                          (isFullScreen || isPhoneLandscape || flexTopPaneOnly || _remoteDesktopFrame != null) ? 0 : 12,
                         ),
-                        border: (isFullScreen || isPhoneLandscape || _remoteDesktopFrame != null)
+                        border: (isFullScreen || isPhoneLandscape || flexTopPaneOnly || _remoteDesktopFrame != null)
                             ? null
                             : Border.all(
                                 color: _desktopLiveConnected
@@ -12272,6 +12895,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
     bool isFullScreen = false,
     bool isWideScreen = false,
     bool isPhoneLandscape = false,
+    JalaFoldablePosture? flexPosture,
   }) {
     final bool hasActiveSession = _sshLiveConnected || _sshOfflineSessionOpen;
     final bool showDisconnectedEmptyState = !hasActiveSession;
@@ -12285,7 +12909,17 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
 
     return LayoutBuilder(
       builder: (ctx, constraints) {
-        final canSplitSshSftp = constraints.maxWidth >= 700;
+        final double exactLeftOffset = flexPosture != null
+            ? (flexPosture.screenSize.width - constraints.maxWidth).clamp(0.0, flexPosture.screenSize.width)
+            : 0.0;
+        final JalaFoldablePosture localPosture = flexPosture != null
+            ? flexPosture.adjustForInsets(
+                leftOffset: exactLeftOffset,
+                viewportWidth: constraints.maxWidth,
+                viewportHeight: constraints.maxHeight,
+              )
+            : const JalaFoldablePosture.flat();
+        final canSplitSshSftp = constraints.maxWidth >= 700 || localPosture.isBook;
         final isTerminalVisible = _sshSubMode != 'sftp' || (canSplitSshSftp && _sshSubMode == 'split');
 
         void selectSshSubMode(String mode) {
@@ -12303,6 +12937,7 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
             fontSize: _terminalFontSize,
             isLiveSshConnected: _sshLiveConnected,
             showAccessoryDeck: !isFullScreen || _fullScreenChromeVisible,
+            focusNode: _terminalImeFocusNode,
             snippets: [..._customSnippets, ...TerminalSnippetItem.builtIn],
             onSendRaw: (raw) {
               if (isFullScreen && _fullScreenChromeVisible && !_pinFullScreenChrome) {
@@ -12333,15 +12968,36 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
           );
         }
 
-        final mainWorkspace = canSplitSshSftp && _sshSubMode == 'split'
-            ? Row(
-                children: [
-                  Expanded(flex: 3, child: buildTerminalPane()),
-                  Container(width: 1, color: JalaPalette.line),
-                  Expanded(flex: 2, child: _buildSftpMobileBrowser()),
-                ],
-              )
-            : (_sshSubMode == 'sftp' ? _buildSftpMobileBrowser() : buildTerminalPane());
+        final Widget mainWorkspace;
+        if (localPosture.isBook && _sshSubMode == 'split') {
+          mainWorkspace = Row(
+            children: [
+              SizedBox(
+                key: const Key('ssh_book_left_pane'),
+                width: localPosture.leftPaneWidth,
+                child: buildTerminalPane(),
+              ),
+              JalaCreaseDivider(
+                axis: Axis.vertical,
+                width: localPosture.gapWidth,
+              ),
+              Expanded(
+                key: const Key('ssh_book_right_pane'),
+                child: _buildSftpMobileBrowser(),
+              ),
+            ],
+          );
+        } else if (canSplitSshSftp && _sshSubMode == 'split') {
+          mainWorkspace = Row(
+            children: [
+              Expanded(flex: 3, child: buildTerminalPane()),
+              Container(width: 1, color: JalaPalette.line),
+              Expanded(flex: 2, child: _buildSftpMobileBrowser()),
+            ],
+          );
+        } else {
+          mainWorkspace = _sshSubMode == 'sftp' ? _buildSftpMobileBrowser() : buildTerminalPane();
+        }
 
         final mediaPadding = MediaQuery.paddingOf(ctx);
         final symPadX = max(mediaPadding.left, mediaPadding.right) + 8.0;
@@ -13168,7 +13824,10 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
   }
 
   /// Minimalist Enterprise Security Vault, App-Lock PIN, Trusted SSH Keys & TOTP 2FA Tab
-  Widget _buildSecurityVaultTab() {
+  Widget _buildSecurityVaultTab({
+    JalaFoldablePosture? flexPosture,
+    double topChromeOffset = 0.0,
+  }) {
     final pinnedHosts = _knownHostsStore.entries;
 
     final totpCard = ValueListenableBuilder<int>(
@@ -13999,65 +14658,170 @@ class JalaDeskMobileShellState extends State<JalaDeskMobileShell> with WidgetsBi
       ),
     );
 
+    final Widget vaultHeroCard = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      decoration: BoxDecoration(
+        color: const Color(0xFF141D29),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF263649)),
+      ),
+      child: Row(
+        children: [
+          _buildJalaBrandLogo(size: 34, radius: 9),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Security Vault',
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
+                    color: JalaEnterpriseTokens.textPrimary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'AES-256-GCM • ${_hosts.length} Hosts • ${_credentials.length} Keys • ${_totpItems.length} 2FA',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: JalaEnterpriseTokens.textSecondary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          JalaToolbarIconBtn(
+            key: const Key('btn_open_qr_pair'),
+            icon: Icons.qr_code_scanner_rounded,
+            tooltip: 'Pair Desktop',
+            height: 32,
+            onTap: _showQrPairDialog,
+          ),
+        ],
+      ),
+    );
+
     return LayoutBuilder(
       builder: (ctx, constraints) {
         final mediaPadding = MediaQuery.paddingOf(ctx);
         final symPadX = max(mediaPadding.left, mediaPadding.right) + 14.0;
+        final double exactLeftOffset = flexPosture != null
+            ? (flexPosture.screenSize.width - constraints.maxWidth).clamp(0.0, flexPosture.screenSize.width)
+            : 0.0;
+        final JalaFoldablePosture localPosture = flexPosture != null
+            ? flexPosture.adjustForInsets(
+                topOffset: topChromeOffset,
+                leftOffset: exactLeftOffset,
+                viewportWidth: constraints.maxWidth,
+                viewportHeight: constraints.maxHeight,
+              )
+            : const JalaFoldablePosture.flat();
+
+        if (localPosture.isBook) {
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                key: const Key('vault_book_left_pane'),
+                width: localPosture.leftPaneWidth,
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.fromLTRB(12, 12, 12, 14 + mediaPadding.bottom),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      vaultHeroCard,
+                      const SizedBox(height: 10),
+                      totpCard,
+                      const SizedBox(height: 10),
+                      securitySwitchesCard,
+                    ],
+                  ),
+                ),
+              ),
+              JalaCreaseDivider(
+                axis: Axis.vertical,
+                width: localPosture.gapWidth,
+              ),
+              Expanded(
+                key: const Key('vault_book_right_pane'),
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.fromLTRB(12, 12, 12 + mediaPadding.right, 14 + mediaPadding.bottom),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      cloudSyncCard,
+                      const SizedBox(height: 10),
+                      credentialsVaultCard,
+                      const SizedBox(height: 10),
+                      backupAndSshCard,
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        }
+
+        if (localPosture.isTabletop) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                key: const Key('vault_tabletop_top_pane'),
+                height: localPosture.topPaneHeight,
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.fromLTRB(symPadX, 10, symPadX, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      vaultHeroCard,
+                      const SizedBox(height: 10),
+                      totpCard,
+                    ],
+                  ),
+                ),
+              ),
+              JalaCreaseDivider(
+                axis: Axis.horizontal,
+                height: localPosture.gapHeight,
+                label: 'FLEX TABLETOP • VAULT & 2FA',
+              ),
+              Expanded(
+                key: const Key('vault_tabletop_bottom_pane'),
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.fromLTRB(symPadX, 10, symPadX, 14 + mediaPadding.bottom),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      cloudSyncCard,
+                      const SizedBox(height: 10),
+                      credentialsVaultCard,
+                      const SizedBox(height: 10),
+                      securitySwitchesCard,
+                      const SizedBox(height: 10),
+                      backupAndSshCard,
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        }
+
         final isTwoColumn = constraints.maxWidth >= 720;
         return SingleChildScrollView(
           padding: EdgeInsets.fromLTRB(symPadX, 12, symPadX, 14 + mediaPadding.bottom),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF141D29),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: const Color(0xFF263649)),
-                ),
-                child: Row(
-                  children: [
-                    _buildJalaBrandLogo(size: 34, radius: 9),
-                    const SizedBox(width: 11),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Security Vault',
-                            style: TextStyle(
-                              fontSize: 14.5,
-                              fontWeight: FontWeight.w700,
-                              color: JalaEnterpriseTokens.textPrimary,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            'AES-256-GCM • ${_hosts.length} Hosts • ${_credentials.length} Keys • ${_totpItems.length} 2FA',
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: JalaEnterpriseTokens.textSecondary,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    JalaToolbarIconBtn(
-                      key: const Key('btn_open_qr_pair'),
-                      icon: Icons.qr_code_scanner_rounded,
-                      tooltip: 'Pair Desktop',
-                      height: 32,
-                      onTap: _showQrPairDialog,
-                    ),
-                  ],
-                ),
-              ),
+              vaultHeroCard,
               const SizedBox(height: 10),
               if (isTwoColumn)
                 Row(

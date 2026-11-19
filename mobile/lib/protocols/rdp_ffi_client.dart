@@ -616,11 +616,19 @@ class RdpFfiClient {
     _fnSendMouse(_handle, cx, cy, RdpMouseFlags.move);
   }
 
-  void sendMouseClick(int x, int y, {bool rightClick = false, bool doubleClick = false}) {
+  void sendMouseClick(
+    int x,
+    int y, {
+    bool rightClick = false,
+    bool middleClick = false,
+    bool doubleClick = false,
+  }) {
     if (_disposed || _handle == ffi.nullptr) return;
     final cx = x.clamp(0, width - 1);
     final cy = y.clamp(0, height - 1);
-    final btn = rightClick ? RdpMouseFlags.button2 : RdpMouseFlags.button1;
+    final btn = middleClick
+        ? RdpMouseFlags.button3
+        : (rightClick ? RdpMouseFlags.button2 : RdpMouseFlags.button1);
     final count = doubleClick ? 2 : 1;
     _fnSendMouse(_handle, cx, cy, RdpMouseFlags.move);
     for (int i = 0; i < count; i++) {

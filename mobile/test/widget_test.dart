@@ -17,9 +17,12 @@ import 'package:jaladesk_mobile/protocols/vnc_rfb_client.dart';
 import 'package:jaladesk_mobile/security/vault_cloud_sync.dart';
 import 'package:jaladesk_mobile/security/vault_passcode_enclave.dart';
 import 'package:jaladesk_mobile/security/vault_security_service.dart';
+import 'package:jaladesk_mobile/terminal/sftp_explorer_view.dart';
 import 'package:jaladesk_mobile/terminal/sftp_transfer_service.dart';
 import 'package:jaladesk_mobile/terminal/termius_terminal.dart';
 import 'package:jaladesk_mobile/ui/jala_enterprise_components.dart';
+import 'package:jaladesk_mobile/ui/jala_flex_decks.dart';
+import 'package:jaladesk_mobile/ui/jala_foldable_posture.dart';
 import 'package:jaladesk_mobile/ui/jala_user_guide_screen.dart';
 import 'package:pointycastle/export.dart' as pc;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -5442,6 +5445,574 @@ void main() {
     expect(find.byType(JalaStudioPanel), findsNWidgets(4));
     expect(tester.takeException(), isNull);
   });
+
+  test(
+    'v1.17.0+19 Test 1: JalaFoldablePosture Resolves 0px OLED Fold, 24px Hinge, Flat, Cutout, Sub-180dp, Book, DPR 2x/3x & Override',
+    () {
+      // 1. 0px OLED horizontal fold (Oppo Find N3/N5, Samsung Z Fold, Pixel Fold) -> >=16dp crease guard
+      final oledTabletop = JalaFoldablePosture.fromValues(
+        screenSize: const Size(840, 700),
+        displayFeatures: const [
+          ui.DisplayFeature(
+            bounds: Rect.fromLTRB(0, 350, 840, 350),
+            type: ui.DisplayFeatureType.fold,
+            state: ui.DisplayFeatureState.postureHalfOpened,
+          ),
+        ],
+      );
+      expect(oledTabletop.mode, JalaPostureMode.tabletop);
+      expect(oledTabletop.isTabletop, isTrue);
+      expect(oledTabletop.effectiveGap, 16.0);
+      expect(oledTabletop.gapStart, 342.0);
+      expect(oledTabletop.gapEnd, 358.0);
+      expect(oledTabletop.topPaneHeight, 342.0);
+      expect(oledTabletop.bottomPaneHeight, 342.0);
+
+      // 2. 24px physical hinge preserves exact physical thickness
+      final hingeTabletop = JalaFoldablePosture.fromValues(
+        screenSize: const Size(840, 700),
+        displayFeatures: const [
+          ui.DisplayFeature(
+            bounds: Rect.fromLTRB(0, 338, 840, 362),
+            type: ui.DisplayFeatureType.hinge,
+            state: ui.DisplayFeatureState.postureHalfOpened,
+          ),
+        ],
+      );
+      expect(hingeTabletop.mode, JalaPostureMode.tabletop);
+      expect(hingeTabletop.effectiveGap, 24.0);
+      expect(hingeTabletop.gapStart, 338.0);
+      expect(hingeTabletop.gapEnd, 362.0);
+
+      // 3. postureFlat on OLED fold stays flat
+      final flatFold = JalaFoldablePosture.fromValues(
+        screenSize: const Size(840, 700),
+        displayFeatures: const [
+          ui.DisplayFeature(
+            bounds: Rect.fromLTRB(0, 350, 840, 350),
+            type: ui.DisplayFeatureType.fold,
+            state: ui.DisplayFeatureState.postureFlat,
+          ),
+        ],
+      );
+      expect(flatFold.mode, JalaPostureMode.flat);
+      expect(flatFold.isActive, isFalse);
+
+      // 4. DisplayFeatureType.cutout is strictly ignored
+      final cutoutIgnored = JalaFoldablePosture.fromValues(
+        screenSize: const Size(840, 700),
+        displayFeatures: const [
+          ui.DisplayFeature(
+            bounds: Rect.fromLTRB(0, 350, 840, 350),
+            type: ui.DisplayFeatureType.cutout,
+            state: ui.DisplayFeatureState.unknown,
+          ),
+        ],
+      );
+      expect(cutoutIgnored.mode, JalaPostureMode.flat);
+
+      // 5. Split-screen < 180dp pane is ignored
+      final tinySplitIgnored = JalaFoldablePosture.fromValues(
+        screenSize: const Size(840, 700),
+        displayFeatures: const [
+          ui.DisplayFeature(
+            bounds: Rect.fromLTRB(0, 120, 840, 120),
+            type: ui.DisplayFeatureType.fold,
+            state: ui.DisplayFeatureState.postureHalfOpened,
+          ),
+        ],
+      );
+      expect(tinySplitIgnored.mode, JalaPostureMode.flat);
+
+      // 6. Book Mode vertical fold (postureHalfOpened) & physical vertical hinge
+      final bookPosture = JalaFoldablePosture.fromValues(
+        screenSize: const Size(840, 700),
+        displayFeatures: const [
+          ui.DisplayFeature(
+            bounds: Rect.fromLTRB(420, 0, 420, 700),
+            type: ui.DisplayFeatureType.fold,
+            state: ui.DisplayFeatureState.postureHalfOpened,
+          ),
+        ],
+      );
+      expect(bookPosture.mode, JalaPostureMode.book);
+      expect(bookPosture.isBook, isTrue);
+      expect(bookPosture.leftPaneWidth, 412.0);
+      expect(bookPosture.gapWidth, 16.0);
+      expect(bookPosture.rightPaneWidth, 412.0);
+
+      final bookPhysicalHingeFlat = JalaFoldablePosture.fromValues(
+        screenSize: const Size(840, 700),
+        displayFeatures: const [
+          ui.DisplayFeature(
+            bounds: Rect.fromLTRB(408, 0, 432, 700),
+            type: ui.DisplayFeatureType.hinge,
+            state: ui.DisplayFeatureState.postureFlat,
+          ),
+        ],
+      );
+      expect(bookPhysicalHingeFlat.mode, JalaPostureMode.book);
+      expect(bookPhysicalHingeFlat.gapWidth, 24.0);
+
+      // 7. DPR 2.0 & 3.0 via MediaQueryData (logical coordinates stay exact)
+      final dpr2 = JalaFoldablePosture.fromMediaQuery(
+        const MediaQueryData(
+          size: Size(840, 700),
+          devicePixelRatio: 2.0,
+          displayFeatures: [
+            ui.DisplayFeature(
+              bounds: Rect.fromLTRB(0, 350, 840, 350),
+              type: ui.DisplayFeatureType.fold,
+              state: ui.DisplayFeatureState.postureHalfOpened,
+            ),
+          ],
+        ),
+      );
+      final dpr3 = JalaFoldablePosture.fromMediaQuery(
+        const MediaQueryData(
+          size: Size(360, 740),
+          devicePixelRatio: 3.0,
+          displayFeatures: [
+            ui.DisplayFeature(
+              bounds: Rect.fromLTRB(0, 370, 360, 370),
+              type: ui.DisplayFeatureType.fold,
+              state: ui.DisplayFeatureState.postureHalfOpened,
+            ),
+          ],
+        ),
+      );
+      expect(dpr2.mode, JalaPostureMode.tabletop);
+      expect(dpr2.gapStart, 342.0);
+      expect(dpr3.mode, JalaPostureMode.tabletop);
+      expect(dpr3.gapStart, 362.0);
+      expect(dpr3.gapEnd, 378.0);
+
+      // 8. overrideDisabled forces flat while preserving raw hardware posture metadata
+      final overridden = JalaFoldablePosture.fromValues(
+        screenSize: const Size(840, 700),
+        displayFeatures: const [
+          ui.DisplayFeature(
+            bounds: Rect.fromLTRB(0, 350, 840, 350),
+            type: ui.DisplayFeatureType.fold,
+            state: ui.DisplayFeatureState.postureHalfOpened,
+          ),
+        ],
+        overrideDisabled: true,
+      );
+      expect(overridden.mode, JalaPostureMode.flat);
+      expect(overridden.rawMode, JalaPostureMode.tabletop);
+      expect(overridden.isOverridden, isTrue);
+      expect(overridden.hasPhysicalFlexPosture, isTrue);
+
+      // 9. adjustForInsets shifts coordinates accurately into child pane space
+      final adjustedBook = bookPosture.adjustForInsets(
+        leftOffset: 75.0,
+        viewportWidth: 765.0,
+        viewportHeight: 644.0,
+      );
+      expect(adjustedBook.isBook, isTrue);
+      expect(adjustedBook.leftPaneWidth, 337.0);
+      expect(adjustedBook.gapWidth, 16.0);
+      expect(adjustedBook.rightPaneWidth, 412.0);
+    },
+  );
+
+  testWidgets(
+    'v1.17.0+19 Test 2: RDP/VNC Tabletop Mini-Laptop (840x700 Fold & 360x740 Flip) Crease Guard, Trackpad Buttons, F1-F12 & 2FA Drawer',
+    (WidgetTester tester) async {
+      SharedPreferences.setMockInitialValues({
+        'jaladesk_vault_totp_v2': jsonEncode([
+          {
+            'id': 'totp-flex-1',
+            'label': 'ops@jaladesk.io',
+            'issuer': 'JalaDesk Prod',
+            'secretBase32': 'JBSWY3DPEHPK3PXP',
+            'algorithm': 'SHA-1',
+            'digits': 6,
+            'periodSeconds': 30,
+          },
+        ]),
+      });
+
+      tester.view.physicalSize = const Size(840, 700);
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.displayFeatures = const [
+        ui.DisplayFeature(
+          bounds: Rect.fromLTRB(0, 350, 840, 350),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureHalfOpened,
+        ),
+      ];
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetDisplayFeatures);
+
+      await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+      await tester.pumpAndSettle();
+
+      final shellState = tester.state<JalaDeskMobileShellState>(
+        find.byType(JalaDeskMobileShell),
+      );
+      shellState.switchTabForVerification(1);
+      await tester.pumpAndSettle();
+
+      // Verify strict crease guard geometry on 840x700 Fold (gapStart=342, gapEnd=358)
+      expect(find.byType(JalaFlexDesktopTrackpadDeck), findsOneWidget);
+      final topRect = tester.getRect(find.byKey(const Key('flex_desktop_top_pane')));
+      final creaseRect = tester.getRect(find.byKey(const Key('jala_crease_divider_horizontal')));
+      final bottomRect = tester.getRect(find.byKey(const Key('flex_desktop_bottom_deck')));
+      expect(topRect.top, closeTo(0.0, 0.5));
+      expect(topRect.bottom, lessThanOrEqualTo(342.01));
+      expect(creaseRect.top, closeTo(342.0, 0.5));
+      expect(creaseRect.bottom, closeTo(358.0, 0.5));
+      expect(bottomRect.top, greaterThanOrEqualTo(357.99));
+      expect(topRect.overlaps(bottomRect), isFalse);
+
+      // Test trackpad mouse buttons: Left, Middle, Drag-Lock, Right
+      await tester.tap(find.byKey(const Key('btn_flex_mouse_left')));
+      await tester.pumpAndSettle();
+      expect(shellState.lastRdpActionForVerification, contains('Left Click'));
+
+      await tester.tap(find.byKey(const Key('btn_flex_mouse_mid')));
+      await tester.pumpAndSettle();
+      expect(shellState.lastRdpActionForVerification, contains('Middle Click'));
+
+      await tester.tap(find.byKey(const Key('btn_flex_mouse_draglock')));
+      await tester.pumpAndSettle();
+      expect(shellState.flexDragLockForVerification, isTrue);
+      await tester.tap(find.byKey(const Key('btn_flex_mouse_draglock')));
+      await tester.pumpAndSettle();
+      expect(shellState.flexDragLockForVerification, isFalse);
+
+      await tester.tap(find.byKey(const Key('btn_flex_mouse_right')));
+      await tester.pumpAndSettle();
+      expect(shellState.lastRdpActionForVerification, contains('Right Click'));
+
+      // Test relative trackpad pointer drag moves cursorNorm
+      final initialCursor = shellState.cursorNormForVerification;
+      await tester.drag(find.byKey(const Key('flex_trackpad_surface')), const Offset(48, 24));
+      await tester.pumpAndSettle();
+      expect(shellState.cursorNormForVerification.dx, greaterThan(initialCursor.dx));
+
+      // Test F1-F12 toggle & dispatch
+      await tester.tap(find.byKey(const Key('btn_flex_fn_toggle')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('flex_fn_strip')), findsOneWidget);
+      await tester.tap(find.text('F5'));
+      await tester.pumpAndSettle();
+      expect(shellState.lastRdpActionForVerification, contains('F5'));
+
+      // Test inline 2FA drawer strictly inside bottom deck (never covering top display)
+      await tester.tap(find.byKey(const Key('btn_flex_totp_picker')));
+      await tester.pumpAndSettle();
+      final totpDrawerFinder = find.byKey(const Key('flex_totp_inline_drawer'));
+      expect(totpDrawerFinder, findsOneWidget);
+      expect(tester.getRect(totpDrawerFinder).top, greaterThanOrEqualTo(357.99));
+      await tester.tap(find.byKey(const Key('btn_flex_totp_item_totp-flex-1')));
+      await tester.pumpAndSettle();
+      expect(shellState.lastRdpActionForVerification, contains('2FA Auto-Typed'));
+      expect(tester.takeException(), isNull);
+
+      // Verify Clamshell Flip (360x740, fold at y=370 -> gapStart=362, gapEnd=378) with zero overflow
+      tester.view.physicalSize = const Size(360, 740);
+      tester.view.displayFeatures = const [
+        ui.DisplayFeature(
+          bounds: Rect.fromLTRB(0, 370, 360, 370),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureHalfOpened,
+        ),
+      ];
+      await tester.pumpAndSettle();
+      final flipTop = tester.getRect(find.byKey(const Key('flex_desktop_top_pane')));
+      final flipBottom = tester.getRect(find.byKey(const Key('flex_desktop_bottom_deck')));
+      expect(flipTop.bottom, lessThanOrEqualTo(362.01));
+      expect(flipBottom.top, greaterThanOrEqualTo(377.99));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'v1.17.0+19 Test 3: Tabletop Soft Keyboard (viewInsets bottom 280) Keeps Top RDP & SSH Viewport Height Locked Invariant with Zero Overflow',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(840, 700);
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.displayFeatures = const [
+        ui.DisplayFeature(
+          bounds: Rect.fromLTRB(0, 350, 840, 350),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureHalfOpened,
+        ),
+      ];
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetDisplayFeatures);
+      addTearDown(tester.view.resetViewInsets);
+
+      await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+      await tester.pumpAndSettle();
+
+      final shellState = tester.state<JalaDeskMobileShellState>(
+        find.byType(JalaDeskMobileShell),
+      );
+
+      // 1. RDP Tabletop with Gboard opening (280dp bottom inset)
+      shellState.switchTabForVerification(1);
+      await tester.pumpAndSettle();
+      final rdpTopHeightBefore = tester.getRect(find.byKey(const Key('flex_desktop_top_pane'))).height;
+      expect(rdpTopHeightBefore, closeTo(342.0, 0.5));
+
+      tester.view.viewInsets = const FakeViewPadding(bottom: 280.0);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('flex_desktop_ime_ribbon')), findsOneWidget);
+      final rdpTopAfter = tester.getRect(find.byKey(const Key('flex_desktop_top_pane')));
+      expect(rdpTopAfter.height, closeTo(rdpTopHeightBefore, 0.5));
+      expect(rdpTopAfter.bottom, lessThanOrEqualTo(342.01));
+      expect(tester.takeException(), isNull);
+
+      // 2. SSH Tabletop with Gboard open (280dp bottom inset)
+      shellState.switchTabForVerification(2);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('flex_terminal_ime_ribbon')), findsOneWidget);
+      final sshTopAfter = tester.getRect(find.byKey(const Key('flex_ssh_top_pane')));
+      expect(sshTopAfter.height, closeTo(342.0, 0.5));
+      expect(sshTopAfter.bottom, lessThanOrEqualTo(342.01));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'v1.17.0+19 Test 4: SSH & SFTP Tabletop (840x700) Splits Terminal/SFTP Strictly Above Hinge and Tactile Terminal Deck Below Hinge',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(840, 700);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetDisplayFeatures);
+
+      await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+      await tester.pumpAndSettle();
+
+      // Load Sample Lab to populate an active offline SSH session & sample hosts
+      await tester.tap(find.text('Load Sample Lab'));
+      await tester.pumpAndSettle();
+
+      // Enter 840x700 Tabletop posture (fold at y=350 -> gapStart=342, gapEnd=358)
+      tester.view.displayFeatures = const [
+        ui.DisplayFeature(
+          bounds: Rect.fromLTRB(0, 350, 840, 350),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureHalfOpened,
+        ),
+      ];
+      await tester.pumpAndSettle();
+
+      final shellState = tester.state<JalaDeskMobileShellState>(
+        find.byType(JalaDeskMobileShell),
+      );
+      shellState.switchTabForVerification(2);
+      await tester.pumpAndSettle();
+
+      // Verify Terminal top pane strictly above hinge & terminal bottom deck strictly below hinge
+      final topPaneRect = tester.getRect(find.byKey(const Key('flex_ssh_top_pane')));
+      final termWidget = tester.widget<TermiusInteractiveTerminal>(
+        find.byType(TermiusInteractiveTerminal),
+      );
+      final termRect = tester.getRect(find.byType(TermiusInteractiveTerminal));
+      final bottomDeckRect = tester.getRect(find.byKey(const Key('flex_terminal_bottom_deck')));
+      expect(termWidget.showAccessoryDeck, isFalse);
+      expect(topPaneRect.bottom, lessThanOrEqualTo(342.01));
+      expect(termRect.bottom, lessThanOrEqualTo(342.01));
+      expect(bottomDeckRect.top, greaterThanOrEqualTo(357.99));
+
+      // Execute a 1-tap built-in quick snippet ('sys_uptime') from the bottom deck
+      await tester.tap(find.byKey(const Key('btn_flex_snippet_sys_uptime')));
+      await tester.pumpAndSettle();
+      expect(shellState.terminalBufferForVerification.toPlainText(), contains('uptime'));
+      expect(tester.takeException(), isNull);
+
+      // Switch to SFTP mode via bottom deck pill -> SftpExplorerView strictly above hinge, SFTP deck below
+      await tester.tap(find.byKey(const Key('btn_flex_ssh_mode_sftp')));
+      await tester.pumpAndSettle();
+      final sftpRect = tester.getRect(find.byType(SftpExplorerView));
+      final sftpDeckRect = tester.getRect(find.byKey(const Key('flex_sftp_action_deck')));
+      expect(sftpRect.bottom, lessThanOrEqualTo(342.01));
+      expect(sftpDeckRect.top, greaterThanOrEqualTo(357.99));
+      expect(tester.takeException(), isNull);
+
+      // Switch back to Terminal cleanly
+      await tester.tap(find.byKey(const Key('btn_flex_sftp_to_terminal')));
+      await tester.pumpAndSettle();
+      expect(find.byType(TermiusInteractiveTerminal), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'v1.17.0+19 Test 5: Connections, Vault & 2FA, and SSH+SFTP Book Mode Vertical Hinge (420) & Tabletop Split Strictly Respect Crease Guard',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(840, 700);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetDisplayFeatures);
+
+      await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Load Sample Lab'));
+      await tester.pumpAndSettle();
+
+      final shellState = tester.state<JalaDeskMobileShellState>(
+        find.byType(JalaDeskMobileShell),
+      );
+
+      // 1. Book Mode vertical fold at x=420 (gapStart=412, gapEnd=428)
+      tester.view.displayFeatures = const [
+        ui.DisplayFeature(
+          bounds: Rect.fromLTRB(420, 0, 420, 700),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureHalfOpened,
+        ),
+      ];
+      await tester.pumpAndSettle();
+
+      // Tab 0 (Connections) Book Split
+      shellState.switchTabForVerification(0);
+      await tester.pumpAndSettle();
+      final connBookLeft = tester.getRect(find.byKey(const Key('connections_book_left_pane')));
+      final connBookRight = tester.getRect(find.byKey(const Key('connections_book_right_pane')));
+      expect(connBookLeft.right, lessThanOrEqualTo(412.01));
+      expect(connBookRight.left, greaterThanOrEqualTo(427.99));
+      expect(tester.takeException(), isNull);
+
+      // Tab 3 (Vault & 2FA) Book Split
+      shellState.switchTabForVerification(3);
+      await tester.pumpAndSettle();
+      final vaultBookLeft = tester.getRect(find.byKey(const Key('vault_book_left_pane')));
+      final vaultBookRight = tester.getRect(find.byKey(const Key('vault_book_right_pane')));
+      expect(vaultBookLeft.right, lessThanOrEqualTo(412.01));
+      expect(vaultBookRight.left, greaterThanOrEqualTo(427.99));
+      expect(tester.takeException(), isNull);
+
+      // Tab 2 (SSH & SFTP) Book Split
+      shellState.switchTabForVerification(2);
+      shellState.switchSshSubModeForVerification('split');
+      await tester.pumpAndSettle();
+      final sshBookLeft = tester.getRect(find.byKey(const Key('ssh_book_left_pane')));
+      final sshBookRight = tester.getRect(find.byKey(const Key('ssh_book_right_pane')));
+      expect(sshBookLeft.right, lessThanOrEqualTo(412.01));
+      expect(sshBookRight.left, greaterThanOrEqualTo(427.99));
+      expect(tester.takeException(), isNull);
+
+      // 2. Tabletop Mode horizontal fold at y=350 (gapStart=342, gapEnd=358) for Tab 0 & Tab 3
+      tester.view.displayFeatures = const [
+        ui.DisplayFeature(
+          bounds: Rect.fromLTRB(0, 350, 840, 350),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureHalfOpened,
+        ),
+      ];
+      await tester.pumpAndSettle();
+
+      shellState.switchTabForVerification(0);
+      await tester.pumpAndSettle();
+      final connTop = tester.getRect(find.byKey(const Key('connections_tabletop_top_pane')));
+      final connBottom = tester.getRect(find.byKey(const Key('connections_tabletop_bottom_pane')));
+      expect(connTop.bottom, lessThanOrEqualTo(342.01));
+      expect(connBottom.top, greaterThanOrEqualTo(357.99));
+      expect(tester.takeException(), isNull);
+
+      shellState.switchTabForVerification(3);
+      await tester.pumpAndSettle();
+      final vaultTop = tester.getRect(find.byKey(const Key('vault_tabletop_top_pane')));
+      final vaultBottom = tester.getRect(find.byKey(const Key('vault_tabletop_bottom_pane')));
+      expect(vaultTop.bottom, lessThanOrEqualTo(342.01));
+      expect(vaultBottom.top, greaterThanOrEqualTo(357.99));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'v1.17.0+19 Test 6: Live Posture Transition (postureFlat -> postureHalfOpened -> postureFlat) & Flex Override Preserve Session State with Zero Exceptions',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(840, 700);
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.displayFeatures = const [
+        ui.DisplayFeature(
+          bounds: Rect.fromLTRB(0, 350, 840, 350),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureFlat,
+        ),
+      ];
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetDisplayFeatures);
+
+      await tester.pumpWidget(const JalaDeskMobileApp(disableNetworkProbes: true));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Load Sample Lab'));
+      await tester.pumpAndSettle();
+
+      final shellState = tester.state<JalaDeskMobileShellState>(
+        find.byType(JalaDeskMobileShell),
+      );
+
+      // Seed active session state in Flat posture (cursor + terminal buffer output)
+      shellState.switchTabForVerification(1);
+      shellState.setCursorNormForVerification(const Offset(0.25, 0.75));
+      await shellState.runSshCommandForVerification('echo FLEX_STATE_OK');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('flex_desktop_bottom_deck')), findsNothing);
+
+      // 1. Transition live: postureFlat -> postureHalfOpened
+      tester.view.displayFeatures = const [
+        ui.DisplayFeature(
+          bounds: Rect.fromLTRB(0, 350, 840, 350),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureHalfOpened,
+        ),
+      ];
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('flex_desktop_bottom_deck')), findsOneWidget);
+      expect(shellState.cursorNormForVerification.dx, closeTo(0.25, 0.001));
+      expect(shellState.cursorNormForVerification.dy, closeTo(0.75, 0.001));
+      expect(shellState.terminalBufferForVerification.toPlainText(), contains('FLEX_STATE_OK'));
+      expect(tester.takeException(), isNull);
+
+      // 2. Toggle Flex Override OFF via bottom deck button -> AppBar shows Restore Flex Mode chip
+      await tester.tap(find.byKey(const Key('btn_flex_override_toggle')));
+      await tester.pumpAndSettle();
+      expect(shellState.flexModeOverrideOffForVerification, isTrue);
+      expect(find.byKey(const Key('flex_desktop_bottom_deck')), findsNothing);
+      expect(find.byKey(const Key('btn_restore_flex_mode')), findsOneWidget);
+      expect(shellState.cursorNormForVerification.dx, closeTo(0.25, 0.001));
+      expect(tester.takeException(), isNull);
+
+      // 3. Tap Restore Flex Mode chip -> Tabletop Mini-Laptop Deck returns immediately
+      await tester.tap(find.byKey(const Key('btn_restore_flex_mode')));
+      await tester.pumpAndSettle();
+      expect(shellState.flexModeOverrideOffForVerification, isFalse);
+      expect(find.byKey(const Key('flex_desktop_bottom_deck')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      // 4. Transition live: postureHalfOpened -> postureFlat (session state preserved)
+      tester.view.displayFeatures = const [
+        ui.DisplayFeature(
+          bounds: Rect.fromLTRB(0, 350, 840, 350),
+          type: ui.DisplayFeatureType.fold,
+          state: ui.DisplayFeatureState.postureFlat,
+        ),
+      ];
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('flex_desktop_bottom_deck')), findsNothing);
+      expect(find.byKey(const Key('btn_restore_flex_mode')), findsNothing);
+      expect(shellState.cursorNormForVerification.dx, closeTo(0.25, 0.001));
+      expect(shellState.cursorNormForVerification.dy, closeTo(0.75, 0.001));
+      expect(shellState.terminalBufferForVerification.toPlainText(), contains('FLEX_STATE_OK'));
+      expect(tester.takeException(), isNull);
+    },
+  );
 }
 
 class _MockGoogleAuthTokenProvider implements GoogleAuthTokenProvider {
