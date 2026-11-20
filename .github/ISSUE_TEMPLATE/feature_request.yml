@@ -1,0 +1,53 @@
+name: Feature Request
+description: Propose a new capability, protocol enhancement, or workflow improvement for JalaDesk.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We welcome well-scoped proposals that align with JalaDesk's Zero-Knowledge, Local-First architecture.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Target JalaDesk Surface
+      description: Which JalaDesk surface(s) would benefit most from this feature?
+      multiple: true
+      options:
+        - Desktop macOS/Windows
+        - Android & Foldable
+        - Web PWA
+        - Self-Hosted Gateway JSR1
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement & Use Case
+      description: Describe the operational or SRE/DevSecOps workflow bottleneck you are trying to solve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: Describe the behavior, UI/UX interaction, protocol flow, or configuration option you envision.
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Zero-Knowledge & Security Considerations
+      description: Note any cryptographic, credential-handling, CSP, SSRF, or permission implications.
+      placeholder: "Does this touch vault encryption, gateway auth tickets, clipboard, or network egress?"
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any workarounds or alternative designs you evaluated.

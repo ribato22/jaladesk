@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Disclosure (Private)
+    url: https://github.com/ribato22/jaladesk/blob/main/SECURITY.md
+    about: Report security vulnerabilities privately via GitHub Security Advisories or direct email.
+  - name: Self-Hosted Gateway Documentation (JSR1)
+    url: https://github.com/ribato22/jaladesk/blob/main/docs/GATEWAY.md
+    about: 60-second production deploy guides (Docker/Caddy, Cloudflare Tunnel, Fly.io, Railway) and JSR1 protocol reference.
+  - name: Zero-Knowledge Web PWA
+    url: https://ribato22.github.io/jaladesk/app/
+    about: Launch the browser-side AES-256-GCM Web PWA directly from GitHub Pages.

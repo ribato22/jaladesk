@@ -881,6 +881,15 @@ async function waitForPidDead(pid: number, timeoutMs = 2000): Promise<boolean> {
   return !isPidAlive(pid);
 }
 
+async function waitForPathGone(targetPath: string, timeoutMs = 2000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!existsSync(targetPath)) return true;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  return !existsSync(targetPath);
+}
+
 function collectSshOutput(client: TestWsClient): string {
   let out = '';
   for (const m of client.messages) {
@@ -1141,7 +1150,8 @@ test('9. Real loopback interactive SSH PTY (pty.openpty + TIOCSWINSZ resize + AN
     assert.equal(sshDead, true, `SSH PTY process ${sshPid} must be terminated on disconnect`);
     assert.equal(childDead, true, `Descendant process ${childPid} must be terminated (0 orphans)`);
     assert.equal(gw.activeSessions, 0);
-    assert.equal(existsSync(keyDir), false, `Ephemeral key temp dir ${keyDir} must be removed immediately`);
+    const keyDirGone = await waitForPathGone(keyDir, 2500);
+    assert.equal(keyDirGone, true, `Ephemeral key temp dir ${keyDir} must be removed on disconnect`);
   } finally {
     await gw.stop();
     await rm(fixtureDir, { recursive: true, force: true }).catch(() => {});

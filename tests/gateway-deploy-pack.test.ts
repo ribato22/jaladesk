@@ -156,6 +156,13 @@ test('deploy pack & CI/CD files all exist and align with Dockerfile.gateway & se
 
   const dockerfile = readRepoFile('Dockerfile.gateway');
   const serverSrc = readRepoFile('src/gateway/server.ts');
+  assert.match(dockerfile, /FROM\s+node:24-bookworm\s+AS\s+builder/);
+  assert.match(dockerfile, /FROM\s+node:24-bookworm-slim\s+AS\s+runtime/);
+  assert.match(dockerfile, /-DCMAKE_INSTALL_LIBDIR=lib/);
+  assert.match(dockerfile, /-DWITH_UNICODE_BUILTIN=ON/);
+  assert.match(dockerfile, /-DWITH_KRB5=OFF/);
+  assert.match(dockerfile, /-DWITH_MANPAGES=OFF/);
+  assert.match(dockerfile, /\bpython3\b/);
   assert.match(dockerfile, /EXPOSE\s+8443/);
   assert.match(dockerfile, /JALADESK_GATEWAY_PORT=8443/);
   assert.match(dockerfile, /\/healthz/);
@@ -327,7 +334,7 @@ test('railway.gateway.json is valid JSON matching Railway schema and Dockerfile.
   assert.equal(parsed.deploy?.restartPolicyType, 'ON_FAILURE');
 });
 
-test('.github/workflows/ci-verify.yml configures least-privilege Node 22 build & test CI', () => {
+test('.github/workflows/ci-verify.yml configures least-privilege Node 24 build & test CI', () => {
   const workflow = readRepoFile('.github/workflows/ci-verify.yml');
   assertCleanYamlSyntax(workflow, '.github/workflows/ci-verify.yml');
 
@@ -335,9 +342,10 @@ test('.github/workflows/ci-verify.yml configures least-privilege Node 22 build &
   assert.match(workflow, /pull_request:[\s\S]*branches:[\s\S]*-\s+main/);
   assert.match(workflow, /^permissions:\s*\n\s+contents:\s+read\s*$/m);
   assert.doesNotMatch(workflow, /:\s+write\b/, 'ci-verify.yml must stay strictly read-only');
+  assert.match(workflow, /name:\s+Build & Test \(Node 24\)/);
   assert.match(workflow, /uses:\s+actions\/checkout@v4/);
   assert.match(workflow, /uses:\s+actions\/setup-node@v4/);
-  assert.match(workflow, /node-version:\s+["']?22["']?/);
+  assert.match(workflow, /node-version:\s+["']?24["']?/);
   assert.match(workflow, /run:\s+npm ci/);
   assert.match(workflow, /run:\s+npm run build/);
   assert.match(workflow, /run:\s+npm test/);
@@ -351,6 +359,8 @@ test('.github/workflows/gateway-docker.yml builds multi-arch GHCR images with pr
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /contents:\s+read/);
   assert.match(workflow, /packages:\s+write/);
+  assert.match(workflow, /attestations:\s+write/);
+  assert.match(workflow, /id-token:\s+write/);
   assert.match(workflow, /uses:\s+actions\/checkout@v4/);
   assert.match(workflow, /uses:\s+docker\/setup-qemu-action@v3/);
   assert.match(workflow, /uses:\s+docker\/setup-buildx-action@v3/);
@@ -366,7 +376,7 @@ test('.github/workflows/gateway-docker.yml builds multi-arch GHCR images with pr
   assert.match(workflow, /sbom:\s+true/);
 });
 
-test('zero hardcoded secrets exist across all deploy pack & workflow files', () => {
+test('zero hardcoded secrets exist across all deploy pack, workflow & governance files', () => {
   const filesToScan = [
     'deploy/.env.example',
     'deploy/caddy/Caddyfile',
@@ -376,6 +386,13 @@ test('zero hardcoded secrets exist across all deploy pack & workflow files', () 
     'railway.gateway.json',
     '.github/workflows/ci-verify.yml',
     '.github/workflows/gateway-docker.yml',
+    '.github/ISSUE_TEMPLATE/bug_report.yml',
+    '.github/ISSUE_TEMPLATE/feature_request.yml',
+    '.github/ISSUE_TEMPLATE/config.yml',
+    '.github/PULL_REQUEST_TEMPLATE.md',
+    'SECURITY.md',
+    'CONTRIBUTING.md',
+    'CODE_OF_CONDUCT.md',
   ];
 
   const secretPatterns: Array<{ name: string; re: RegExp }> = [
@@ -415,4 +432,64 @@ test('docs/GATEWAY.md and README.md cover all 4 JalaDesk surfaces and all 4 depl
     assert.match(doc, /fly\.gateway\.toml/, `${name}: missing Fly.io deploy reference`);
     assert.match(doc, /railway\.gateway\.json/, `${name}: missing Railway deploy reference`);
   }
+});
+
+test('open-source governance docs (SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md) meet enterprise standards', () => {
+  const security = readRepoFile('SECURITY.md');
+  assert.match(security, /1\.17\.x/);
+  assert.match(security, /Private Vulnerability Reporting/i);
+  assert.match(security, /rizkybachtiar7@gmail\.com/);
+  assert.match(security, /48 hours/i);
+  assert.match(security, /7 days/i);
+  assert.match(security, /AES-256-GCM/);
+  assert.match(security, /never stores user vaults/i);
+  assert.match(security, /169\.254\.169\.254/);
+  assert.match(security, /SSRF/);
+
+  const contributing = readRepoFile('CONTRIBUTING.md');
+  assert.match(contributing, /Node\.js 24/i);
+  assert.match(contributing, /Android Foldable/i);
+  assert.match(contributing, /Web PWA/i);
+  assert.match(contributing, /innerHTML/);
+  assert.match(contributing, /style=""/);
+  assert.match(contributing, /Zero Plaintext/i);
+  assert.match(contributing, /npm run build && npm test/);
+  assert.match(contributing, /flutter test/);
+  assert.match(contributing, /impeccable detect/);
+
+  const coc = readRepoFile('CODE_OF_CONDUCT.md');
+  assert.match(coc, /Contributor Covenant/);
+  assert.match(coc, /version 2\.1/i);
+  assert.match(coc, /rizkybachtiar7@gmail\.com/);
+});
+
+test('.github issue forms & PR template have valid YAML and cover all 4 JalaDesk surfaces', () => {
+  const bugReport = readRepoFile('.github/ISSUE_TEMPLATE/bug_report.yml');
+  const featureReq = readRepoFile('.github/ISSUE_TEMPLATE/feature_request.yml');
+  const config = readRepoFile('.github/ISSUE_TEMPLATE/config.yml');
+  const prTemplate = readRepoFile('.github/PULL_REQUEST_TEMPLATE.md');
+
+  assertCleanYamlSyntax(bugReport, '.github/ISSUE_TEMPLATE/bug_report.yml');
+  assertCleanYamlSyntax(featureReq, '.github/ISSUE_TEMPLATE/feature_request.yml');
+  assertCleanYamlSyntax(config, '.github/ISSUE_TEMPLATE/config.yml');
+
+  for (const [label, form] of [
+    ['bug_report.yml', bugReport],
+    ['feature_request.yml', featureReq],
+  ] as const) {
+    assert.match(form, /Desktop macOS\/Windows/, `${label}: missing Desktop surface option`);
+    assert.match(form, /Android & Foldable/, `${label}: missing Android & Foldable surface option`);
+    assert.match(form, /Web PWA/, `${label}: missing Web PWA surface option`);
+    assert.match(form, /Self-Hosted Gateway JSR1/, `${label}: missing Gateway JSR1 surface option`);
+  }
+
+  assert.match(bugReport, /Reproduction Steps/i);
+  assert.match(config, /blank_issues_enabled:\s+false/);
+  assert.match(config, /SECURITY\.md/);
+  assert.match(config, /docs\/GATEWAY\.md/);
+
+  assert.match(prTemplate, /npm run build && npm test/);
+  assert.match(prTemplate, /Zero plaintext secrets/i);
+  assert.match(prTemplate, /Strict CSP/i);
+  assert.match(prTemplate, /SECURITY\.md|README\.md|docs\/GATEWAY\.md/);
 });

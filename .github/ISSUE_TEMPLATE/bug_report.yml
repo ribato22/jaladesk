@@ -1,0 +1,81 @@
+name: Bug Report
+description: Report a reproducible bug in JalaDesk Desktop, Mobile, Web PWA, or Self-Hosted Gateway.
+title: "[Bug]: "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please **do NOT** submit security vulnerabilities here — follow [SECURITY.md](../../SECURITY.md) for private disclosure.
+        Never paste plaintext passwords, private keys, TOTP seeds, or live gateway tokens into public issues.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected JalaDesk Surface
+      description: Select the surface where you encountered this issue.
+      options:
+        - Desktop macOS/Windows
+        - Android & Foldable
+        - Web PWA
+        - Self-Hosted Gateway JSR1
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / Commit / Container Digest
+      description: Example - v1.17.0, ghcr.io/ribato22/jaladesk-gateway:1.17.0, or git commit SHA.
+      placeholder: "v1.17.0"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Operating System, Browser, or Device Model
+      description: Example - macOS 15.4 (arm64), Windows 11 24H2, Samsung Galaxy Z Fold6 (Android 15), Chrome 134, Docker 27 on Debian 12.
+      placeholder: "macOS 15.4 (arm64) / Node 24"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What Happened?
+      description: Provide a clear, concise summary of the bug and what you expected to happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction Steps
+      description: Step-by-step instructions to reliably reproduce the issue.
+      value: |
+        1. Open/start ...
+        2. Configure ...
+        3. Trigger ...
+        4. Observe error ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized Logs or Screenshots
+      description: Paste relevant terminal, browser console, or container logs with all credentials and private IPs redacted.
+      render: shell
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-Submission Safety Check
+      options:
+        - label: I have redacted all passwords, SSH keys, TOTP secrets, and gateway bearer tokens.
+          required: true
+        - label: I confirmed this is not a security vulnerability (security issues belong in SECURITY.md).
+          required: true

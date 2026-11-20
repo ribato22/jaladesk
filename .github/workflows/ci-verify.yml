@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Build & Test (Node 22)
+    name: Build & Test (Node 24)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -25,10 +25,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
 
       - name: Install dependencies

@@ -9,6 +9,8 @@ on:
 permissions:
   contents: read
   packages: write
+  attestations: write
+  id-token: write
 
 concurrency:
   group: gateway-docker-${{ github.ref }}
@@ -18,7 +20,7 @@ jobs:
   build-and-push:
     name: Build & Publish Multi-Arch Gateway (GHCR)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
