@@ -2,6 +2,7 @@ import {
   SealedBrowserVaultStore,
   VaultCoreError,
   calculateTotpTiming,
+  computeVaultSecurityHealth,
   createEmptyVaultPayload,
   deriveGoogleAccountBoundPassphrase,
   evaluateTotpToken,
@@ -9,6 +10,7 @@ import {
   hasGoogleDriveAppDataScope,
   makeTombstoneKey,
   normalizeTotpSecretBase32,
+  parseOpenSshConfig,
   parseOtpAuthUri,
   requestGoogleWebAccessToken,
   syncWithGithubGist,
@@ -37,21 +39,41 @@ const DEFAULT_PORTS = Object.freeze({
   hypervisor: 8006,
 });
 
-const DOCKER_SNIPPETS = Object.freeze({
-  run: `docker run --rm -p 127.0.0.1:8443:8443 \\
-  -e JALADESK_GATEWAY_CORS_ORIGINS=https://ribato22.github.io \\
-  -e JALADESK_GATEWAY_DEMO=1 \\
-  ghcr.io/ribato22/jaladesk-gateway:1.17.0`,
-  compose: `services:
-  jaladesk-gateway:
-    image: ghcr.io/ribato22/jaladesk-gateway:1.17.0
-    ports:
-      - "127.0.0.1:8443:8443"
-    environment:
-      JALADESK_GATEWAY_CORS_ORIGINS: "https://ribato22.github.io"
-      JALADESK_GATEWAY_DEMO: "1"
-    read_only: true
-    restart: unless-stopped`,
+const GATEWAY_DEPLOY_TABS = Object.freeze({
+  desktop: {
+    label: 'Desktop Bridge',
+    hint: '1-click inside JalaDesk.app -> Web Bridge, or start a local loopback bridge on http://127.0.0.1:8443.',
+    snippet: `# 1-Click in JalaDesk Desktop:
+# Open JalaDesk.app -> Toggle "Web Bridge" ON -> Click "Open Web App"
+# Endpoint: http://127.0.0.1:8443 (auto-pairs via RAM-only #token)
+
+# Or run from CLI:
+npm run gateway -- --host 127.0.0.1 --port 8443`,
+  },
+  caddy: {
+    label: 'Docker + Caddy',
+    hint: 'Automatic Let\'s Encrypt TLS 1.3 HTTPS/WSS reverse proxy with isolated private gateway network.',
+    snippet: `# Copy env template & set JALADESK_GATEWAY_DOMAIN=gw.example.com
+cp deploy/.env.example deploy/.env
+docker compose --env-file deploy/.env -f deploy/caddy/docker-compose.caddy.yml up -d`,
+  },
+  cloudflare: {
+    label: 'Cloudflare Tunnel',
+    hint: 'Zero open inbound firewall ports — outbound cloudflared tunnel bridges straight to jaladesk-gateway:8443.',
+    snippet: `# Set CLOUDFLARE_TUNNEL_TOKEN in deploy/.env (Zero Trust -> Tunnels)
+cp deploy/.env.example deploy/.env
+docker compose --env-file deploy/.env -f deploy/cloudflare/docker-compose.cloudflared.yml up -d`,
+  },
+  cloud: {
+    label: 'Fly.io / Railway',
+    hint: '1-click managed HTTPS/WSS cloud deployment with /healthz checks and automatic TLS.',
+    snippet: `# Deploy to Fly.io (fly.gateway.toml):
+fly launch --copy-config --config fly.gateway.toml
+fly deploy -c fly.gateway.toml
+
+# Or deploy on Railway using railway.gateway.json:
+railway up`,
+  },
 });
 
 const PRIMARY_ADD_LABELS = Object.freeze({
@@ -138,7 +160,14 @@ const appState = {
   sshTerminal: null,
   gatewayFragmentScrubbed: false,
   gatewayFragmentUrl: '',
-  dockerTab: 'run',
+  gatewaySessions: [],
+  activeGatewaySessionId: null,
+  deployTab: 'desktop',
+  vaultHealthDetailsOpen: false,
+  cmdkQuery: '',
+  cmdkItems: [],
+  cmdkActiveIndex: 0,
+  sshImportParsed: null,
   activeModalId: null,
   lastModalTriggerEl: null,
   pendingConfirmAction: null,
@@ -712,12 +741,17 @@ function zeroSensitiveInputsAndDom(options = {}) {
   appState.gatewayTargetHostId = '__demo__';
   appState.gatewayFragmentScrubbed = pendingScrubbed;
   appState.gatewayFragmentUrl = pendingGatewayUrl;
+  appState.vaultHealthDetailsOpen = false;
+  appState.cmdkQuery = '';
+  appState.cmdkItems = [];
+  appState.cmdkActiveIndex = 0;
+  appState.sshImportParsed = null;
   if (appState.clipboardClearTimer) {
     clearTimeout(appState.clipboardClearTimer);
     appState.clipboardClearTimer = null;
   }
 
-  disconnectGatewaySession(true);
+  closeAllGatewaySessionTabs();
 
   const clearedInputIds = [
     'unlock-passphrase',
@@ -760,6 +794,9 @@ function zeroSensitiveInputsAndDom(options = {}) {
     'cred-password',
     'cred-pem',
     'cred-notes',
+    'cmdk-input',
+    'ssh-import-textarea',
+    'ssh-import-folder',
   ];
   for (const id of clearedInputIds) {
     const input = byId(id);
@@ -768,10 +805,28 @@ function zeroSensitiveInputsAndDom(options = {}) {
   const connPort = byId('conn-port');
   if (connPort) connPort.value = '3389';
 
-  for (const listId of ['connections-list', 'totp-list', 'credentials-list', 'folder-filter-bar', 'jala-toast-region']) {
+  for (const listId of [
+    'connections-list',
+    'totp-list',
+    'credentials-list',
+    'folder-filter-bar',
+    'jala-toast-region',
+    'cmdk-listbox',
+    'ssh-import-preview-list',
+    'vault-health-pills',
+    'vault-health-findings',
+    'sync-health-pills',
+    'gateway-session-tabs',
+  ]) {
     const list = byId(listId);
     if (list) list.replaceChildren();
   }
+  const sshPreviewBox = byId('ssh-import-preview-box');
+  if (sshPreviewBox) sshPreviewBox.hidden = true;
+  const healthFindings = byId('vault-health-findings');
+  if (healthFindings) healthFindings.hidden = true;
+  const sessionTabsEl = byId('gateway-session-tabs');
+  if (sessionTabsEl) sessionTabsEl.hidden = true;
   appState.totpCardRefs.clear();
 
   const selectDefaults = [
@@ -858,6 +913,9 @@ function applyAutoLockSelection(rawValue) {
   const railSelect = byId('rail-autolock-select');
   if (railSelect) {
     railSelect.value = appState.lockOnHidden ? 'immediate' : String(store.getUiPrefs().autoLockSeconds);
+  }
+  if (store.isUnlocked()) {
+    renderVaultHealthStrips();
   }
 }
 
@@ -1131,13 +1189,167 @@ function renderAllViews() {
   const payload = getPayloadSafe();
   if (!payload) return;
   updateNavCounts(payload);
+  renderVaultHealthStrips(payload);
   renderConnectionsView();
   renderTotpView();
   renderCredentialsView();
   renderSyncExportSummary(payload);
   renderGoogleDriveStudioState();
   renderGatewayTargets();
+  renderGatewaySessionTabs();
   updateSecurityPill();
+}
+
+function handleHealthPostureAction(action) {
+  if (action === 'sync') {
+    switchWorkspaceView('sync', true);
+  } else if (action === 'totp') {
+    switchWorkspaceView('totp', true);
+  } else if (action === 'credentials') {
+    switchWorkspaceView('credentials', true);
+  } else if (action === 'autolock') {
+    const sel = byId('rail-autolock-select');
+    if (sel && window.innerWidth > 767) {
+      sel.focus();
+      showToast('Select an idle Auto-Lock timeout in the sidebar footer.', 'default');
+    } else {
+      switchWorkspaceView('sync', true);
+    }
+  }
+}
+
+function populateHealthStripDom({
+  stripId,
+  shieldId,
+  scoreId,
+  gradeId,
+  pillsId,
+  findingsId,
+  toggleBtnId,
+  toggleLabelId,
+  health,
+}) {
+  const strip = byId(stripId);
+  const shield = byId(shieldId);
+  const scoreEl = byId(scoreId);
+  const gradeEl = byId(gradeId);
+  const pillsEl = byId(pillsId);
+  if (!strip || !pillsEl) return;
+
+  strip.classList.toggle('is-warn', health.tone === 'warn');
+  strip.classList.toggle('is-danger', health.tone === 'danger');
+
+  if (shield) {
+    shield.className = `vault-health-shield${health.tone === 'warn' ? ' is-warn' : health.tone === 'danger' ? ' is-danger' : ''}`;
+  }
+  if (scoreEl) {
+    scoreEl.textContent = `${health.score}/100`;
+  }
+  if (gradeEl) {
+    gradeEl.textContent = health.gradeLabel;
+    gradeEl.className = `status-pill ${health.tone === 'ok' ? 'status-pill-ok' : health.tone === 'warn' ? 'status-pill-warn' : 'status-pill-danger'}`;
+  }
+
+  pillsEl.replaceChildren();
+  for (const pill of health.pills) {
+    const btn = el('button', `health-pill-btn is-${pill.tone}`);
+    btn.type = 'button';
+    btn.setAttribute('role', 'listitem');
+    btn.title = pill.detail;
+    const dotTone = pill.tone === 'ok' ? 'ok' : pill.tone === 'danger' ? 'danger' : pill.tone === 'warn' ? 'warn' : 'idle';
+    const dot = el('span', `status-dot status-dot-${dotTone}`);
+    dot.setAttribute('aria-hidden', 'true');
+    btn.appendChild(dot);
+    btn.appendChild(el('span', '', pill.label));
+    btn.addEventListener('click', () => handleHealthPostureAction(pill.action));
+    pillsEl.appendChild(btn);
+  }
+
+  if (findingsId) {
+    const findingsEl = byId(findingsId);
+    const toggleBtn = toggleBtnId ? byId(toggleBtnId) : null;
+    const toggleLabel = toggleLabelId ? byId(toggleLabelId) : null;
+    if (toggleLabel) {
+      toggleLabel.textContent =
+        health.findings.length > 0
+          ? `Audit (${health.findings.length})`
+          : 'Audit Clean';
+    }
+    if (toggleBtn) {
+      toggleBtn.setAttribute('aria-expanded', appState.vaultHealthDetailsOpen ? 'true' : 'false');
+    }
+    if (findingsEl) {
+      findingsEl.replaceChildren();
+      if (health.findings.length === 0) {
+        findingsEl.appendChild(
+          el(
+            'p',
+            'health-finding-clean',
+            'All checks clean: AES-256-GCM enclave active, auto-lock armed, and zero credential hygiene warnings.',
+          ),
+        );
+      } else {
+        for (const item of health.findings) {
+          const row = el('div', 'health-finding-row');
+          const copy = el('div', 'health-finding-copy');
+          copy.appendChild(el('span', 'health-finding-title', item.title));
+          copy.appendChild(el('span', 'health-finding-detail', item.detail));
+          row.appendChild(copy);
+          const fixBtn = el('button', 'btn btn-secondary btn-sm', item.action === 'sync' ? 'Open Sync' : item.action === 'totp' ? 'Open 2FA' : item.action === 'credentials' ? 'Review' : 'Configure');
+          fixBtn.type = 'button';
+          fixBtn.addEventListener('click', () => handleHealthPostureAction(item.action));
+          row.appendChild(fixBtn);
+          findingsEl.appendChild(row);
+        }
+      }
+      findingsEl.hidden = !appState.vaultHealthDetailsOpen;
+    }
+  }
+}
+
+function renderVaultHealthStrips(payloadOverride = null) {
+  const payload = payloadOverride || getPayloadSafe();
+  if (!payload) return;
+  const prefs = store.getUiPrefs();
+  const hasCloudBinding = Boolean(
+    ramSecrets.gdriveToken ||
+      ramSecrets.gistToken ||
+      ramSecrets.webdavPassword ||
+      prefs.githubGistId ||
+      prefs.webdavUrl ||
+      prefs.googleAccountEmail ||
+      prefs.lastSyncedAtMs > 0,
+  );
+  const health = computeVaultSecurityHealth(payload, {
+    autoLockSeconds: prefs.autoLockSeconds,
+    lockOnHidden: appState.lockOnHidden,
+    syncProvider: prefs.syncProvider,
+    hasCloudBinding,
+    lastSyncedAtMs: prefs.lastSyncedAtMs,
+    vaultAuthMode: prefs.vaultAuthMode,
+    useCustomPassphrase: prefs.useCustomPassphrase,
+  });
+
+  populateHealthStripDom({
+    stripId: 'vault-health-strip',
+    shieldId: 'vault-health-shield',
+    scoreId: 'vault-health-score',
+    gradeId: 'vault-health-grade',
+    pillsId: 'vault-health-pills',
+    findingsId: 'vault-health-findings',
+    toggleBtnId: 'btn-vault-health-details',
+    toggleLabelId: 'btn-vault-health-details-label',
+    health,
+  });
+
+  populateHealthStripDom({
+    stripId: 'sync-vault-health-strip',
+    shieldId: 'sync-health-shield',
+    scoreId: 'sync-health-score',
+    gradeId: 'sync-health-grade',
+    pillsId: 'sync-health-pills',
+    health,
+  });
 }
 
 function updateNavCounts(payload) {
@@ -1417,6 +1629,7 @@ async function executeDeleteHost(hostId) {
   if (appState.gatewayTargetHostId === hostId) {
     appState.gatewayTargetHostId = '__demo__';
   }
+  closeGatewaySessionTab(makeGatewaySessionId(hostId), { silent: true });
 
   await saveVaultPayload(payload, { autoSyncDelayMs: CLOUD_DELETE_SYNC_DELAY_MS, isDelete: true });
   renderAllViews();
@@ -1466,8 +1679,16 @@ function openHostInGateway(hostId) {
   if (appState.gatewayCredPromptHostId !== String(hostId)) {
     clearGatewayRuntimeCredentials();
   }
+  const session = openOrFocusGatewaySessionTab(String(hostId));
   appState.gatewayTargetHostId = String(hostId);
   switchWorkspaceView('gateway', true, { skipGatewayProbe: true });
+
+  // If this session tab is already live or in interactive preview, jump straight to its preserved stage!
+  if (session && (session.status === 'live' || session.status === 'preview')) {
+    activateGatewaySessionTab(session.id);
+    return;
+  }
+
   setGatewaySetupVisible(true);
   const select = byId('gateway-host-select');
   if (select) {
@@ -2698,8 +2919,409 @@ async function handleExportJvault() {
 }
 
 /* ==========================================================================
-   View 5 — Self-Hosted Web Gateway (Live JSR1 Binary WS Studio)
+   View 5 — Self-Hosted Web Gateway (Live JSR1 Binary WS Studio + Multi-Tabs)
    ========================================================================== */
+
+const MAX_SESSION_SSH_CHARS = 240_000;
+
+function makeGatewaySessionId(hostId) {
+  return `sess_${String(hostId || '__demo__')}`;
+}
+
+function getActiveGatewaySession() {
+  if (!appState.activeGatewaySessionId) return null;
+  return appState.gatewaySessions.find((s) => s.id === appState.activeGatewaySessionId) || null;
+}
+
+function appendSessionSshChunk(session, chunk) {
+  if (!session || !chunk) return;
+  const str = String(chunk);
+  session.sshChunks.push(str);
+  session.sshChars = (session.sshChars || 0) + str.length;
+  while (session.sshChunks.length > 1 && session.sshChars > MAX_SESSION_SSH_CHARS) {
+    const removed = session.sshChunks.shift();
+    session.sshChars -= removed ? removed.length : 0;
+  }
+}
+
+function resolveSessionDescriptor(hostId) {
+  const cleanId = String(hostId || '__demo__');
+  if (cleanId === '__demo__') {
+    return {
+      hostId: '__demo__',
+      name: 'Demo Session',
+      protocol: 'demo',
+      targetLabel: 'DEMO',
+    };
+  }
+  const payload = getPayloadSafe();
+  const hosts = payload && Array.isArray(payload.hosts) ? payload.hosts : [];
+  const host = hosts.find((h) => String(h.id) === cleanId);
+  if (!host) {
+    return {
+      hostId: cleanId,
+      name: cleanId,
+      protocol: 'ssh',
+      targetLabel: cleanId,
+    };
+  }
+  const proto = String(host.protocol || 'rdp').toLowerCase();
+  const safeProto = ['rdp', 'vnc', 'ssh', 'sftp', 'hypervisor'].includes(proto) ? proto : 'ssh';
+  const port = Number(host.port) || DEFAULT_PORTS[safeProto] || 22;
+  return {
+    hostId: cleanId,
+    name: String(host.name || host.address || 'Host'),
+    protocol: safeProto,
+    targetLabel: `${safeProto.toUpperCase()} · ${host.name || host.address}:${port}`,
+  };
+}
+
+function renderGatewaySessionTabs() {
+  const bar = byId('gateway-session-tabs');
+  if (!bar) return;
+  bar.replaceChildren();
+
+  if (appState.gatewaySessions.length === 0) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+
+  for (const sess of appState.gatewaySessions) {
+    const isActive = sess.id === appState.activeGatewaySessionId;
+    const safeProto = ['rdp', 'vnc', 'ssh', 'sftp', 'hypervisor', 'demo'].includes(sess.protocol) ? sess.protocol : 'ssh';
+    const dotTone =
+      sess.status === 'live'
+        ? 'ok'
+        : sess.status === 'preview' || sess.status === 'connecting'
+          ? 'warn'
+          : 'idle';
+
+    const tab = el('div', `session-tab${isActive ? ' is-active' : ''}`);
+    tab.dataset.sessionId = sess.id;
+
+    const selectBtn = el('button', 'session-tab-select');
+    selectBtn.type = 'button';
+    selectBtn.setAttribute('role', 'tab');
+    selectBtn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    selectBtn.title = `${sess.protocol.toUpperCase()} · ${sess.name} (${sess.status})`;
+
+    const dot = el('span', `status-dot status-dot-${dotTone}`);
+    dot.setAttribute('aria-hidden', 'true');
+    selectBtn.appendChild(dot);
+    selectBtn.appendChild(el('span', `session-tab-proto proto-${safeProto} mono`, sess.protocol.toUpperCase()));
+    selectBtn.appendChild(el('span', 'session-tab-name', sess.name));
+    selectBtn.addEventListener('click', () => {
+      activateGatewaySessionTab(sess.id);
+    });
+    tab.appendChild(selectBtn);
+
+    const closeBtn = el('button', 'session-tab-close', '×');
+    closeBtn.type = 'button';
+    closeBtn.setAttribute('aria-label', `Close ${sess.name} session tab`);
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeGatewaySessionTab(sess.id);
+    });
+    tab.appendChild(closeBtn);
+
+    bar.appendChild(tab);
+  }
+}
+
+function detachPreviewRuntime(previewState) {
+  if (!previewState) return;
+  if (previewState.timerId) {
+    clearInterval(previewState.timerId);
+    previewState.timerId = null;
+  }
+  const canvas = byId('gateway-canvas');
+  if (canvas && Array.isArray(previewState.listeners)) {
+    for (const [evt, fn] of previewState.listeners) {
+      canvas.removeEventListener(evt, fn);
+    }
+  }
+}
+
+function reattachPreviewRuntime(previewState) {
+  if (!previewState) return;
+  const canvas = byId('gateway-canvas');
+  if (canvas && Array.isArray(previewState.listeners)) {
+    for (const [evt, fn] of previewState.listeners) {
+      canvas.removeEventListener(evt, fn);
+      canvas.addEventListener(evt, fn);
+    }
+  }
+  renderGatewayPreviewCanvas();
+  if (!previewState.timerId) {
+    previewState.timerId = setInterval(() => {
+      if (!appState.gatewayPreviewActive || appState.gatewayPreviewState !== previewState) return;
+      renderGatewayPreviewCanvas();
+    }, 1000);
+  }
+}
+
+function snapshotActiveGatewaySession() {
+  const prev = getActiveGatewaySession();
+  if (!prev) return;
+
+  prev.activePane = appState.gatewayPane || prev.activePane;
+  prev.scaleMode = appState.gatewayScaleMode || prev.scaleMode;
+  prev.sftpPath = appState.gatewaySftpPath || prev.sftpPath;
+  prev.viewOnly = appState.gatewayViewOnly;
+  prev.sshCols = appState.gatewaySshCols || prev.sshCols;
+  prev.sshRows = appState.gatewaySshRows || prev.sshRows;
+
+  const canvasEl = byId('gateway-canvas');
+  if (prev.client) {
+    try {
+      prev.client.detachCanvasInput();
+      if (canvasEl && canvasEl.width > 0 && canvasEl.height > 0) {
+        if (!prev.backingCanvas) {
+          prev.backingCanvas = document.createElement('canvas');
+        }
+        prev.backingCanvas.width = canvasEl.width;
+        prev.backingCanvas.height = canvasEl.height;
+        const bCtx = prev.backingCanvas.getContext('2d', { alpha: false });
+        if (bCtx) bCtx.drawImage(canvasEl, 0, 0);
+        if (typeof prev.client.setCanvas === 'function') {
+          prev.client.setCanvas(prev.backingCanvas);
+        }
+      }
+    } catch {
+      // Ignore snapshot error on detached canvas
+    }
+  }
+
+  if (prev.previewState) {
+    detachPreviewRuntime(prev.previewState);
+  }
+}
+
+function openOrFocusGatewaySessionTab(hostId) {
+  const cleanHostId = String(hostId || '__demo__');
+  const sessionId = makeGatewaySessionId(cleanHostId);
+  const existing = appState.gatewaySessions.find((s) => s.id === sessionId);
+  const desc = resolveSessionDescriptor(cleanHostId);
+
+  if (existing) {
+    existing.name = desc.name;
+    existing.protocol = desc.protocol;
+    if (!existing.targetLabel) existing.targetLabel = desc.targetLabel;
+    if (appState.activeGatewaySessionId !== existing.id) {
+      snapshotActiveGatewaySession();
+      appState.activeGatewaySessionId = existing.id;
+    }
+    renderGatewaySessionTabs();
+    return existing;
+  }
+
+  snapshotActiveGatewaySession();
+  const created = {
+    id: sessionId,
+    hostId: desc.hostId,
+    name: desc.name,
+    protocol: desc.protocol,
+    status: 'ready',
+    activePane: resolveInitialGatewayPane(desc.protocol),
+    scaleMode: appState.gatewayScaleMode || 'fit',
+    viewOnly: appState.gatewayViewOnly,
+    hasControl: !appState.gatewayViewOnly,
+    targetLabel: desc.targetLabel,
+    sftpPath: '/',
+    sshChunks: [],
+    sshChars: 0,
+    sshCols: appState.gatewaySshCols || 100,
+    sshRows: appState.gatewaySshRows || 30,
+    metrics: { fps: 0, rttMs: 0, kbPerSec: 0, tilesDecoded: 0 },
+    client: null,
+    previewState: null,
+    backingCanvas: null,
+  };
+  appState.gatewaySessions.push(created);
+  appState.activeGatewaySessionId = created.id;
+  renderGatewaySessionTabs();
+  return created;
+}
+
+function activateGatewaySessionTab(sessionId) {
+  const target = appState.gatewaySessions.find((s) => s.id === sessionId);
+  if (!target) return;
+
+  if (appState.activeGatewaySessionId && appState.activeGatewaySessionId !== target.id) {
+    snapshotActiveGatewaySession();
+  }
+  appState.activeGatewaySessionId = target.id;
+  appState.gatewayTargetHostId = target.hostId;
+  appState.gatewayClient = target.client || null;
+  appState.gatewayPreviewState = target.previewState || null;
+  appState.gatewayPreviewActive = Boolean(target.previewState);
+  appState.gatewaySessionProtocol = target.protocol;
+  appState.gatewayTargetLabel = target.targetLabel;
+  appState.gatewaySftpPath = target.sftpPath || '/';
+  appState.gatewayScaleMode = target.scaleMode || 'fit';
+
+  const select = byId('gateway-host-select');
+  if (select && Array.from(select.options).some((o) => o.value === target.hostId)) {
+    select.value = target.hostId;
+  }
+  updateGatewayTargetBadge();
+
+  // Restore SSH terminal buffer cleanly for this session tab
+  const term = ensureSshTerminal();
+  term.reset();
+  for (const chunk of target.sshChunks) {
+    term.write(chunk);
+  }
+  appState.gatewaySshBuffer = term.renderText(false);
+  const sftpPathInput = byId('gateway-sftp-path');
+  if (sftpPathInput) sftpPathInput.value = target.sftpPath || '/';
+
+  const liveStage = byId('gateway-live-stage');
+  const previewBanner = byId('gateway-preview-banner');
+  const toggleBtn = byId('btn-gateway-toggle-setup');
+  const connBtn = byId('btn-gateway-connect');
+  const discBtn = byId('btn-gateway-disconnect');
+  const hudTarget = byId('hud-target-badge');
+  const canvasEl = byId('gateway-canvas');
+
+  if (target.client && target.client.connected) {
+    if (liveStage) liveStage.hidden = false;
+    if (previewBanner) previewBanner.hidden = true;
+    if (toggleBtn) toggleBtn.hidden = false;
+    if (connBtn) connBtn.disabled = true;
+    if (discBtn) discBtn.disabled = false;
+    setGatewaySetupVisible(false);
+    setGatewayStatus('CONNECTED', 'ok');
+    syncGatewayPaneTabsForProtocol(target.protocol);
+    if (canvasEl && target.backingCanvas) {
+      canvasEl.width = target.backingCanvas.width;
+      canvasEl.height = target.backingCanvas.height;
+      const ctx = canvasEl.getContext('2d', { alpha: false });
+      if (ctx) ctx.drawImage(target.backingCanvas, 0, 0);
+    }
+    if (canvasEl && typeof target.client.setCanvas === 'function') {
+      target.client.setCanvas(canvasEl);
+    }
+    if (canvasEl && (target.activePane === 'desktop' || target.protocol === 'demo')) {
+      target.client.attachCanvasInput(canvasEl, () => appState.gatewayScaleMode);
+    }
+    if (hudTarget) {
+      hudTarget.textContent =
+        target.activePane === 'ssh'
+          ? `${target.targetLabel} · ${target.sshCols}×${target.sshRows}`
+          : target.targetLabel;
+    }
+    updateGatewayControlUi(Boolean(target.hasControl), Boolean(target.viewOnly));
+    updateGatewayHudMetrics(target.metrics || { fps: 0, rttMs: 0, kbPerSec: 0, tilesDecoded: 0 });
+    setGatewayScaleMode(target.scaleMode || 'fit');
+    setGatewayPane(target.activePane || resolveInitialGatewayPane(target.protocol));
+  } else if (target.previewState) {
+    if (liveStage) liveStage.hidden = false;
+    if (previewBanner) previewBanner.hidden = false;
+    if (toggleBtn) toggleBtn.hidden = false;
+    if (connBtn) connBtn.disabled = false;
+    if (discBtn) discBtn.disabled = false;
+    setGatewaySetupVisible(false);
+    setGatewayStatus('OFFLINE PREVIEW', 'warn');
+    syncGatewayPaneTabsForProtocol(target.protocol);
+    if (hudTarget) {
+      hudTarget.textContent =
+        target.activePane === 'ssh'
+          ? `PREVIEW · ${target.targetLabel} · ${target.sshCols}×${target.sshRows}`
+          : `PREVIEW · ${target.targetLabel} · 1280×720`;
+    }
+    updateGatewayControlUi(!target.viewOnly, Boolean(target.viewOnly));
+    updateGatewayHudMetrics(target.metrics || { fps: 30, rttMs: 1, kbPerSec: 162, tilesDecoded: target.previewState.tilesDecoded || 14 });
+    setGatewayScaleMode(target.scaleMode || 'fit');
+    reattachPreviewRuntime(target.previewState);
+    renderGatewayPreviewSftpList();
+    setGatewayPane(target.activePane || resolveInitialGatewayPane(target.protocol));
+  } else {
+    if (liveStage) liveStage.hidden = true;
+    if (previewBanner) previewBanner.hidden = true;
+    if (toggleBtn) toggleBtn.hidden = true;
+    if (connBtn) connBtn.disabled = target.status === 'connecting';
+    if (discBtn) discBtn.disabled = target.status !== 'connecting';
+    setGatewaySetupVisible(true);
+    setGatewayStatus(target.status === 'connecting' ? 'CONNECTING' : 'DISCONNECTED', target.status === 'connecting' ? 'warn' : 'idle');
+  }
+
+  renderGatewaySessionTabs();
+}
+
+function disposeGatewaySessionResources(sess, sendClose = true) {
+  if (!sess) return;
+  if (sess.previewState) {
+    detachPreviewRuntime(sess.previewState);
+    sess.previewState = null;
+  }
+  if (sess.client) {
+    try {
+      sess.client.detachCanvasInput();
+      sess.client.disconnect(sendClose);
+    } catch {
+      // Ignore cleanup error
+    }
+    sess.client = null;
+  }
+  sess.sshChunks.length = 0;
+  sess.sshChars = 0;
+  sess.backingCanvas = null;
+  sess.status = 'disconnected';
+}
+
+function closeGatewaySessionTab(sessionId, options = {}) {
+  const idx = appState.gatewaySessions.findIndex((s) => s.id === sessionId);
+  if (idx < 0) return;
+  const [removed] = appState.gatewaySessions.splice(idx, 1);
+  const wasActive = appState.activeGatewaySessionId === removed.id;
+
+  disposeGatewaySessionResources(removed, !options.silent);
+
+  if (wasActive) {
+    appState.gatewayClient = null;
+    appState.gatewayPreviewActive = false;
+    appState.gatewayPreviewState = null;
+    appState.activeGatewaySessionId = null;
+
+    if (appState.gatewaySessions.length > 0) {
+      const nextTab = appState.gatewaySessions[Math.min(idx, appState.gatewaySessions.length - 1)];
+      activateGatewaySessionTab(nextTab.id);
+    } else {
+      const connBtn = byId('btn-gateway-connect');
+      const discBtn = byId('btn-gateway-disconnect');
+      if (connBtn) connBtn.disabled = false;
+      if (discBtn) discBtn.disabled = true;
+      setGatewayStatus('DISCONNECTED', 'idle');
+      resetGatewayLiveDom();
+      renderGatewaySessionTabs();
+    }
+  } else {
+    renderGatewaySessionTabs();
+  }
+}
+
+function closeAllGatewaySessionTabs() {
+  for (const sess of appState.gatewaySessions) {
+    disposeGatewaySessionResources(sess, false);
+  }
+  appState.gatewaySessions = [];
+  appState.activeGatewaySessionId = null;
+  disconnectGatewaySession(true);
+  renderGatewaySessionTabs();
+}
+
+function setGatewayDeployTab(tabKey) {
+  const key = Object.hasOwn(GATEWAY_DEPLOY_TABS, tabKey) ? tabKey : 'desktop';
+  const spec = GATEWAY_DEPLOY_TABS[key];
+  appState.deployTab = key;
+  setSegmentedValue(byId('gateway-deploy-tabs'), 'data-deploy-tab', key);
+  const hint = byId('gateway-deploy-hint');
+  const code = byId('gateway-deploy-code');
+  if (hint) hint.textContent = spec.hint;
+  if (code) code.textContent = spec.snippet;
+}
 
 function setGatewayAuthMode(mode) {
   appState.gatewayAuthMode = mode === 'token' ? 'token' : 'pairing';
@@ -2725,13 +3347,15 @@ function setGatewaySetupVisible(visible) {
   const toggleBtn = byId('btn-gateway-toggle-setup');
   if (setupGrid) setupGrid.hidden = !appState.gatewaySetupVisible;
   if (toggleBtn) {
-    toggleBtn.textContent = appState.gatewaySetupVisible ? 'Hide Setup & Docker' : 'Show Setup & Docker';
+    toggleBtn.textContent = appState.gatewaySetupVisible ? 'Hide Setup & Deploy' : 'Show Setup & Deploy';
   }
 }
 
 function setGatewayScaleMode(mode) {
   const next = mode === 'fill' || mode === 'native' ? mode : 'fit';
   appState.gatewayScaleMode = next;
+  const activeSess = getActiveGatewaySession();
+  if (activeSess) activeSess.scaleMode = next;
   setSegmentedValue(byId('gateway-scale-group'), 'data-gateway-scale', next);
   const stage = byId('gateway-canvas-stage');
   if (stage) {
@@ -2932,6 +3556,8 @@ function setGatewayPane(pane) {
   const isSftp = next === 'sftp';
 
   appState.gatewayPane = next;
+  const activeSess = getActiveGatewaySession();
+  if (activeSess) activeSess.activePane = next;
   setSegmentedValue(byId('gateway-pane-tabs'), 'data-gateway-pane', next);
 
   const stage = byId('gateway-live-stage');
@@ -3089,11 +3715,17 @@ function appendGatewayLog(message, tone = 'default') {
   log.scrollTop = log.scrollHeight;
 }
 
-function appendGatewaySshOutput(chunk) {
+function appendGatewaySshOutput(chunk, sessionOverride = null) {
   if (!chunk) return;
-  const term = ensureSshTerminal();
-  term.write(String(chunk));
-  appState.gatewaySshBuffer = term.renderText(false);
+  const targetSession = sessionOverride || getActiveGatewaySession();
+  if (targetSession) {
+    appendSessionSshChunk(targetSession, chunk);
+  }
+  if (!sessionOverride || sessionOverride.id === appState.activeGatewaySessionId) {
+    const term = ensureSshTerminal();
+    term.write(String(chunk));
+    appState.gatewaySshBuffer = term.renderText(false);
+  }
 }
 
 function renderGatewayTotpSelect() {
@@ -3437,6 +4069,7 @@ function buildGatewayOpenParamsFromVault(selectedTargetId) {
 }
 
 function disconnectGatewaySession(silent = false) {
+  const activeSess = getActiveGatewaySession();
   const wasPreview = appState.gatewayPreviewActive;
   stopGatewayPreview();
 
@@ -3448,6 +4081,14 @@ function disconnectGatewaySession(silent = false) {
       // Ignore disconnect error
     }
     appState.gatewayClient = null;
+  }
+
+  if (activeSess) {
+    activeSess.client = null;
+    activeSess.previewState = null;
+    activeSess.backingCanvas = null;
+    activeSess.status = 'disconnected';
+    renderGatewaySessionTabs();
   }
 
   if (document.fullscreenElement === byId('gateway-live-stage')) {
@@ -3500,14 +4141,20 @@ async function connectGatewayBridge() {
     ramSecrets.gatewayToken = sessionToken;
   }
 
-  disconnectGatewaySession(true);
+  const selectedTargetId = byId('gateway-host-select')?.value || '__demo__';
+  const session = openOrFocusGatewaySessionTab(selectedTargetId);
+  disposeGatewaySessionResources(session, false);
+  appState.gatewayClient = null;
+  appState.gatewayPreviewActive = false;
+  appState.gatewayPreviewState = null;
+  session.status = 'connecting';
+  renderGatewaySessionTabs();
 
   const connBtn = byId('btn-gateway-connect');
   const discBtn = byId('btn-gateway-disconnect');
   if (connBtn) connBtn.disabled = true;
   if (discBtn) discBtn.disabled = false;
 
-  const selectedTargetId = byId('gateway-host-select')?.value || '__demo__';
   if (appState.gatewayCredPromptHostId === String(selectedTargetId)) {
     ramSecrets.gatewayRuntimePassword = byId('gateway-runtime-password')?.value || ramSecrets.gatewayRuntimePassword || '';
     ramSecrets.gatewayRuntimeKey = byId('gateway-runtime-key')?.value || ramSecrets.gatewayRuntimeKey || '';
@@ -3518,7 +4165,11 @@ async function connectGatewayBridge() {
 
   const client = new JalaGatewayClient({
     canvas: canvasEl,
-    onStatus: (label, tone) => setGatewayStatus(label, tone),
+    onStatus: (label, tone) => {
+      if (appState.activeGatewaySessionId === session.id) {
+        setGatewayStatus(label, tone);
+      }
+    },
     onTokenExchanged: (token) => {
       ramSecrets.gatewayToken = token;
       ramSecrets.gatewayPairing = '';
@@ -3534,42 +4185,53 @@ async function connectGatewayBridge() {
     onOpened: (msg) => {
       clearGatewayRuntimeCredentials();
       const activeProto = String(msg.protocol || openParams.protocol || 'demo').toLowerCase();
-      appState.gatewaySessionProtocol = activeProto;
-      appState.gatewayTargetLabel = openParams.protocol === 'demo' ? 'DEMO' : displayLabel;
-
-      const liveStage = byId('gateway-live-stage');
-      const toggleBtn = byId('btn-gateway-toggle-setup');
-      const hudTarget = byId('hud-target-badge');
-      if (liveStage) liveStage.hidden = false;
-      if (toggleBtn) toggleBtn.hidden = false;
-      setGatewaySetupVisible(false);
-
+      const targetLabel = openParams.protocol === 'demo' ? 'DEMO' : displayLabel;
       const initialPane = resolveInitialGatewayPane(activeProto);
-      syncGatewayPaneTabsForProtocol(activeProto);
 
-      if (initialPane === 'ssh') {
-        const sshCols = Number(msg.cols) || appState.gatewaySshCols || 100;
-        const sshRows = Number(msg.rows) || appState.gatewaySshRows || 30;
-        if (hudTarget) {
-          hudTarget.textContent = `${appState.gatewayTargetLabel} · ${sshCols}×${sshRows}`;
+      session.status = 'live';
+      session.protocol = activeProto;
+      session.targetLabel = targetLabel;
+      session.activePane = initialPane;
+      session.hasControl = Boolean(msg.hasControl);
+      session.viewOnly = Boolean(msg.viewOnly);
+      session.sshCols = Number(msg.cols) || appState.gatewaySshCols || 100;
+      session.sshRows = Number(msg.rows) || appState.gatewaySshRows || 30;
+      renderGatewaySessionTabs();
+
+      if (appState.activeGatewaySessionId === session.id) {
+        appState.gatewaySessionProtocol = activeProto;
+        appState.gatewayTargetLabel = targetLabel;
+
+        const liveStage = byId('gateway-live-stage');
+        const previewBanner = byId('gateway-preview-banner');
+        const toggleBtn = byId('btn-gateway-toggle-setup');
+        const hudTarget = byId('hud-target-badge');
+        if (liveStage) liveStage.hidden = false;
+        if (previewBanner) previewBanner.hidden = true;
+        if (toggleBtn) toggleBtn.hidden = false;
+        setGatewaySetupVisible(false);
+        syncGatewayPaneTabsForProtocol(activeProto);
+
+        if (initialPane === 'ssh') {
+          if (hudTarget) {
+            hudTarget.textContent = `${targetLabel} · ${session.sshCols}×${session.sshRows}`;
+          }
+          updateGatewaySshHud(session.sshCols, session.sshRows, false, msg.pty ? 'PTY · xterm-256color' : 'VT100 TUI');
+        } else {
+          const dims = msg.width && msg.height ? ` · ${msg.width}×${msg.height}` : '';
+          if (hudTarget) {
+            hudTarget.textContent = `${targetLabel}${dims}`;
+          }
         }
-        updateGatewaySshHud(sshCols, sshRows, false, msg.pty ? 'PTY · xterm-256color' : 'VT100 TUI');
-      } else {
-        const dims = msg.width && msg.height ? ` · ${msg.width}×${msg.height}` : '';
-        if (hudTarget) {
-          hudTarget.textContent = `${appState.gatewayTargetLabel}${dims}`;
+
+        updateGatewayControlUi(Boolean(msg.hasControl), Boolean(msg.viewOnly));
+        renderGatewayTotpSelect();
+        setGatewayScaleMode(session.scaleMode || appState.gatewayScaleMode);
+        setGatewayPane(initialPane);
+
+        if (canvasEl && (initialPane === 'desktop' || activeProto === 'demo')) {
+          client.attachCanvasInput(canvasEl, () => appState.gatewayScaleMode);
         }
-      }
-
-      updateGatewayControlUi(Boolean(msg.hasControl), Boolean(msg.viewOnly));
-      renderGatewayTotpSelect();
-      setGatewayScaleMode(appState.gatewayScaleMode);
-      setGatewayPane(initialPane);
-
-      if (canvasEl && initialPane === 'desktop') {
-        client.attachCanvasInput(canvasEl, () => appState.gatewayScaleMode);
-      } else if (canvasEl && activeProto === 'demo') {
-        client.attachCanvasInput(canvasEl, () => appState.gatewayScaleMode);
       }
 
       appendGatewayLog(
@@ -3579,7 +4241,11 @@ async function connectGatewayBridge() {
       showToast(`Connected to ${displayLabel}`, 'ok');
     },
     onControlState: (msg) => {
-      updateGatewayControlUi(Boolean(msg.hasControl), Boolean(msg.viewOnly));
+      session.hasControl = Boolean(msg.hasControl);
+      session.viewOnly = Boolean(msg.viewOnly);
+      if (appState.activeGatewaySessionId === session.id) {
+        updateGatewayControlUi(Boolean(msg.hasControl), Boolean(msg.viewOnly));
+      }
       appendGatewayLog(
         msg.hasControl
           ? `Acquired exclusive input control (${msg.viewers} viewer${msg.viewers === 1 ? '' : 's'}).`
@@ -3588,22 +4254,30 @@ async function connectGatewayBridge() {
       );
     },
     onMetrics: (metrics) => {
-      updateGatewayHudMetrics(metrics);
+      session.metrics = metrics;
+      if (appState.activeGatewaySessionId === session.id) {
+        updateGatewayHudMetrics(metrics);
+      }
     },
     onSshData: (chunk) => {
-      appendGatewaySshOutput(chunk);
+      appendGatewaySshOutput(chunk, session);
     },
     onError: (msg) => {
       const text = msg && msg.message ? msg.message : 'Gateway session error.';
-      if (appState.gatewayPane === 'ssh') {
-        appendGatewaySshOutput(`\r\n\x1b[31m[gateway] ${text}\x1b[0m\r\n`);
+      if (session.activePane === 'ssh') {
+        appendGatewaySshOutput(`\r\n\x1b[31m[gateway] ${text}\x1b[0m\r\n`, session);
       }
       appendGatewayLog(`Gateway error (${msg.code || 'error'}): ${text}`, 'err');
       showToast(text, 'danger');
     },
     onClose: ({ code, wasConnected }) => {
-      if (appState.gatewayClient === client) {
+      if (session.client === client) {
         client.detachCanvasInput();
+        session.client = null;
+        session.status = 'disconnected';
+        renderGatewaySessionTabs();
+      }
+      if (appState.gatewayClient === client) {
         appState.gatewayClient = null;
         if (connBtn) connBtn.disabled = false;
         if (discBtn) discBtn.disabled = true;
@@ -3618,6 +4292,7 @@ async function connectGatewayBridge() {
     },
   });
 
+  session.client = client;
   appState.gatewayClient = client;
   appendGatewayLog(
     `Connecting via ${endpoints.httpBaseUrl} (${appState.gatewayAuthMode === 'pairing' ? '6-digit pairing -> 60s WS ticket' : 'token -> 60s WS ticket'}, ${appState.gatewayViewOnly ? 'view-only' : 'interactive'})...`,
@@ -3632,6 +4307,11 @@ async function connectGatewayBridge() {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    if (session.client === client) {
+      session.client = null;
+      session.status = 'disconnected';
+      renderGatewaySessionTabs();
+    }
     if (appState.gatewayClient === client) {
       appState.gatewayClient = null;
     }
@@ -4128,9 +4808,11 @@ function renderGatewayPreviewSftpList() {
 }
 
 function startGatewayInteractivePreview() {
-  disconnectGatewaySession(true);
-
   const selectedTargetId = byId('gateway-host-select')?.value || '__demo__';
+  const session = openOrFocusGatewaySessionTab(selectedTargetId);
+  disposeGatewaySessionResources(session, false);
+  appState.gatewayClient = null;
+
   const built = buildGatewayOpenParamsFromVault(selectedTargetId);
   const targetProto = selectedTargetId === '__demo__' ? 'demo' : built.protocol;
   const targetLabel =
@@ -4189,6 +4871,14 @@ function startGatewayInteractivePreview() {
   appState.gatewayPreviewState = previewState;
   appState.gatewaySessionProtocol = targetProto;
   appState.gatewayTargetLabel = targetLabel;
+  session.previewState = previewState;
+  session.status = 'preview';
+  session.protocol = targetProto;
+  session.targetLabel = targetLabel;
+  session.activePane = resolveInitialGatewayPane(targetProto);
+  session.viewOnly = false;
+  session.hasControl = true;
+  renderGatewaySessionTabs();
 
   const liveStage = byId('gateway-live-stage');
   const previewBanner = byId('gateway-preview-banner');
@@ -4673,8 +5363,10 @@ function openModal(modalId) {
     if (cancelBtn) setTimeout(() => cancelBtn.focus(), 20);
     return;
   }
-  const firstInput = byId(modalId)?.querySelector('input:not([type="hidden"]), select, textarea');
-  if (firstInput) setTimeout(() => firstInput.focus(), 30);
+  const firstFocusable = byId(modalId)?.querySelector(
+    'input:not([type="hidden"]):not([type="file"]), select, textarea, button:not([disabled])',
+  );
+  if (firstFocusable) setTimeout(() => firstFocusable.focus(), 30);
 }
 
 function closeActiveModal() {
@@ -5051,6 +5743,573 @@ async function handleSaveCredential(event) {
 }
 
 /* ==========================================================================
+   Global Command Palette (⌘K / Ctrl+K)
+   ========================================================================== */
+
+function fuzzyScore(query, text) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return 1;
+  const target = String(text || '').toLowerCase();
+  if (!target) return 0;
+  if (target === q) return 1000;
+  if (target.startsWith(q)) return 820 - target.length * 0.1;
+
+  const subIdx = target.indexOf(q);
+  if (subIdx >= 0) {
+    const atBoundary = subIdx === 0 || /[\s\-_.:/@]/.test(target[subIdx - 1]);
+    return (atBoundary ? 680 : 540) - subIdx;
+  }
+
+  // Fuzzy subsequence matching with consecutive-character & boundary bonuses
+  let qi = 0;
+  let score = 120;
+  let prevMatchIdx = -2;
+  for (let ti = 0; ti < target.length && qi < q.length; ti += 1) {
+    if (target[ti] === q[qi]) {
+      if (ti === prevMatchIdx + 1) {
+        score += 24;
+      } else if (ti === 0 || /[\s\-_.:/@]/.test(target[ti - 1])) {
+        score += 18;
+      } else {
+        score += 6;
+      }
+      prevMatchIdx = ti;
+      qi += 1;
+    }
+  }
+  return qi === q.length ? score : 0;
+}
+
+function buildCommandPaletteItems(rawQuery) {
+  const payload = getPayloadSafe();
+  const hosts = payload && Array.isArray(payload.hosts) ? payload.hosts : [];
+  const totp = payload && Array.isArray(payload.totp) ? payload.totp : [];
+  const creds = payload && Array.isArray(payload.credentials) ? payload.credentials : [];
+  const query = String(rawQuery || '').trim();
+
+  const candidates = [];
+
+  // 1. Connections & Jump Hosts
+  for (const host of hosts) {
+    const proto = String(host.protocol || 'rdp').toLowerCase();
+    const safeProto = ['rdp', 'vnc', 'ssh', 'sftp', 'hypervisor'].includes(proto) ? proto : 'rdp';
+    const port = Number(host.port) || DEFAULT_PORTS[safeProto] || 22;
+    const linkedCred = host.credentialId ? creds.find((c) => c.id === host.credentialId) : null;
+    const user = String(host.username || (linkedCred && linkedCred.username) || '').trim();
+    const endpoint = `${user ? `${user}@` : ''}${host.address || 'unknown'}:${port}`;
+    const group = host.isJumpHost ? 'Jump Hosts' : 'Connections';
+    const title = String(host.name || host.address || 'Unnamed Host');
+    const subParts = [endpoint];
+    if (host.folder && String(host.folder).trim()) subParts.push(String(host.folder).trim());
+    candidates.push({
+      id: `cmdk-host-${host.id}`,
+      group,
+      badge: host.isJumpHost ? 'JUMP' : safeProto.toUpperCase(),
+      badgeClass: host.isJumpHost ? 'proto-hypervisor' : `proto-${safeProto}`,
+      title,
+      subtitle: subParts.join(' · '),
+      actionLabel: 'Connect',
+      searchText: `${title} ${host.address || ''} ${proto} ${user} ${host.folder || ''} ${host.domain || ''} ${host.isJumpHost ? 'jump bastion' : ''}`,
+      run: () => openHostInGateway(host.id),
+    });
+  }
+
+  // 2. 2FA Authenticator Accounts (Enter -> 1-click copy live TOTP!)
+  for (const item of totp) {
+    const issuer = String(item.issuer || 'Authenticator');
+    const account = String(item.accountName || item.label || 'Account');
+    const algo = String(item.algorithm || 'SHA1').toUpperCase();
+    const digits = Number(item.digits || 6);
+    candidates.push({
+      id: `cmdk-totp-${item.id}`,
+      group: '2FA Authenticator',
+      badge: '2FA',
+      badgeClass: 'proto-sftp',
+      title: issuer,
+      subtitle: `${account} · ${algo} ${digits}-digit`,
+      actionLabel: 'Copy 2FA',
+      searchText: `2fa totp otp code ${issuer} ${account} ${algo}`,
+      run: async () => {
+        try {
+          const evaluated = await evaluateTotpToken({
+            secretBase32: item.secretBase32,
+            algorithm: item.algorithm || 'SHA1',
+            digits: Number(item.digits || 6),
+            period: Number(item.period || item.periodSeconds || 30),
+          });
+          await copyText(evaluated.code, `${issuer} 2FA code`, true);
+        } catch {
+          showToast('Unable to generate 2FA code for this entry.', 'danger');
+        }
+      },
+    });
+  }
+
+  // 3. Credentials (ZERO secrets exposed in palette metadata)
+  for (const cred of creds) {
+    const kind = resolveCredentialKind(cred);
+    const kindLabel = kind === 'sshKey' ? 'SSH Key' : kind === 'domain' ? 'Domain' : 'Password';
+    const label = String(cred.label || 'Credential');
+    const user = String(cred.username || '').trim();
+    const domain = String(cred.domain || '').trim();
+    const subParts = [user || 'No username'];
+    if (domain) subParts.push(domain);
+    subParts.push(kindLabel);
+    candidates.push({
+      id: `cmdk-cred-${cred.id}`,
+      group: 'Credentials',
+      badge: 'CRED',
+      badgeClass: 'proto-vnc',
+      title: label,
+      subtitle: subParts.join(' · '),
+      actionLabel: 'Edit',
+      searchText: `credential password key ${label} ${user} ${domain} ${kindLabel}`,
+      run: () => {
+        switchWorkspaceView('credentials', true);
+        openCredentialModal(cred);
+      },
+    });
+  }
+
+  // 4. Workspace Actions
+  const workspaceActions = [
+    {
+      id: 'cmdk-act-new-conn',
+      title: 'New Connection',
+      subtitle: 'Add an RDP, VNC, SSH, SFTP, or Hypervisor host',
+      badge: 'NEW',
+      actionLabel: 'Open',
+      searchText: 'new connection add host rdp ssh vnc sftp server',
+      run: () => openConnectionModal(null, false),
+    },
+    {
+      id: 'cmdk-act-add-jump',
+      title: 'Add Jump Host',
+      subtitle: 'Register an SSH bastion for multi-hop tunneling',
+      badge: 'JUMP',
+      actionLabel: 'Open',
+      searchText: 'add jump host bastion proxyjump tunnel',
+      run: () => openConnectionModal(null, true),
+    },
+    {
+      id: 'cmdk-act-add-2fa',
+      title: 'Add 2FA Account',
+      subtitle: 'Create an RFC 6238 authenticator entry or parse otpauth:// URI',
+      badge: '2FA',
+      actionLabel: 'Open',
+      searchText: 'add 2fa account totp authenticator otpauth',
+      run: () => openTotpModal(null),
+    },
+    {
+      id: 'cmdk-act-import-ssh',
+      title: 'Import ~/.ssh/config',
+      subtitle: 'Parse OpenSSH hosts and ProxyJump bastions locally in browser',
+      badge: 'SSH',
+      actionLabel: 'Import',
+      searchText: 'import ssh config openssh ~/.ssh/config hosts proxyjump',
+      run: () => openSshImportModal(),
+    },
+    {
+      id: 'cmdk-act-sync',
+      title: 'Sync Cloud Now',
+      subtitle: 'Run zero-knowledge AES-256-GCM Smart Merge cloud sync',
+      badge: 'SYNC',
+      actionLabel: 'Run',
+      searchText: 'sync cloud now google drive github gist webdav merge',
+      run: () => {
+        if (hasActiveCloudSessionInRam()) {
+          runCloudSync('smartMerge');
+        } else {
+          switchWorkspaceView('sync', true);
+          showToast('Sign in or configure a cloud provider to run Smart Merge Sync.', 'default');
+        }
+      },
+    },
+    {
+      id: 'cmdk-act-gateway',
+      title: 'Open Web Gateway',
+      subtitle: 'Launch live JSR1 Desktop, VT100 SSH TUI, or SFTP browser',
+      badge: 'GW',
+      actionLabel: 'Switch',
+      searchText: 'open web gateway terminal ssh sftp rdp vnc docker',
+      run: () => switchWorkspaceView('gateway', true),
+    },
+    {
+      id: 'cmdk-act-audit',
+      title: 'Vault Security Audit',
+      subtitle: 'Inspect encryption posture, auto-lock policy, 2FA, and credential hygiene',
+      badge: 'AUDIT',
+      actionLabel: 'Inspect',
+      searchText: 'vault security audit health score hygiene encryption autolock',
+      run: () => {
+        appState.vaultHealthDetailsOpen = true;
+        switchWorkspaceView('connections', true);
+        renderVaultHealthStrips();
+        byId('vault-health-strip')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      },
+    },
+    {
+      id: 'cmdk-act-shortcuts',
+      title: 'Keyboard Shortcuts',
+      subtitle: 'View workspace hotkeys and command reference',
+      badge: 'KEYS',
+      actionLabel: 'Show',
+      searchText: 'keyboard shortcuts hotkeys cheat sheet help ?',
+      run: () => openModal('modal-shortcuts'),
+    },
+    {
+      id: 'cmdk-act-export',
+      title: 'Export .jvault',
+      subtitle: 'Download portable AES-256-GCM encrypted vault backup',
+      badge: 'SAVE',
+      actionLabel: 'Export',
+      searchText: 'export jvault backup archive download encrypted',
+      run: () => handleExportJvault(),
+    },
+    {
+      id: 'cmdk-act-lock',
+      title: 'Lock Vault',
+      subtitle: 'Lock immediately and scrub all decrypted secrets from RAM',
+      badge: 'LOCK',
+      actionLabel: 'Lock',
+      searchText: 'lock vault sign out wipe ram security',
+      run: () => {
+        store.lock();
+        showLockScreen('Vault locked. All decrypted secrets were wiped from RAM.');
+      },
+    },
+  ];
+
+  for (const act of workspaceActions) {
+    candidates.push({
+      ...act,
+      group: 'Workspace Actions',
+      badgeClass: 'proto-rdp',
+    });
+  }
+
+  if (!query) {
+    return candidates;
+  }
+
+  const scored = [];
+  for (const item of candidates) {
+    const titleScore = fuzzyScore(query, item.title);
+    const metaScore = fuzzyScore(query, item.searchText) * 0.78;
+    const best = Math.max(titleScore, metaScore);
+    if (best > 0) {
+      scored.push({ item, score: best });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((entry) => entry.item);
+}
+
+function renderCommandPaletteList() {
+  const listbox = byId('cmdk-listbox');
+  const countEl = byId('cmdk-result-count');
+  const inputEl = byId('cmdk-input');
+  if (!listbox) return;
+
+  const items = buildCommandPaletteItems(appState.cmdkQuery);
+  appState.cmdkItems = items;
+  if (items.length === 0) {
+    appState.cmdkActiveIndex = -1;
+  } else if (appState.cmdkActiveIndex < 0 || appState.cmdkActiveIndex >= items.length) {
+    appState.cmdkActiveIndex = 0;
+  }
+
+  listbox.replaceChildren();
+  if (countEl) {
+    countEl.textContent = `${items.length} ${items.length === 1 ? 'result' : 'results'}`;
+  }
+
+  if (items.length === 0) {
+    listbox.appendChild(el('p', 'cmdk-empty', `No matches for "${appState.cmdkQuery.trim()}".`));
+    if (inputEl) inputEl.removeAttribute('aria-activedescendant');
+    return;
+  }
+
+  const groupOrder = ['Connections', 'Jump Hosts', '2FA Authenticator', 'Credentials', 'Workspace Actions'];
+  const grouped = new Map();
+  for (const item of items) {
+    if (!grouped.has(item.group)) grouped.set(item.group, []);
+    grouped.get(item.group).push(item);
+  }
+
+  const orderedItems = [];
+  const groupsToRender = appState.cmdkQuery.trim()
+    ? Array.from(grouped.keys())
+    : groupOrder.filter((g) => grouped.has(g));
+
+  for (const groupName of groupsToRender) {
+    const list = grouped.get(groupName);
+    if (!list || list.length === 0) continue;
+    const header = el('div', 'cmdk-group-label', groupName);
+    header.setAttribute('role', 'presentation');
+    listbox.appendChild(header);
+
+    for (const item of list) {
+      const idx = orderedItems.length;
+      orderedItems.push(item);
+      const isActive = idx === appState.cmdkActiveIndex;
+
+      const opt = el('button', `cmdk-option${isActive ? ' is-active' : ''}`);
+      opt.type = 'button';
+      opt.id = `cmdk-opt-${idx}`;
+      opt.setAttribute('role', 'option');
+      opt.setAttribute('aria-selected', isActive ? 'true' : 'false');
+
+      const main = el('div', 'cmdk-option-main');
+      main.appendChild(el('span', `proto-badge ${item.badgeClass} mono`, item.badge));
+      const copy = el('div', 'cmdk-option-copy');
+      copy.appendChild(el('span', 'cmdk-option-title', item.title));
+      if (item.subtitle) {
+        copy.appendChild(el('span', 'cmdk-option-sub mono', item.subtitle));
+      }
+      main.appendChild(copy);
+      opt.appendChild(main);
+
+      opt.appendChild(el('span', 'cmdk-option-action', item.actionLabel));
+      opt.addEventListener('mouseenter', () => {
+        setCommandPaletteActiveIndex(idx, false);
+      });
+      opt.addEventListener('click', () => {
+        executeCommandPaletteItem(idx);
+      });
+      listbox.appendChild(opt);
+    }
+  }
+
+  appState.cmdkItems = orderedItems;
+  if (inputEl && appState.cmdkActiveIndex >= 0 && appState.cmdkActiveIndex < orderedItems.length) {
+    inputEl.setAttribute('aria-activedescendant', `cmdk-opt-${appState.cmdkActiveIndex}`);
+  }
+}
+
+function setCommandPaletteActiveIndex(nextIndex, shouldScroll = true) {
+  const len = appState.cmdkItems.length;
+  if (len === 0) return;
+  const wrapped = ((nextIndex % len) + len) % len;
+  appState.cmdkActiveIndex = wrapped;
+
+  const listbox = byId('cmdk-listbox');
+  const inputEl = byId('cmdk-input');
+  if (!listbox) return;
+  const opts = listbox.querySelectorAll('.cmdk-option');
+  for (let i = 0; i < opts.length; i += 1) {
+    const active = i === wrapped;
+    opts[i].classList.toggle('is-active', active);
+    opts[i].setAttribute('aria-selected', active ? 'true' : 'false');
+    if (active && shouldScroll) {
+      opts[i].scrollIntoView({ block: 'nearest' });
+    }
+  }
+  if (inputEl) {
+    inputEl.setAttribute('aria-activedescendant', `cmdk-opt-${wrapped}`);
+  }
+}
+
+function executeCommandPaletteItem(index = appState.cmdkActiveIndex) {
+  const item = appState.cmdkItems[index];
+  if (!item || typeof item.run !== 'function') return;
+  closeActiveModal();
+  item.run();
+}
+
+function openCommandPalette() {
+  if (!store.isUnlocked()) return;
+  appState.cmdkQuery = '';
+  appState.cmdkActiveIndex = 0;
+  const input = byId('cmdk-input');
+  if (input) input.value = '';
+  renderCommandPaletteList();
+  openModal('modal-command-palette');
+}
+
+/* ==========================================================================
+   Pure Client-Side OpenSSH (~/.ssh/config) Importer Modal
+   ========================================================================== */
+
+function openSshImportModal() {
+  if (!store.isUnlocked()) return;
+  setAlert('modal-ssh-import-error', '');
+  setAlert('ssh-import-warnings', '');
+  appState.sshImportParsed = null;
+
+  const ta = byId('ssh-import-textarea');
+  const folderInput = byId('ssh-import-folder');
+  const fileInput = byId('ssh-import-file');
+  const dropLabel = byId('ssh-import-dropzone-label');
+  const dropMeta = byId('ssh-import-dropzone-meta');
+  const previewBox = byId('ssh-import-preview-box');
+  const previewList = byId('ssh-import-preview-list');
+  const confirmBtn = byId('btn-ssh-import-confirm');
+
+  if (ta) ta.value = '';
+  if (folderInput) folderInput.value = '';
+  if (fileInput) fileInput.value = '';
+  if (dropLabel) dropLabel.textContent = 'Drop ~/.ssh/config here or click to select file';
+  if (dropMeta) dropMeta.textContent = 'Client-side only · zero plaintext upload';
+  if (previewBox) previewBox.hidden = true;
+  if (previewList) previewList.replaceChildren();
+  if (confirmBtn) {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Import Hosts';
+  }
+  openModal('modal-ssh-import');
+}
+
+function updateSshImportPreview() {
+  const ta = byId('ssh-import-textarea');
+  const folderInput = byId('ssh-import-folder');
+  const previewBox = byId('ssh-import-preview-box');
+  const previewSummary = byId('ssh-import-preview-summary');
+  const previewList = byId('ssh-import-preview-list');
+  const confirmBtn = byId('btn-ssh-import-confirm');
+  if (!ta || !previewBox || !previewList || !confirmBtn) return;
+
+  setAlert('modal-ssh-import-error', '');
+  const rawText = ta.value || '';
+  if (!rawText.trim()) {
+    appState.sshImportParsed = null;
+    previewBox.hidden = true;
+    previewList.replaceChildren();
+    setAlert('ssh-import-warnings', '');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Import Hosts';
+    return;
+  }
+
+  const payload = getPayloadSafe();
+  const existingHosts = payload && Array.isArray(payload.hosts) ? payload.hosts : [];
+  const defaultFolder = (folderInput?.value || '').trim();
+  const parsed = parseOpenSshConfig(rawText, { existingHosts, defaultFolder });
+  appState.sshImportParsed = parsed;
+
+  const summaryBits = [`${parsed.hosts.length} new ${parsed.hosts.length === 1 ? 'host' : 'hosts'}`];
+  if (parsed.jumpHosts.length > 0) {
+    summaryBits.push(`${parsed.jumpHosts.length} jump`);
+  }
+  if (parsed.skippedWildcards > 0) {
+    summaryBits.push(`${parsed.skippedWildcards} wildcard skipped`);
+  }
+  if (parsed.duplicatesSkipped > 0) {
+    summaryBits.push(`${parsed.duplicatesSkipped} duplicate skipped`);
+  }
+  if (previewSummary) {
+    previewSummary.textContent = summaryBits.join(' · ');
+  }
+
+  const nameById = new Map();
+  for (const h of existingHosts) nameById.set(h.id, h.name || h.address);
+  for (const h of parsed.hosts) nameById.set(h.id, h.name || h.address);
+
+  previewList.replaceChildren();
+  if (parsed.hosts.length === 0) {
+    previewList.appendChild(
+      el('p', 'cmdk-empty', 'No new concrete SSH hosts detected (all entries were wildcards or already in your vault).'),
+    );
+  } else {
+    for (const host of parsed.hosts) {
+      const row = el('div', 'ssh-preview-row');
+      const main = el('div', 'ssh-preview-main');
+      main.appendChild(el('span', 'proto-badge proto-ssh mono', 'SSH'));
+      main.appendChild(el('span', 'ssh-preview-name', host.name));
+      const endpoint = `${host.username ? `${host.username}@` : ''}${host.address}:${host.port}`;
+      main.appendChild(el('span', 'ssh-preview-endpoint mono', endpoint));
+      row.appendChild(main);
+
+      const badges = el('div', 'ssh-preview-badges');
+      if (host.isJumpHost) {
+        badges.appendChild(
+          el('span', 'meta-pill meta-pill-jump-role', host.autoCreatedJumpHost ? 'Auto Jump Host' : 'Jump Host'),
+        );
+      }
+      if (host.jumpHostId) {
+        const jumpLabel = nameById.get(host.jumpHostId) || 'Bastion';
+        badges.appendChild(el('span', 'meta-pill meta-pill-bastion mono', `via ${jumpLabel}`));
+      }
+      if (badges.childElementCount > 0) {
+        row.appendChild(badges);
+      }
+      previewList.appendChild(row);
+    }
+  }
+
+  previewBox.hidden = false;
+  if (parsed.warnings.length > 0) {
+    setAlert('ssh-import-warnings', parsed.warnings.slice(0, 3).join(' '));
+  } else {
+    setAlert('ssh-import-warnings', '');
+  }
+
+  confirmBtn.disabled = parsed.hosts.length === 0;
+  confirmBtn.textContent =
+    parsed.hosts.length > 0
+      ? `Import ${parsed.hosts.length} ${parsed.hosts.length === 1 ? 'Host' : 'Hosts'}`
+      : 'Import Hosts';
+}
+
+async function handleConfirmSshImport(event) {
+  event.preventDefault();
+  const payload = getPayloadSafe();
+  if (!payload) return;
+
+  if (!appState.sshImportParsed) {
+    updateSshImportPreview();
+  }
+  const parsed = appState.sshImportParsed;
+  if (!parsed || parsed.hosts.length === 0) {
+    setAlert('modal-ssh-import-error', 'Paste or select an OpenSSH config containing at least one new host.');
+    return;
+  }
+
+  const now = Date.now();
+  const refJumpSet = new Set(parsed.referencedExistingJumpHostIds || []);
+  if (refJumpSet.size > 0) {
+    payload.hosts = payload.hosts.map((h) =>
+      refJumpSet.has(h.id) ? { ...h, isJumpHost: true, updatedAtMs: now } : h,
+    );
+  }
+
+  for (const h of parsed.hosts) {
+    const cleanHost = {
+      id: h.id,
+      name: h.name,
+      address: h.address,
+      port: h.port,
+      protocol: 'ssh',
+      folder: h.folder || '',
+      osLabel: '',
+      domain: '',
+      username: h.username || '',
+      password: '',
+      privateKeyPem: '',
+      jumpHostId: h.jumpHostId || null,
+      credentialId: null,
+      isJumpHost: Boolean(h.isJumpHost),
+      isFavorite: false,
+      accentTint: h.isJumpHost ? 'gold' : 'sapphire',
+      updatedAtMs: now,
+    };
+    payload.hosts.push(cleanHost);
+    delete payload.tombstones[makeTombstoneKey('host', cleanHost.id)];
+  }
+  payload.updatedAtMs = now;
+
+  await saveVaultPayload(payload);
+  appState.sshImportParsed = null;
+  closeActiveModal();
+  switchWorkspaceView('connections', true);
+  renderAllViews();
+  showToast(
+    `Imported ${parsed.hosts.length} SSH ${parsed.hosts.length === 1 ? 'host' : 'hosts'} into encrypted vault.`,
+    'ok',
+  );
+}
+
+/* ==========================================================================
    Dropzone Helper (.jvault File Selection & Drag-and-Drop)
    ========================================================================== */
 
@@ -5401,6 +6660,14 @@ function wireEventListeners() {
   });
 
   byId('btn-quick-sync')?.addEventListener('click', () => runCloudSync('smartMerge'));
+  byId('topbar-cmdk-btn')?.addEventListener('click', () => openCommandPalette());
+  byId('sidebar-shortcuts-btn')?.addEventListener('click', () => openModal('modal-shortcuts'));
+  byId('btn-import-ssh-config')?.addEventListener('click', () => openSshImportModal());
+  byId('btn-empty-import-ssh')?.addEventListener('click', () => openSshImportModal());
+  byId('btn-vault-health-details')?.addEventListener('click', () => {
+    appState.vaultHealthDetailsOpen = !appState.vaultHealthDetailsOpen;
+    renderVaultHealthStrips();
+  });
   byId('btn-add-bastion-quick')?.addEventListener('click', () => openConnectionModal(null, true));
   byId('btn-empty-add-host')?.addEventListener('click', () => openConnectionModal(null, false));
   byId('btn-empty-go-sync')?.addEventListener('click', () => switchWorkspaceView('sync', true));
@@ -5791,17 +7058,22 @@ function wireEventListeners() {
     e.target.value = '';
   });
 
-  byId('docker-quickstart-tabs')?.addEventListener('click', (e) => {
-    const btn = e.target instanceof Element ? e.target.closest('[data-docker-tab]') : null;
+  byId('gateway-deploy-tabs')?.addEventListener('click', (e) => {
+    const btn = e.target instanceof Element ? e.target.closest('[data-deploy-tab]') : null;
     if (!btn) return;
-    appState.dockerTab = btn.getAttribute('data-docker-tab') || 'run';
-    setSegmentedValue(byId('docker-quickstart-tabs'), 'data-docker-tab', appState.dockerTab);
-    const code = byId('docker-snippet-code');
-    if (code) code.textContent = DOCKER_SNIPPETS[appState.dockerTab] || DOCKER_SNIPPETS.run;
+    setGatewayDeployTab(btn.getAttribute('data-deploy-tab') || 'desktop');
   });
 
-  byId('btn-copy-docker')?.addEventListener('click', () => {
-    copyText(DOCKER_SNIPPETS[appState.dockerTab] || DOCKER_SNIPPETS.run, 'Docker snippet', false);
+  byId('btn-copy-deploy-snippet')?.addEventListener('click', async () => {
+    const spec = GATEWAY_DEPLOY_TABS[appState.deployTab] || GATEWAY_DEPLOY_TABS.desktop;
+    const btn = byId('btn-copy-deploy-snippet');
+    await copyText(spec.snippet, `${spec.label} snippet`, false);
+    if (btn) {
+      btn.textContent = 'Copied!';
+      setTimeout(() => {
+        if (btn.textContent === 'Copied!') btn.textContent = 'Copy Snippet';
+      }, 1800);
+    }
   });
 
   // Modal closing & backdrop click
@@ -5894,6 +7166,44 @@ function wireEventListeners() {
     }
   });
 
+  // Modal 5: Command Palette (⌘K)
+  byId('cmdk-input')?.addEventListener('input', (e) => {
+    appState.cmdkQuery = e.target.value || '';
+    appState.cmdkActiveIndex = 0;
+    renderCommandPaletteList();
+  });
+
+  byId('cmdk-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setCommandPaletteActiveIndex(appState.cmdkActiveIndex + 1, true);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setCommandPaletteActiveIndex(appState.cmdkActiveIndex - 1, true);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      executeCommandPaletteItem(appState.cmdkActiveIndex);
+    }
+  });
+
+  // Modal 6: OpenSSH ~/.ssh/config Importer
+  bindJvaultDropzone(
+    'ssh-import-dropzone',
+    'ssh-import-file',
+    'ssh-import-dropzone-label',
+    'ssh-import-dropzone-meta',
+    (text, name) => {
+      const ta = byId('ssh-import-textarea');
+      if (ta) ta.value = text;
+      const meta = byId('ssh-import-dropzone-meta');
+      if (meta) meta.textContent = `${name} loaded locally · zero upload`;
+      updateSshImportPreview();
+    },
+  );
+  byId('ssh-import-textarea')?.addEventListener('input', updateSshImportPreview);
+  byId('ssh-import-folder')?.addEventListener('input', updateSshImportPreview);
+  byId('form-ssh-import')?.addEventListener('submit', handleConfirmSshImport);
+
   // Google OAuth Popup Message Listener
   window.addEventListener('message', (event) => {
     if (event.origin !== window.location.origin) return;
@@ -5909,24 +7219,71 @@ function wireEventListeners() {
   // Keyboard shortcuts + Activity tracking
   document.addEventListener('keydown', (e) => {
     store.touchActivity();
+    const activeEl = document.activeElement;
+    const isTerminalCanvas = Boolean(
+      activeEl &&
+        (activeEl.id === 'gateway-canvas' ||
+          activeEl.id === 'gateway-ssh-terminal' ||
+          activeEl.id === 'gateway-ssh-console'),
+    );
+
     if (e.key === 'Escape' && appState.activeModalId) {
+      e.preventDefault();
       closeActiveModal();
       return;
     }
-    if (!store.isUnlocked() || appState.activeModalId) return;
-    const activeEl = document.activeElement;
+
+    if (!store.isUnlocked()) return;
+
+    // ⌘K / Ctrl+K toggles Global Command Palette (guarded when focused inside remote terminal/canvas)
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+      if (isTerminalCanvas) return;
+      e.preventDefault();
+      if (appState.activeModalId === 'modal-command-palette') {
+        closeActiveModal();
+      } else {
+        openCommandPalette();
+      }
+      return;
+    }
+
+    if (appState.activeModalId) return;
+
     const tag = activeEl ? activeEl.tagName : '';
-    const isEditing =
+    const isEditable =
       tag === 'INPUT' ||
       tag === 'TEXTAREA' ||
       tag === 'SELECT' ||
-      (activeEl &&
-        (activeEl.id === 'gateway-canvas' ||
-          activeEl.id === 'gateway-ssh-terminal' ||
-          activeEl.id === 'gateway-ssh-console'));
-    if ((e.key === '/' && !isEditing) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !isEditing)) {
+      Boolean(activeEl instanceof HTMLElement && activeEl.isContentEditable) ||
+      isTerminalCanvas;
+
+    if (isEditable || e.ctrlKey || e.metaKey || e.altKey) return;
+
+    if (e.key === '/') {
       e.preventDefault();
       byId('global-search')?.focus();
+    } else if (e.key === '?') {
+      e.preventDefault();
+      openModal('modal-shortcuts');
+    } else if (!e.shiftKey) {
+      const lower = e.key.toLowerCase();
+      if (lower === 'n') {
+        e.preventDefault();
+        openConnectionModal(null, false);
+      } else if (lower === 'g') {
+        e.preventDefault();
+        switchWorkspaceView('gateway', true);
+      } else if (lower === 's') {
+        e.preventDefault();
+        if (hasActiveCloudSessionInRam()) {
+          runCloudSync('smartMerge');
+        } else {
+          switchWorkspaceView('sync', true);
+        }
+      } else if (lower === 'l') {
+        e.preventDefault();
+        triggerLock();
+      }
     }
   });
 
@@ -5982,6 +7339,7 @@ function registerServiceWorker() {
 function bootstrap() {
   inspectUrlHash(false);
   wireEventListeners();
+  setGatewayDeployTab('desktop');
   registerServiceWorker();
   showLockScreen('', { preservePendingGatewayToken: true });
 }

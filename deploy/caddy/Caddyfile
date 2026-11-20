@@ -1,0 +1,37 @@
+# JalaDesk Self-Hosted Web Gateway — Automatic Let's Encrypt TLS 1.3 Reverse Proxy
+# Expects JALADESK_GATEWAY_DOMAIN to be set (e.g. gateway.example.com).
+
+{$JALADESK_GATEWAY_DOMAIN} {
+	encode zstd gzip
+
+	# Enforce modern TLS 1.3 with automatic Let's Encrypt ACME certificate lifecycle
+	tls {
+		protocols tls1.3
+	}
+
+	# Enterprise zero-trust security headers
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		-Server
+	}
+
+	# Reverse proxy HTTP API (/healthz, /api/*) and JSR1 binary WebSockets (/ws)
+	# Caddy v2 natively passes through WebSocket Upgrade & Sec-WebSocket-Protocol headers.
+	reverse_proxy jaladesk-gateway:8443 {
+		flush_interval -1
+		health_uri /healthz
+		health_interval 30s
+		health_timeout 5s
+
+		header_up X-Real-IP {remote_host}
+
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}

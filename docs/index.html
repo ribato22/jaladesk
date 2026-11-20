@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#05080F">
   <meta name="google-site-verification" content="PKd3q2UF_bLbD9RfmB5NhAeT7Kax_4L-onii8t4hn0w" />
   <title>JalaDesk — Zero-Trust Remote Desktop, SSH &amp; Vault Infrastructure</title>
-  <meta name="description" content="JalaDesk unifies native RDP, VNC, SSH bastions, dual-pane SFTP, offline RFC 6238 2FA authentication, and client-side AES-256-GCM vault sync across macOS, Windows, Android, and iOS.">
+  <meta name="description" content="JalaDesk unifies native Desktop Studio with 1-Click Web Bridge, Android Foldable Flex Mode (v1.17.0), Zero-Knowledge Web PWA, and Self-Hosted JSR1 Docker Web Gateway with client-side AES-256-GCM encryption.">
   <link rel="icon" type="image/png" sizes="120x120" href="./assets/jaladesk-oauth-logo-120.png">
   <link rel="apple-touch-icon" href="./assets/jaladesk-logo.png">
   <link rel="canonical" href="https://ribato22.github.io/jaladesk/">
@@ -29,28 +29,30 @@
         </a>
         <span class="release-badge">
           <span class="release-dot" aria-hidden="true"></span>
-          <span>v1.16 &middot; Desktop &amp; Mobile</span>
+          <span>v1.17.0</span>
         </span>
       </div>
 
       <nav class="site-nav" aria-label="Primary navigation">
         <div class="nav-pill-track">
           <a href="./index.html" aria-current="page">Overview</a>
-          <a href="#live-topology">Live Topology</a>
+          <a href="#ecosystem-surfaces">Ecosystem</a>
+          <a href="#gateway-ecosystem">Gateway</a>
           <a href="#capabilities">Architecture</a>
-          <a href="#security">Cloud Sync</a>
-          <a href="./privacy.html">Privacy Policy</a>
-          <a href="./terms.html">Terms of Service</a>
+          <a href="#security">Security</a>
+          <a href="./privacy.html">Privacy</a>
         </div>
       </nav>
 
       <div class="header-actions">
-        <a class="header-btn-ghost" href="https://github.com/ribato22/jaladesk">
+        <a class="header-btn-ghost" href="#gateway-ecosystem">
           <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"></path>
-            <path d="M9 18c-4.51 2-5-2-7-2"></path>
+            <rect x="2" y="2" width="20" height="8" rx="2"></rect>
+            <rect x="2" y="14" width="20" height="8" rx="2"></rect>
+            <path d="M6 6h.01"></path>
+            <path d="M6 18h.01"></path>
           </svg>
-          <span>GitHub</span>
+          <span>Self-Host</span>
         </a>
         <a class="header-btn-repo" href="./app/">
           <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -74,12 +76,12 @@
               <span class="signal-beacon" aria-hidden="true"></span>
               <span class="telemetry-node-ok">SYS.ONLINE</span>
               <span class="telemetry-sep" aria-hidden="true">&middot;</span>
-              <span>ZERO-TRUST ENCLAVE</span>
+              <span>4 SURFACES</span>
               <span class="telemetry-sep" aria-hidden="true">&middot;</span>
-              <span class="telemetry-arch">NATIVE ARM64 &amp; X64</span>
+              <span class="telemetry-arch">JSR1 ZERO-TRUST</span>
             </div>
             <p class="hero-lead">
-              Built for system administrators, SREs, and security-conscious operators. JalaDesk unifies native RDP and VNC desktop sessions, multi-hop SSH bastions, dual-pane SFTP file transfer, an offline two-factor authenticator, and optional client-side encrypted Cloud Sync inside one local-first workspace.
+              Built for system administrators, SREs, and security-conscious operators. JalaDesk unifies Desktop Studio with 1-Click Web Bridge, Android Foldable Flex Mode (<span class="mono">v1.17.0</span>), a Zero-Knowledge Web PWA, and a self-hosted <span class="mono">JSR1</span> Docker Gateway inside one client-side encrypted workspace.
             </p>
 
             <div class="cta-row">
@@ -90,47 +92,41 @@
                   <path d="m12 5 7 7-7 7"></path>
                 </svg>
               </a>
-              <a class="btn-secondary" href="https://github.com/ribato22/jaladesk">
+              <a class="btn-secondary" href="https://github.com/ribato22/jaladesk/releases">
                 <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"></path>
-                  <path d="M9 18c-4.51 2-5-2-7-2"></path>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
                 </svg>
-                <span>Explore on GitHub</span>
+                <span>Desktop &amp; Android</span>
               </a>
-              <a class="btn-secondary" href="#jala-live-cipher">
+              <a class="btn-secondary" href="#gateway-ecosystem">
                 <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <rect x="3" y="11" width="18" height="11" rx="2"></rect>
-                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                  <rect x="2" y="2" width="20" height="8" rx="2"></rect>
+                  <rect x="2" y="14" width="20" height="8" rx="2"></rect>
+                  <path d="M6 6h.01"></path>
+                  <path d="M6 18h.01"></path>
                 </svg>
-                <span>Live Zero-Knowledge Cipher</span>
+                <span>Self-Host Gateway</span>
               </a>
             </div>
 
             <div class="platform-strip">
-              <ul class="platform-list" aria-label="Supported operating systems">
+              <ul class="platform-list" aria-label="Supported surfaces and platforms">
                 <li class="platform-item">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <rect x="2" y="3" width="20" height="14" rx="2"></rect>
                     <path d="M8 21h8"></path>
                     <path d="M12 17v4"></path>
                   </svg>
-                  <span>macOS</span>
-                </li>
-                <li class="platform-item">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <rect x="3" y="3" width="8" height="8" rx="1"></rect>
-                    <rect x="13" y="3" width="8" height="8" rx="1"></rect>
-                    <rect x="3" y="13" width="8" height="8" rx="1"></rect>
-                    <rect x="13" y="13" width="8" height="8" rx="1"></rect>
-                  </svg>
-                  <span>Windows</span>
+                  <span>macOS &amp; Windows</span>
                 </li>
                 <li class="platform-item">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <rect x="5" y="2" width="14" height="20" rx="2"></rect>
                     <path d="M12 18h.01"></path>
                   </svg>
-                  <span>Android</span>
+                  <span>Android &amp; Foldables</span>
                 </li>
                 <li class="platform-item">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -147,12 +143,25 @@
                   </svg>
                   <span>Web PWA</span>
                 </li>
+                <li class="platform-item">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="2" y="2" width="20" height="8" rx="2"></rect>
+                    <rect x="2" y="14" width="20" height="8" rx="2"></rect>
+                    <path d="M6 6h.01"></path>
+                    <path d="M6 18h.01"></path>
+                  </svg>
+                  <span>Docker JSR1</span>
+                </li>
               </ul>
 
               <p class="governance-inline">
                 <a href="./privacy.html">Privacy Policy</a>
                 <span class="sep-slash" aria-hidden="true">/</span>
                 <a href="./terms.html">Terms of Service</a>
+                <span class="sep-slash" aria-hidden="true">/</span>
+                <a href="./GATEWAY.md">Gateway Docs</a>
+                <span class="sep-slash" aria-hidden="true">/</span>
+                <a href="https://github.com/ribato22/jaladesk">GitHub</a>
                 <span class="sep-slash" aria-hidden="true">/</span>
                 <span class="mono">com.jaladesk.app</span>
               </p>
@@ -171,10 +180,10 @@
                   aria-selected="true"
                   aria-controls="panel-desktop"
                   tabindex="0"
-                  data-stage-meta="FreeRDP 3.x · Strict CSP · 46 SRE Studios"
-                  data-stage-engine="FreeRDP 3.x + RFB + SSHv2"
-                  data-stage-cipher="AES-256-GCM · PBKDF2 100k"
-                  data-stage-scope="Local-First · Zero Relay"
+                  data-stage-meta="FreeRDP 3.x · 1-Click Web Bridge · 46 SRE Studios"
+                  data-stage-engine="FreeRDP 3.x + RFB + SSHv2 + Web Bridge"
+                  data-stage-cipher="AES-256-GCM · PBKDF2 / scrypt"
+                  data-stage-scope="Local-First · Zero Vendor Relay"
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <rect x="2" y="3" width="20" height="14" rx="2"></rect>
@@ -191,10 +200,10 @@
                   aria-selected="false"
                   aria-controls="panel-mobile"
                   tabindex="-1"
-                  data-stage-meta="Android &amp; iOS · Trackpad + Touch · Chord Strip"
-                  data-stage-engine="Flutter Enclave + Native RDP/VNC"
+                  data-stage-meta="v1.17.0 · Foldable Flex Mode · Crease Guard"
+                  data-stage-engine="Flutter Enclave + Tabletop Trackpad"
                   data-stage-cipher="Biometric Hardware Unlock"
-                  data-stage-scope="Sticky Ctrl/Alt/Win/F1-F12"
+                  data-stage-scope="Book Mode Split + 2FA Auto-Type"
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <rect x="5" y="2" width="14" height="20" rx="2"></rect>
@@ -222,7 +231,7 @@
                   <span>2FA &amp; Cloud Vault</span>
                 </button>
               </div>
-              <span class="stage-meta-tag" id="stage-active-meta">FreeRDP 3.x &middot; Strict CSP &middot; 46 SRE Studios</span>
+              <span class="stage-meta-tag" id="stage-active-meta">FreeRDP 3.x &middot; 1-Click Web Bridge &middot; 46 SRE Studios</span>
             </div>
 
             <div class="stage-perspective-rig">
@@ -275,13 +284,13 @@
                           </p>
                           <ul class="stage-detail-list">
                             <li>
-                              <strong>Dual Trackpad &amp; Direct Touch:</strong> Switch seamlessly between relative virtual cursor telemetry and pinch-to-zoom canvas control.
+                              <strong>Foldable Flex Mode (<span class="mono">v1.17.0</span>):</strong> Tabletop Mini-Laptop Trackpad, Book Mode hinge split, and Crease Guard Zone keep controls ergonomic on foldables.
                             </li>
                             <li>
-                              <strong>Workstation Modifier Strip:</strong> Tactile key bar for sticky <span class="mono">Ctrl</span>, <span class="mono">Alt</span>, <span class="mono">Win/Cmd</span>, <span class="mono">Esc</span>, and <span class="mono">F1&ndash;F12</span> chords.
+                              <strong>Workstation Modifier Strip &amp; 2FA:</strong> Tactile key bar for sticky <span class="mono">Ctrl</span>, <span class="mono">Alt</span>, <span class="mono">Win/Cmd</span>, <span class="mono">F1&ndash;F12</span> chords, plus inline 2FA auto-type.
                             </li>
                             <li>
-                              <strong>Synchronized Topologies:</strong> Shared folder inheritance, jump-host chains, and TLS SHA-256 certificate pins across desktop and mobile.
+                              <strong>Synchronized Topologies:</strong> Shared folder inheritance, jump-host chains, and TLS SHA-256 certificate pins across desktop, mobile, and Web PWA.
                             </li>
                           </ul>
                         </div>
@@ -346,16 +355,16 @@
                       <span class="status-pill">
                         <span class="status-dot" aria-hidden="true"></span>
                         <strong>ENGINE:</strong>
-                        <span id="stage-status-engine">FreeRDP 3.x + RFB + SSHv2</span>
+                        <span id="stage-status-engine">FreeRDP 3.x + RFB + SSHv2 + Web Bridge</span>
                       </span>
                       <span class="status-pill">
                         <strong>CIPHER:</strong>
-                        <span id="stage-status-cipher">AES-256-GCM &middot; PBKDF2 100k</span>
+                        <span id="stage-status-cipher">AES-256-GCM &middot; PBKDF2 / scrypt</span>
                       </span>
                     </div>
                     <span class="status-pill">
                       <strong>BOUNDARY:</strong>
-                      <span id="stage-status-scope">Local-First &middot; Zero Relay</span>
+                      <span id="stage-status-scope">Local-First &middot; Zero Vendor Relay</span>
                     </span>
                   </div>
                 </div>
@@ -420,11 +429,224 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
                 </svg>
-                <span class="protocol-cell-title">AES-256-GCM AppData Sync</span>
+                <span class="protocol-cell-title">JSR1 Binary WS Gateway</span>
               </div>
-              <p>Client-side sealed vault containers synced via isolated Google Drive <span class="mono">appDataFolder</span>.</p>
+              <p>Closed-loop <span class="mono">FRAME_ACK</span> streaming, 60s single-use WS tickets, and zero-port Cloudflare/Caddy deploy.</p>
             </li>
           </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="arch-band" id="ecosystem-surfaces">
+      <div class="container">
+        <div class="arch-rail arch-junction" data-reveal>
+          <div class="section-header-row">
+            <h2>Four synchronized surfaces backed by one zero-knowledge vault</h2>
+            <p>
+              Operate seamlessly across native workstations, foldable mobile devices, any modern browser, and your own zero-trust Docker gateway — sharing identical client-side <span class="mono">AES-256-GCM</span> vault encryption with zero vendor relays.
+            </p>
+          </div>
+
+          <div class="ecosystem-matrix">
+            <article class="surface-column" data-spotlight-card>
+              <span class="cyber-reticle" aria-hidden="true"></span>
+              <div class="surface-col-top">
+                <div class="surface-head-row">
+                  <div class="surface-icon-frame" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+                      <path d="M8 21h8"></path>
+                      <path d="M12 17v4"></path>
+                    </svg>
+                  </div>
+                  <span class="surface-spec-pill mono">macOS &middot; Windows</span>
+                </div>
+                <h3>macOS &amp; Windows Desktop Studio</h3>
+                <p class="surface-summary">
+                  Native multi-tab operator studio combining isolated C++17 protocol bridges with built-in SRE diagnostics and local browser pairing.
+                </p>
+                <ul class="surface-capability-list">
+                  <li>Native <strong>FreeRDP 3.x</strong>, proportional <strong>VNC</strong>, multi-hop <strong>SSH -J</strong> &amp; dual-pane <strong>SFTP</strong></li>
+                  <li><strong>1-Click Local Web Bridge</strong> spins up <span class="mono">127.0.0.1:8443</span> directly for browser sessions</li>
+                  <li><strong>46 SRE &amp; PKI Studios</strong>, nested folder inheritance &amp; explicit SHA-256 TLS pinning</li>
+                </ul>
+              </div>
+              <div class="surface-col-foot">
+                <a class="surface-action-link" href="https://github.com/ribato22/jaladesk/releases">
+                  <span>Desktop Releases</span>
+                  <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M5 12h14"></path>
+                    <path d="m12 5 7 7-7 7"></path>
+                  </svg>
+                </a>
+              </div>
+            </article>
+
+            <article class="surface-column" data-spotlight-card>
+              <span class="cyber-reticle" aria-hidden="true"></span>
+              <div class="surface-col-top">
+                <div class="surface-head-row">
+                  <div class="surface-icon-frame" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="5" y="2" width="14" height="20" rx="2"></rect>
+                      <path d="M12 18h.01"></path>
+                    </svg>
+                  </div>
+                  <span class="surface-spec-pill mono">v1.17.0 &middot; Foldables</span>
+                </div>
+                <h3>Android &amp; Foldable Flex Mode</h3>
+                <p class="surface-summary">
+                  Adaptive touch workstation engineered for Android phones, tablets, foldables, and iOS/iPadOS with hardware biometric vault lock.
+                </p>
+                <ul class="surface-capability-list">
+                  <li><strong>Tabletop Mini-Laptop Trackpad</strong> &amp; <strong>Book Mode Hinge Split</strong> for dual-screen workflows</li>
+                  <li><strong>Crease Guard Zone</strong> prevents accidental hinge taps while preserving full desktop canvas</li>
+                  <li><strong>Inline 2FA Auto-Type</strong> &amp; sticky <span class="mono">Ctrl/Alt/Win/F1-F12</span> workstation chord bar</li>
+                </ul>
+              </div>
+              <div class="surface-col-foot">
+                <a class="surface-action-link" href="https://github.com/ribato22/jaladesk/releases">
+                  <span>Mobile &amp; APK Builds</span>
+                  <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M5 12h14"></path>
+                    <path d="m12 5 7 7-7 7"></path>
+                  </svg>
+                </a>
+              </div>
+            </article>
+
+            <article class="surface-column surface-column-featured" data-spotlight-card>
+              <span class="cyber-reticle" aria-hidden="true"></span>
+              <div class="surface-col-top">
+                <div class="surface-head-row">
+                  <div class="surface-icon-frame surface-icon-gold" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <line x1="2" y1="12" x2="22" y2="12"></line>
+                      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                    </svg>
+                  </div>
+                  <span class="surface-spec-pill surface-spec-gold mono">/app/ &middot; WebCrypto</span>
+                </div>
+                <h3>Zero-Knowledge Web PWA</h3>
+                <p class="surface-summary">
+                  Installable browser workstation decrypting your vault exclusively in local RAM with full terminal, SFTP, and gateway controls.
+                </p>
+                <ul class="surface-capability-list">
+                  <li>Client-side <strong>AES-256-GCM</strong> &amp; <strong>1-Click Google Drive Sync</strong> (<span class="mono">appDataFolder</span>)</li>
+                  <li>Instant <kbd class="kbd-inline">⌘K</kbd> <strong>Command Palette</strong> &amp; client-side <span class="mono">~/.ssh/config</span> importer</li>
+                  <li>Live <strong>VT100 SSH TUI</strong>, multi-session tabs &amp; chunked <strong>SFTP</strong> directly in browser</li>
+                </ul>
+              </div>
+              <div class="surface-col-foot">
+                <a class="surface-action-link surface-action-primary" href="./app/">
+                  <span>Launch Web App</span>
+                  <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M5 12h14"></path>
+                    <path d="m12 5 7 7-7 7"></path>
+                  </svg>
+                </a>
+              </div>
+            </article>
+
+            <article class="surface-column" data-spotlight-card>
+              <span class="cyber-reticle" aria-hidden="true"></span>
+              <div class="surface-col-top">
+                <div class="surface-head-row">
+                  <div class="surface-icon-frame" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="2" y="2" width="20" height="8" rx="2"></rect>
+                      <rect x="2" y="14" width="20" height="8" rx="2"></rect>
+                      <path d="M6 6h.01"></path>
+                      <path d="M6 18h.01"></path>
+                    </svg>
+                  </div>
+                  <span class="surface-spec-pill mono">JSR1 &middot; Docker</span>
+                </div>
+                <h3>Self-Hosted Zero-Trust Gateway</h3>
+                <p class="surface-summary">
+                  Agentless binary WebSocket relay bridging browsers to private LAN/VPC hosts without exposing RDP, VNC, or SSH ports.
+                </p>
+                <ul class="surface-capability-list">
+                  <li>Closed-loop <span class="mono">FRAME_ACK</span> flow control &amp; <strong>60s single-use WS tickets</strong></li>
+                  <li>Unconditional cloud-metadata <strong>SSRF guard</strong>, CIDR rules &amp; zero-orphan cleanup</li>
+                  <li>1-click deploy templates for <strong>Caddy Auto-HTTPS</strong>, <strong>Cloudflare Tunnel</strong>, <strong>Fly.io</strong> &amp; <strong>Railway</strong></li>
+                </ul>
+              </div>
+              <div class="surface-col-foot">
+                <a class="surface-action-link" href="#gateway-ecosystem">
+                  <span>1-Click Deploy Pack</span>
+                  <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M5 12h14"></path>
+                    <path d="m12 5 7 7-7 7"></path>
+                  </svg>
+                </a>
+              </div>
+            </article>
+          </div>
+
+          <div class="gateway-deploy-strip" id="gateway-ecosystem" data-reveal>
+            <div class="gateway-deploy-intro">
+              <h3>Self-Hosted <span class="mono">JSR1</span> Gateway Deployment Pack</h3>
+              <p>
+                Deploy the stateless, zero-dependency Node + FreeRDP bridge on your own VPS, homelab, or edge cloud in under a minute. Target credentials traverse <span class="mono">wss://</span> transiently for live sessions only — your <span class="mono">.jvault</span> never leaves your browser.
+              </p>
+              <div class="gateway-deploy-links">
+                <a class="btn-secondary" href="./GATEWAY.md">
+                  <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                  </svg>
+                  <span>Read Gateway Guide</span>
+                </a>
+                <a class="btn-secondary" href="./app/">
+                  <svg class="icon-inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="4 17 10 11 4 5"></polyline>
+                    <line x1="12" y1="19" x2="20" y2="19"></line>
+                  </svg>
+                  <span>Pair in Web App</span>
+                </a>
+              </div>
+            </div>
+
+            <ul class="gateway-targets-grid" aria-label="One-click self-hosted gateway deployment targets">
+              <li class="gateway-target-cell" data-spotlight-card>
+                <div class="gateway-target-head">
+                  <strong>Docker + Caddy Auto-HTTPS</strong>
+                  <span class="gateway-target-tag mono">Auto-TLS</span>
+                </div>
+                <p>Automatic Let&apos;s Encrypt certificates, hardened read-only rootfs, and <span class="mono">/healthz</span> probes.</p>
+                <code class="gateway-cmd-chip">deploy/caddy/docker-compose.caddy.yml</code>
+              </li>
+              <li class="gateway-target-cell" data-spotlight-card>
+                <div class="gateway-target-head">
+                  <strong>Cloudflare Tunnel</strong>
+                  <span class="gateway-target-tag mono">Zero Open Ports</span>
+                </div>
+                <p>Reach private LAN and homelab fleets over outbound <span class="mono">cloudflared</span> with zero inbound firewall rules.</p>
+                <code class="gateway-cmd-chip">deploy/cloudflare/docker-compose.cloudflared.yml</code>
+              </li>
+              <li class="gateway-target-cell" data-spotlight-card>
+                <div class="gateway-target-head">
+                  <strong>Fly.io Private Edge</strong>
+                  <span class="gateway-target-tag mono">1-Cmd Deploy</span>
+                </div>
+                <p>Single-command <span class="mono">fly deploy</span> on regional WireGuard private networks with auto-TLS edge.</p>
+                <code class="gateway-cmd-chip">fly.gateway.toml</code>
+              </li>
+              <li class="gateway-target-cell" data-spotlight-card>
+                <div class="gateway-target-head">
+                  <strong>Railway Cloud</strong>
+                  <span class="gateway-target-tag mono">Managed WSS</span>
+                </div>
+                <p>One-click container deploy with automatic 256-bit token bootstrap and 6-digit pairing code logs.</p>
+                <code class="gateway-cmd-chip">railway.gateway.json</code>
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </section>
@@ -765,9 +987,19 @@
                       <td>Local <span class="mono">scrypt</span> and <span class="mono">PBKDF2-HMAC-SHA256</span> derivation, offline TOTP codes, App Lock PIN, OS biometric enclave unlock, and 30s clipboard purge.</td>
                     </tr>
                     <tr>
-                      <td><strong>Mobile Touch Studio</strong></td>
-                      <td class="mono">Android &middot; iOS &middot; iPadOS</td>
-                      <td>Virtual trackpad &amp; direct canvas modes, sticky modifier key bar, SSH agent authentication, and encrypted parity with desktop <span class="mono">.jvault</span> containers.</td>
+                      <td><strong>Mobile &amp; Foldable Studio</strong></td>
+                      <td class="mono">v1.17.0 &middot; Android &middot; iOS</td>
+                      <td>Tabletop Mini-Laptop Trackpad, Book Mode hinge split, Crease Guard Zone, inline 2FA auto-type, sticky modifier bar, and <span class="mono">.jvault</span> parity.</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Zero-Knowledge Web PWA</strong></td>
+                      <td class="mono">/app/ &middot; WebCrypto &middot; VT100</td>
+                      <td>Client-side <span class="mono">AES-256-GCM</span> RAM vault, 1-Click Google Drive Sync, <span class="mono">⌘K</span> Command Palette, <span class="mono">~/.ssh/config</span> importer, live SSH TUI, and SFTP.</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Self-Hosted Gateway</strong></td>
+                      <td class="mono">JSR1 &middot; WSS &middot; Docker</td>
+                      <td>Closed-loop <span class="mono">FRAME_ACK</span> congestion control, 60s single-use WS tickets, cloud-metadata SSRF guard, and 1-click Caddy, Cloudflare, Fly.io, and Railway deploys.</td>
                     </tr>
                   </tbody>
                 </table>
@@ -809,10 +1041,97 @@
       <div class="container">
         <div class="arch-rail arch-junction" data-reveal>
           <div class="section-header-row">
-            <h2>Zero-knowledge Cloud Sync &amp; Google Drive AppData transparency</h2>
+            <h2>Zero-knowledge Cloud Sync &amp; international security architecture</h2>
             <p>
-              JalaDesk requires no account and operates completely offline by default. When you opt in to <strong>Google Drive Cloud Sync</strong>, your vault is encrypted locally on your device prior to upload and stored solely inside your own Google Account's isolated Application Data container.
+              JalaDesk requires no account and operates completely offline by default. Every surface — Desktop Studio, Android Foldable, Web PWA, and Self-Hosted <span class="mono">JSR1</span> Gateway — enforces client-side authenticated encryption, zero telemetry, and strict Google API Limited Use boundaries.
             </p>
+          </div>
+
+          <div class="security-badges-wrap" data-reveal>
+            <ul class="security-badges-grid" aria-label="International security and zero-trust architecture guarantees">
+              <li class="security-badge-cell" data-spotlight-card>
+                <div class="security-badge-head">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                  </svg>
+                  <span class="security-badge-title">Zero-Knowledge Vault Cipher</span>
+                </div>
+                <span class="security-badge-spec mono">AES-256-GCM &middot; PBKDF2 310,000 iter</span>
+                <p>Authenticated 128-bit GCM tags with hardened <span class="mono">PBKDF2-HMAC-SHA256</span> (up to <span class="mono">310,000</span> iterations; <span class="mono">100k</span> cross-platform <span class="mono">.jvault</span> default) and <span class="mono">scrypt</span> local derivation.</p>
+              </li>
+
+              <li class="security-badge-cell" data-spotlight-card>
+                <div class="security-badge-head">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9"></circle>
+                    <polyline points="12 7 12 12 15 15"></polyline>
+                  </svg>
+                  <span class="security-badge-title">Offline MFA Enclave</span>
+                </div>
+                <span class="security-badge-spec mono">RFC 6238 2FA &middot; SHA-1/256/512</span>
+                <p>Air-gapped TOTP generator built directly into Desktop, Mobile, and Web vaults with one-tap SSH/RDP auto-type and 30s clipboard scrubbing.</p>
+              </li>
+
+              <li class="security-badge-cell" data-spotlight-card>
+                <div class="security-badge-head">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="2" y="2" width="20" height="8" rx="2"></rect>
+                    <rect x="2" y="14" width="20" height="8" rx="2"></rect>
+                    <path d="M6 6h.01"></path>
+                    <path d="M6 18h.01"></path>
+                  </svg>
+                  <span class="security-badge-title">Congestion-Controlled Relay</span>
+                </div>
+                <span class="security-badge-spec mono">JSR1 Binary &middot; FRAME_ACK &middot; 60s Ticket</span>
+                <p>Stateless self-hosted binary WebSocket gateway with closed-loop flow control, single-use <span class="mono">Sec-WebSocket-Protocol</span> tickets, and SSRF isolation.</p>
+              </li>
+
+              <li class="security-badge-cell" data-spotlight-card>
+                <div class="security-badge-head">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                  </svg>
+                  <span class="security-badge-title">Zero Telemetry &amp; Limited Use</span>
+                </div>
+                <span class="security-badge-spec mono">0 Analytics &middot; Google AppData Only</span>
+                <p>No developer servers, trackers, or broad Drive scopes. Fully compliant with Google API Limited Use &mdash; see our <a href="./privacy.html">Privacy Policy</a>.</p>
+              </li>
+            </ul>
+
+            <div class="arch-compare-panel surface-panel" data-spotlight-card>
+              <table class="spec-table compare-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Security Boundary</th>
+                    <th scope="col">JalaDesk 4-Surface Architecture</th>
+                    <th scope="col">Typical Cloud-Relayed Clients</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>Vault Cryptography</strong></td>
+                    <td>Client-side <span class="mono">AES-256-GCM</span> + <span class="mono">PBKDF2-HMAC-SHA256</span> (configurable up to <span class="mono">310,000</span> iter) &amp; <span class="mono">scrypt</span></td>
+                    <td>Vendor-hosted database or plaintext <span class="mono">.rdp</span> / config files</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Session Transport</strong></td>
+                    <td>Direct native sockets or operator-owned <span class="mono">JSR1</span> <span class="mono">FRAME_ACK</span> gateway (<span class="mono">wss://</span>)</td>
+                    <td>Third-party multi-tenant SaaS relays inspecting session traffic</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Web &amp; Mobile Auth</strong></td>
+                    <td>Offline <span class="mono">RFC 6238</span> 2FA, biometric unlock &amp; 60s single-use WS tickets</td>
+                    <td>External authenticator apps &amp; long-lived query-string tokens</td>
+                  </tr>
+                  <tr>
+                    <td><strong>Privacy &amp; Compliance</strong></td>
+                    <td>Zero telemetry &middot; isolated <span class="mono">drive.appdata</span> scope (<a href="./privacy.html">Limited Use Disclosure</a>)</td>
+                    <td>Account registration required, telemetry SDKs &amp; broad cloud permissions</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div class="crypto-pipeline-wrap">
@@ -1050,19 +1369,19 @@
               <span>JalaDesk</span>
             </a>
             <p>
-              Local-first multi-protocol remote desktop, SSH bastion, SFTP, and zero-knowledge vault workspace across macOS, Windows, Android, iOS, and iPadOS.
+              Local-first multi-protocol remote desktop, SSH bastion, SFTP, and zero-knowledge vault workspace across macOS, Windows, Android Foldables, iOS, Web PWA, and Self-Hosted JSR1 Gateway.
             </p>
             <span class="footer-pkg">Package ID: com.jaladesk.app</span>
           </div>
 
           <div class="footer-col">
-            <p class="footer-heading">Product</p>
+            <p class="footer-heading">Ecosystem &amp; Docs</p>
             <ul>
-              <li><a href="./index.html">Workspace Overview</a></li>
-              <li><a href="#live-topology">Live Topology Lab</a></li>
-              <li><a href="#capabilities">System Architecture</a></li>
-              <li><a href="#security">Cloud Sync Security</a></li>
-              <li><a href="https://github.com/ribato22/jaladesk">GitHub Repository</a></li>
+              <li><a href="./app/">Launch Web App (/app/)</a></li>
+              <li><a href="#ecosystem-surfaces">4-Surface Ecosystem</a></li>
+              <li><a href="#gateway-ecosystem">Self-Host JSR1 Gateway</a></li>
+              <li><a href="./GATEWAY.md">Gateway Deployment Guide</a></li>
+              <li><a href="https://github.com/ribato22/jaladesk/releases">Desktop &amp; Android Releases</a></li>
             </ul>
           </div>
 

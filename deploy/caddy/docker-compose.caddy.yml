@@ -1,0 +1,83 @@
+# JalaDesk Self-Hosted Web Gateway — Production VPS Stack (Docker + Caddy Auto-TLS)
+#
+# Usage from repository root:
+#   cp deploy/.env.example deploy/.env
+#   # Edit deploy/.env and set JALADESK_GATEWAY_DOMAIN=gateway.yourdomain.com
+#   docker compose --env-file deploy/.env -f deploy/caddy/docker-compose.caddy.yml up -d
+#   docker logs jaladesk-gateway
+
+services:
+  jaladesk-gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.gateway
+    image: ghcr.io/ribato22/jaladesk-gateway:1.17.0
+    container_name: jaladesk-gateway
+    restart: unless-stopped
+    # Intentionally NO host `ports:` binding — reachable only by Caddy over the private network.
+    expose:
+      - "8443"
+    environment:
+      JALADESK_GATEWAY_HOST: "0.0.0.0"
+      JALADESK_GATEWAY_PORT: "8443"
+      JALADESK_GATEWAY_TOKEN: "${JALADESK_GATEWAY_TOKEN:-}"
+      JALADESK_GATEWAY_CORS_ORIGINS: "${JALADESK_GATEWAY_CORS_ORIGINS:-https://ribato22.github.io}"
+      JALADESK_GATEWAY_ALLOW_CIDRS: "${JALADESK_GATEWAY_ALLOW_CIDRS:-}"
+      JALADESK_GATEWAY_DENY_CIDRS: "${JALADESK_GATEWAY_DENY_CIDRS:-}"
+      JALADESK_GATEWAY_SERVE_UI: "${JALADESK_GATEWAY_SERVE_UI:-0}"
+      JALADESK_GATEWAY_DEMO: "${JALADESK_GATEWAY_DEMO:-0}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8443/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - jaladesk-internal
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: jaladesk-caddy
+    restart: unless-stopped
+    depends_on:
+      jaladesk-gateway:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      JALADESK_GATEWAY_DOMAIN: "${JALADESK_GATEWAY_DOMAIN:?Set JALADESK_GATEWAY_DOMAIN in deploy/.env}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - jaladesk-internal
+
+networks:
+  jaladesk-internal:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

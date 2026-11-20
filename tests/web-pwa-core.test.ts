@@ -227,6 +227,63 @@ interface VaultCoreModule {
     vaultKey?: string;
     prefsKey?: string;
   }) => WebSealedStoreInstance;
+  parseOpenSshConfig(
+    configText: string,
+    options?: {
+      existingHosts?: Array<Record<string, unknown>>;
+      defaultFolder?: string;
+      nowMs?: number;
+    },
+  ): {
+    hosts: Array<{
+      id: string;
+      name: string;
+      address: string;
+      port: number;
+      protocol: string;
+      folder: string;
+      username: string;
+      jumpHostId: string | null;
+      isJumpHost: boolean;
+      proxyJump?: string;
+      identityFile?: string;
+      autoCreatedJumpHost?: boolean;
+    }>;
+    jumpHosts: Array<{ id: string; name: string; address: string; port: number; username: string; isJumpHost: boolean }>;
+    referencedExistingJumpHostIds: string[];
+    skippedWildcards: number;
+    duplicatesSkipped: number;
+    warnings: string[];
+  };
+  computeVaultSecurityHealth(
+    vault: Record<string, unknown> | null | undefined,
+    runtimeMeta?: {
+      autoLockSeconds?: number;
+      lockOnHidden?: boolean;
+      syncProvider?: string;
+      hasCloudBinding?: boolean;
+      lastSyncedAtMs?: number;
+      vaultAuthMode?: string;
+      useCustomPassphrase?: boolean;
+    },
+  ): {
+    score: number;
+    tier: 'strong' | 'good' | 'attention';
+    tone: 'ok' | 'warn' | 'danger';
+    gradeLabel: string;
+    pills: Array<{ id: string; label: string; detail: string; tone: string; action: string }>;
+    findings: Array<{ id: string; severity: string; title: string; detail: string; action: string }>;
+    metrics: {
+      hostCount: number;
+      jumpHostCount: number;
+      credentialCount: number;
+      totpCount: number;
+      emptyUsernameCount: number;
+      duplicatePasswordCount: number;
+      weakPasswordCount: number;
+      inlinePasswordCount: number;
+    };
+  };
 }
 
 interface WebOAuthConfigModule {
@@ -1207,8 +1264,8 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
   assert.ok(swRaw.includes('api.github.com'));
   assert.ok(swRaw.includes('Authorization'));
   assert.ok(
-    swRaw.includes('`${CACHE_PREFIX}v7`') || swRaw.includes("'jaladesk-web-pwa-v7'"),
-    'sw.js must bump CACHE_NAME to jaladesk-web-pwa-v7',
+    swRaw.includes('`${CACHE_PREFIX}v8`') || swRaw.includes("'jaladesk-web-pwa-v8'"),
+    'sw.js must bump CACHE_NAME to jaladesk-web-pwa-v8',
   );
 
   const indexRaw = await readFile(fileURLToPath(INDEX_HTML_URL), 'utf8');
@@ -1241,13 +1298,24 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
     'id="btn-ssh-ctrl-latch"',
     'id="btn-gateway-ssh-paste"',
     'id="gateway-desktop-bridge-note"',
+    'id="topbar-cmdk-btn"',
+    'id="modal-command-palette"',
+    'id="cmdk-input"',
+    'id="cmdk-listbox"',
+    'id="btn-import-ssh-config"',
+    'id="modal-ssh-import"',
+    'id="vault-health-strip"',
+    'id="gateway-session-tabs"',
+    'id="gateway-deploy-tabs"',
+    'id="sidebar-shortcuts-btn"',
+    'id="modal-shortcuts"',
   ]) {
     assert.ok(indexRaw.includes(requiredId), `index.html must include ${requiredId}`);
   }
 
   const appJsRaw = await readFile(fileURLToPath(APP_JS_URL), 'utf8');
   const vtJsRaw = await readFile(fileURLToPath(VT_TERMINAL_WEB_URL), 'utf8');
-  assert.equal(/\binnerHTML\b/.test(appJsRaw), false, 'app.js must contain zero innerHTML usage');
+  assert.equal(/\b(innerHTML|outerHTML|insertAdjacentHTML|document\.write)\b/.test(appJsRaw), false, 'app.js must contain zero unsafe HTML injection APIs');
   assert.equal(/\binnerHTML\b/.test(vtJsRaw), false, 'vt-terminal-web.js must contain zero innerHTML usage');
   assert.equal(appJsRaw.includes('Open in Gateway'), false, 'host cards must replace ambiguous Open in Gateway with Connect');
   assert.ok(appJsRaw.includes("el('span', '', 'Connect')"), 'host cards must render Connect button');
@@ -1260,6 +1328,14 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
   assert.ok(appJsRaw.includes('scheduleCloudAutoSync'), 'app.js must schedule debounced background cloud auto-sync');
   assert.ok(appJsRaw.includes('unlockOrSyncGoogleVault'), 'app.js must use local-unlock-then-smartMerge helper for Google vaults');
   assert.ok(appJsRaw.includes('startGatewayInteractivePreview'), 'app.js must provide interactive in-browser remote GUI preview');
+  assert.ok(
+    appJsRaw.includes('docker compose --env-file deploy/.env -f deploy/caddy/docker-compose.caddy.yml up -d'),
+    'app.js Caddy deploy snippet must pass --env-file deploy/.env',
+  );
+  assert.ok(
+    appJsRaw.includes('docker compose --env-file deploy/.env -f deploy/cloudflare/docker-compose.cloudflared.yml up -d'),
+    'app.js Cloudflare Tunnel deploy snippet must pass --env-file deploy/.env',
+  );
 });
 
 test('g. 1-click Google Web OAuth config, fetchGoogleUserInfo & GIS sign-in flow with zero token persistence', async () => {
@@ -1888,4 +1964,226 @@ test('i. WebVtTerminal ANSI/CSI/256-color/TrueColor/alt-screen, keyEventToAnsi &
   assert.deepStrictEqual(badUrl, { hasPairing: true, gatewayUrl: '', token: 'abc123' });
   assert.equal(gwMod.parseGatewayFragment('#access_token=ya29.oauth&scope=openid'), null);
   assert.equal(gwMod.parseGatewayFragment('#gateway'), null);
+});
+
+test('j. parseOpenSshConfig parses hosts, ProxyJump auto-linking, Key=Value syntax, comments, wildcards & invalid ports', async () => {
+  const core = await loadVaultCore();
+
+  const sshConfig = `
+# Global defaults — wildcard MUST be skipped safely
+Host *
+  ServerAliveInterval 60
+  User ignored-wildcard-user
+
+Host *.staging.internal web-? !excluded-host
+  User wildcard-user
+
+Match host 10.0.0.* exec "true"
+  User match-user
+
+# Declared bastion with = syntax and trailing inline comment
+Host=bastion-eu # Primary EU jump box
+  HostName = 203.0.113.10
+  Port=2222
+  User = "opsadmin"
+  IdentityFile ~/.ssh/id_ed25519_eu
+
+# Standard whitespace block referencing declared bastion
+Host prod-app-01
+  HostName 10.24.0.15
+  User deploy
+  ProxyJump bastion-eu
+
+# Duplicate alias AND duplicate host:port must be skipped
+Host prod-app-01
+  HostName 10.24.0.99
+
+Host prod-app-dup-endpoint
+  HostName 10.24.0.15
+  Port 22
+
+# Undeclared ProxyJump with user@host:port must auto-create & link Jump Host
+Host private-db
+  HostName=10.24.9.50
+  Port=54322
+  User=dbadmin
+  ProxyJump jumpops@198.51.100.7:2200
+
+# Invalid ports must fall back safely to 22 with warnings
+Host bad-port-high
+  HostName 10.24.1.20
+  Port 70000
+  ProxyJump none
+
+Host bad-port-text
+  HostName 10.24.1.21
+  Port notaport
+
+# Links cleanly to an existing vault jump host
+Host linked-to-existing
+  HostName 10.24.8.88
+  ProxyJump corp-bastion
+`;
+
+  const parsed = core.parseOpenSshConfig(sshConfig, {
+    defaultFolder: 'Production SSH',
+    existingHosts: [
+      { id: 'existing-jump-1', name: 'corp-bastion', address: '198.51.100.250', port: 22, protocol: 'ssh', isJumpHost: false },
+      { id: 'existing-dup', name: 'already-saved', address: '10.99.99.99', port: 22, protocol: 'ssh' },
+    ],
+  });
+
+  // Wildcards skipped: `*`, `*.staging.internal`, `web-?`, `!excluded-host` => 4
+  assert.equal(parsed.skippedWildcards, 4);
+  // Duplicates skipped: second `prod-app-01` (alias) and `prod-app-dup-endpoint` (10.24.0.15:22) => 2
+  assert.equal(parsed.duplicatesSkipped, 2);
+  // Invalid ports generated 2 clear warnings
+  assert.equal(parsed.warnings.length, 2);
+  assert.ok(parsed.warnings.some((w) => w.includes('70000')));
+  assert.ok(parsed.warnings.some((w) => w.includes('notaport')));
+
+  // Hosts: auto-created `198.51.100.7` + 6 concrete parsed hosts = 7
+  assert.equal(parsed.hosts.length, 7);
+
+  const bastion = parsed.hosts.find((h) => h.name === 'bastion-eu');
+  assert.ok(bastion);
+  assert.equal(bastion.address, '203.0.113.10');
+  assert.equal(bastion.port, 2222);
+  assert.equal(bastion.username, 'opsadmin');
+  assert.equal(bastion.isJumpHost, true);
+  assert.equal(bastion.folder, 'Production SSH');
+
+  const prodApp = parsed.hosts.find((h) => h.name === 'prod-app-01');
+  assert.ok(prodApp);
+  assert.equal(prodApp.address, '10.24.0.15');
+  assert.equal(prodApp.port, 22);
+  assert.equal(prodApp.username, 'deploy');
+  assert.equal(prodApp.jumpHostId, bastion.id);
+
+  const autoJump = parsed.hosts.find((h) => h.address === '198.51.100.7' && h.port === 2200);
+  assert.ok(autoJump);
+  assert.equal(autoJump.isJumpHost, true);
+  assert.equal(autoJump.username, 'jumpops');
+  assert.equal(autoJump.autoCreatedJumpHost, true);
+
+  const privDb = parsed.hosts.find((h) => h.name === 'private-db');
+  assert.ok(privDb);
+  assert.equal(privDb.port, 54322);
+  assert.equal(privDb.jumpHostId, autoJump.id);
+
+  const badHigh = parsed.hosts.find((h) => h.name === 'bad-port-high');
+  const badText = parsed.hosts.find((h) => h.name === 'bad-port-text');
+  assert.equal(badHigh?.port, 22);
+  assert.equal(badHigh?.jumpHostId, null);
+  assert.equal(badText?.port, 22);
+
+  const linkedExisting = parsed.hosts.find((h) => h.name === 'linked-to-existing');
+  assert.equal(linkedExisting?.jumpHostId, 'existing-jump-1');
+  assert.deepStrictEqual(parsed.referencedExistingJumpHostIds, ['existing-jump-1']);
+  assert.equal(parsed.jumpHosts.length, 2);
+
+  // Empty/whitespace config returns clean empty structure
+  assert.deepStrictEqual(core.parseOpenSshConfig('   \n# just comments\n'), {
+    hosts: [],
+    jumpHosts: [],
+    referencedExistingJumpHostIds: [],
+    skippedWildcards: 0,
+    duplicatesSkipped: 0,
+    warnings: [],
+  });
+});
+
+test('k. computeVaultSecurityHealth scores tiers, penalizes Auto-Lock Off & weak/reused creds, and leaks ZERO secrets', async () => {
+  const core = await loadVaultCore();
+
+  // 1. Hardened vault -> strong tier (100/100)
+  const hardenedVault = {
+    hosts: [
+      { id: 'h1', name: 'Prod Bastion', address: '10.0.0.1', port: 22, protocol: 'ssh', username: 'ops', password: '', isJumpHost: true },
+    ],
+    credentials: [
+      { id: 'c1', label: 'SSH Key', username: 'ops', password: 'StrongUniquePassword#2026!', privateKeyPem: '-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET_KEY_BODY\n-----END OPENSSH PRIVATE KEY-----' },
+    ],
+    totp: [
+      { id: 't1', issuer: 'AWS', accountName: 'ops@corp', secretBase32: 'JBSWY3DPEHPK3PXP' },
+    ],
+  };
+
+  const strong = core.computeVaultSecurityHealth(hardenedVault, {
+    autoLockSeconds: 300,
+    lockOnHidden: false,
+    syncProvider: 'googleDrive',
+    hasCloudBinding: true,
+    lastSyncedAtMs: 1_760_000_000_000,
+  });
+  assert.equal(strong.score, 100);
+  assert.equal(strong.tier, 'strong');
+  assert.equal(strong.tone, 'ok');
+  assert.equal(strong.gradeLabel, 'Hardened');
+  assert.equal(strong.findings.length, 0);
+  assert.ok(strong.pills.some((p) => p.id === 'encryption' && p.label === 'AES-256-GCM'));
+  assert.ok(strong.pills.some((p) => p.id === 'cloudSync' && p.label.includes('Google Drive')));
+
+  // 2. Auto-Lock Off penalty (-20 pts -> score drops from 100 to 80, tier 'good')
+  const autoLockOff = core.computeVaultSecurityHealth(hardenedVault, {
+    autoLockSeconds: 0,
+    lockOnHidden: false,
+    syncProvider: 'googleDrive',
+    hasCloudBinding: true,
+    lastSyncedAtMs: 1_760_000_000_000,
+  });
+  assert.equal(autoLockOff.score, 80);
+  assert.equal(autoLockOff.tier, 'good');
+  assert.equal(autoLockOff.tone, 'warn');
+  assert.ok(autoLockOff.pills.some((p) => p.id === 'autoLock' && p.label === 'Auto-Lock: Off' && p.tone === 'warn'));
+  assert.ok(autoLockOff.findings.some((f) => f.id === 'autolock-off'));
+
+  // 3. Immediate lock-on-hidden retains full auto-lock credit
+  const immediateLock = core.computeVaultSecurityHealth(hardenedVault, {
+    autoLockSeconds: 0,
+    lockOnHidden: true,
+    syncProvider: 'googleDrive',
+    hasCloudBinding: true,
+  });
+  assert.equal(immediateLock.score, 100);
+  assert.ok(immediateLock.pills.some((p) => p.id === 'autoLock' && p.label === 'Auto-Lock: Immediate'));
+
+  // 4. Risky vault: Auto-Lock Off, Local-Only, No 2FA, duplicate passwords, weak password, missing usernames -> attention tier
+  const reusedSecret = 'ReusedSuperSecret#99';
+  const weakSecret = 'short1';
+  const riskyVault = {
+    hosts: [
+      { id: 'h-r1', name: 'Win1', address: '10.1.0.1', port: 3389, protocol: 'rdp', username: '', password: reusedSecret },
+      { id: 'h-r2', name: 'Win2', address: '10.1.0.2', port: 3389, protocol: 'rdp', username: 'admin', password: weakSecret },
+    ],
+    credentials: [
+      { id: 'c-r1', label: 'Shared Admin', username: '', password: reusedSecret },
+      { id: 'c-r2', label: 'Another Shared', username: 'svc', password: reusedSecret },
+    ],
+    totp: [],
+  };
+
+  const attention = core.computeVaultSecurityHealth(riskyVault, {
+    autoLockSeconds: 0,
+    lockOnHidden: false,
+    hasCloudBinding: false,
+  });
+  assert.ok(attention.score < 65, `Expected attention score < 65, got ${attention.score}`);
+  assert.equal(attention.tier, 'attention');
+  assert.equal(attention.tone, 'danger');
+  assert.equal(attention.metrics.duplicatePasswordCount, 2);
+  assert.equal(attention.metrics.weakPasswordCount, 1);
+  assert.equal(attention.metrics.emptyUsernameCount, 2);
+  assert.equal(attention.metrics.inlinePasswordCount, 2);
+  assert.ok(attention.findings.some((f) => f.id === 'hygiene-duplicate'));
+  assert.ok(attention.findings.some((f) => f.id === 'hygiene-weak'));
+  assert.ok(attention.findings.some((f) => f.id === 'hygiene-empty-user'));
+  assert.ok(attention.findings.some((f) => f.id === 'totp-missing'));
+  assert.ok(attention.findings.some((f) => f.id === 'cloud-local-only'));
+
+  // 5. Strict ZERO secret leakage invariant across ALL health reports
+  const serialized = JSON.stringify({ strong, autoLockOff, attention });
+  for (const secret of [reusedSecret, weakSecret, 'StrongUniquePassword#2026!', 'SECRET_KEY_BODY', 'JBSWY3DPEHPK3PXP']) {
+    assert.equal(serialized.includes(secret), false, `Health audit leaked secret value: ${secret}`);
+  }
 });

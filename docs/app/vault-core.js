@@ -2309,3 +2309,769 @@ export class SealedBrowserVaultStore {
     }
   }
 }
+
+// ============================================================================
+// 6. Pure Client-Side OpenSSH (~/.ssh/config) Parser
+// ============================================================================
+
+function stripSshConfigComment(line) {
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '"' && (i === 0 || line[i - 1] !== '\\')) {
+      inQuotes = !inQuotes;
+    } else if (ch === '#' && !inQuotes) {
+      return line.slice(0, i);
+    }
+  }
+  return line;
+}
+
+function unquoteSshValue(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (trimmed.length >= 2 && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function tokenizeSshArgs(raw) {
+  const tokens = [];
+  let current = '';
+  let quote = '';
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = '';
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (/\s/.test(ch)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = '';
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
+function parseSshDirectiveLine(rawLine) {
+  const withoutComment = stripSshConfigComment(rawLine).trim();
+  if (!withoutComment) return null;
+
+  // Match `Key=Value`, `Key = Value`, or `Key Value`
+  const match = /^([A-Za-z][A-Za-z0-9_-]*)(?:\s*=\s*|\s+)(.*)$/.exec(withoutComment);
+  if (!match) return null;
+  const key = match[1].toLowerCase();
+  const value = match[2].trim();
+  if (!value) return null;
+  return { key, value };
+}
+
+function isWildcardSshPattern(pattern) {
+  const clean = String(pattern ?? '').trim();
+  return !clean || clean.includes('*') || clean.includes('?') || clean.startsWith('!');
+}
+
+function parseProxyJumpSpec(rawJump) {
+  const firstHop = String(rawJump ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .find((s) => s.length > 0 && s.toLowerCase() !== 'none');
+  if (!firstHop) return null;
+
+  let rest = firstHop;
+  let username = '';
+  const atIdx = rest.lastIndexOf('@');
+  if (atIdx > 0) {
+    username = rest.slice(0, atIdx).trim();
+    rest = rest.slice(atIdx + 1).trim();
+  }
+
+  let host = rest;
+  let port = 22;
+  let explicitPort = false;
+
+  if (rest.startsWith('[')) {
+    const closeIdx = rest.indexOf(']');
+    if (closeIdx > 1) {
+      host = rest.slice(1, closeIdx).trim();
+      const after = rest.slice(closeIdx + 1).trim();
+      if (after.startsWith(':')) {
+        const parsedPort = Number.parseInt(after.slice(1), 10);
+        if (Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535) {
+          port = parsedPort;
+          explicitPort = true;
+        }
+      }
+    }
+  } else {
+    const lastColon = rest.lastIndexOf(':');
+    const firstColon = rest.indexOf(':');
+    if (lastColon > 0 && lastColon === firstColon) {
+      const portPart = rest.slice(lastColon + 1).trim();
+      if (/^\d+$/.test(portPart)) {
+        const parsedPort = Number.parseInt(portPart, 10);
+        if (Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535) {
+          host = rest.slice(0, lastColon).trim();
+          port = parsedPort;
+          explicitPort = true;
+        }
+      }
+    }
+  }
+
+  if (!host || isWildcardSshPattern(host)) return null;
+  return {
+    raw: firstHop,
+    aliasOrHost: host,
+    username,
+    port,
+    explicitPort,
+  };
+}
+
+function slugifyHostId(raw) {
+  const slug = String(raw ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 28);
+  return slug || 'host';
+}
+
+/**
+ * Pure client-side OpenSSH (`~/.ssh/config`) parser.
+ * Parses `Host`, `HostName`, `Port` (default 22), `User`, `ProxyJump` (auto-creating and linking
+ * jump hosts when referenced), and `IdentityFile` metadata. Safely skips wildcard `*` / `?`
+ * patterns and `Match` blocks, strips `#` comments, handles `Key=Value` and whitespace syntax,
+ * and deduplicates by alias and `host:port`.
+ *
+ * @param {string} configText
+ * @param {{
+ *   existingHosts?: Array<Record<string, unknown>>,
+ *   defaultFolder?: string,
+ *   nowMs?: number,
+ * }} [options]
+ */
+export function parseOpenSshConfig(configText, options = {}) {
+  const emptyResult = {
+    hosts: [],
+    jumpHosts: [],
+    referencedExistingJumpHostIds: [],
+    skippedWildcards: 0,
+    duplicatesSkipped: 0,
+    warnings: [],
+  };
+  if (typeof configText !== 'string' || configText.trim().length === 0) {
+    return emptyResult;
+  }
+
+  const nowMs =
+    typeof options.nowMs === 'number' && Number.isFinite(options.nowMs) ? Math.trunc(options.nowMs) : Date.now();
+  const defaultFolder = typeof options.defaultFolder === 'string' ? options.defaultFolder.trim() : '';
+  const existingHosts = Array.isArray(options.existingHosts) ? options.existingHosts.filter(isPlainObject) : [];
+
+  const blocks = [];
+  let currentBlock = null;
+  let skippedWildcards = 0;
+  const warnings = [];
+
+  const lines = configText.replace(/^\uFEFF/, '').split(/\r?\n/);
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx += 1) {
+    const parsed = parseSshDirectiveLine(lines[lineIdx]);
+    if (!parsed) continue;
+
+    if (parsed.key === 'match') {
+      currentBlock = null;
+      continue;
+    }
+
+    if (parsed.key === 'host') {
+      const rawPatterns = tokenizeSshArgs(parsed.value);
+      const concreteAliases = [];
+      for (const pat of rawPatterns) {
+        if (isWildcardSshPattern(pat)) {
+          skippedWildcards += 1;
+        } else {
+          concreteAliases.push(pat);
+        }
+      }
+      if (concreteAliases.length === 0) {
+        currentBlock = null;
+        continue;
+      }
+      currentBlock = {
+        aliases: concreteAliases,
+        hostName: '',
+        port: 22,
+        portExplicit: false,
+        user: '',
+        proxyJump: '',
+        identityFile: '',
+      };
+      blocks.push(currentBlock);
+      continue;
+    }
+
+    if (!currentBlock) continue;
+
+    switch (parsed.key) {
+      case 'hostname': {
+        if (!currentBlock.hostName) {
+          currentBlock.hostName = unquoteSshValue(parsed.value);
+        }
+        break;
+      }
+      case 'port': {
+        if (!currentBlock.portExplicit) {
+          const rawPort = unquoteSshValue(parsed.value);
+          const num = /^\d+$/.test(rawPort) ? Number.parseInt(rawPort, 10) : NaN;
+          if (Number.isInteger(num) && num >= 1 && num <= 65535) {
+            currentBlock.port = num;
+            currentBlock.portExplicit = true;
+          } else {
+            warnings.push(
+              `Line ${lineIdx + 1}: invalid Port "${rawPort}" for ${currentBlock.aliases[0]}; defaulted to 22.`,
+            );
+            currentBlock.port = 22;
+            currentBlock.portExplicit = true;
+          }
+        }
+        break;
+      }
+      case 'user': {
+        if (!currentBlock.user) {
+          currentBlock.user = unquoteSshValue(parsed.value);
+        }
+        break;
+      }
+      case 'proxyjump': {
+        if (!currentBlock.proxyJump) {
+          const val = unquoteSshValue(parsed.value);
+          currentBlock.proxyJump = val.toLowerCase() === 'none' ? '' : val;
+        }
+        break;
+      }
+      case 'identityfile': {
+        if (!currentBlock.identityFile) {
+          currentBlock.identityFile = unquoteSshValue(parsed.value);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  const existingAliasSet = new Set();
+  const existingEndpointSet = new Set();
+  const existingByAlias = new Map();
+  const existingByEndpoint = new Map();
+  const existingByAddress = new Map();
+  for (const eh of existingHosts) {
+    const eName = String(eh.name ?? '').trim().toLowerCase();
+    const eAddr = String(eh.address ?? '').trim().toLowerCase();
+    const ePort = Number(eh.port) || 22;
+    if (eName) {
+      existingAliasSet.add(eName);
+      if (!existingByAlias.has(eName)) existingByAlias.set(eName, eh);
+    }
+    if (eAddr) {
+      const epKey = `${eAddr}:${ePort}`;
+      existingEndpointSet.add(epKey);
+      if (!existingByEndpoint.has(epKey)) existingByEndpoint.set(epKey, eh);
+      if (!existingByAddress.has(eAddr)) existingByAddress.set(eAddr, eh);
+    }
+  }
+
+  const seenAliases = new Set();
+  const seenEndpoints = new Set();
+  const parsedHosts = [];
+  const parsedByAlias = new Map();
+  const parsedByEndpoint = new Map();
+  const parsedByAddress = new Map();
+  let duplicatesSkipped = 0;
+  let seq = 0;
+
+  for (const block of blocks) {
+    for (const alias of block.aliases) {
+      const address = (block.hostName || alias).trim();
+      if (!address || isWildcardSshPattern(address)) {
+        skippedWildcards += 1;
+        continue;
+      }
+      const aliasKey = alias.toLowerCase();
+      const endpointKey = `${address.toLowerCase()}:${block.port}`;
+
+      if (
+        seenAliases.has(aliasKey) ||
+        seenEndpoints.has(endpointKey) ||
+        existingAliasSet.has(aliasKey) ||
+        existingEndpointSet.has(endpointKey)
+      ) {
+        duplicatesSkipped += 1;
+        continue;
+      }
+
+      seq += 1;
+      const id = `host_ssh_${slugifyHostId(alias)}_${seq}_${randomHex(3)}`;
+      const entry = {
+        id,
+        name: alias,
+        address,
+        port: block.port,
+        protocol: 'ssh',
+        folder: defaultFolder,
+        osLabel: '',
+        domain: '',
+        username: block.user,
+        password: '',
+        privateKeyPem: '',
+        jumpHostId: null,
+        credentialId: null,
+        isJumpHost: false,
+        isFavorite: false,
+        accentTint: 'sapphire',
+        updatedAtMs: nowMs,
+        proxyJump: block.proxyJump,
+        identityFile: block.identityFile,
+        autoCreatedJumpHost: false,
+      };
+
+      seenAliases.add(aliasKey);
+      seenEndpoints.add(endpointKey);
+      parsedHosts.push(entry);
+      parsedByAlias.set(aliasKey, entry);
+      parsedByEndpoint.set(endpointKey, entry);
+      if (!parsedByAddress.has(address.toLowerCase())) {
+        parsedByAddress.set(address.toLowerCase(), entry);
+      }
+    }
+  }
+
+  // Pass 2: Resolve ProxyJump references (link declared hosts, existing vault hosts, or auto-create jump host)
+  const autoCreatedJumpHosts = [];
+  const referencedExistingJumpHostIds = new Set();
+
+  for (const host of parsedHosts) {
+    if (!host.proxyJump) continue;
+    const spec = parseProxyJumpSpec(host.proxyJump);
+    if (!spec) continue;
+
+    const targetKey = spec.aliasOrHost.toLowerCase();
+    const epKey = `${targetKey}:${spec.port}`;
+
+    let jumpTarget =
+      parsedByAlias.get(targetKey) ||
+      parsedByEndpoint.get(epKey) ||
+      (!spec.explicitPort ? parsedByAddress.get(targetKey) : null) ||
+      null;
+
+    if (jumpTarget && jumpTarget.id !== host.id) {
+      jumpTarget.isJumpHost = true;
+      host.jumpHostId = jumpTarget.id;
+      continue;
+    }
+
+    const existingJump =
+      existingByAlias.get(targetKey) ||
+      existingByEndpoint.get(epKey) ||
+      (!spec.explicitPort ? existingByAddress.get(targetKey) : null) ||
+      null;
+
+    if (existingJump && typeof existingJump.id === 'string' && existingJump.id.trim()) {
+      host.jumpHostId = existingJump.id;
+      referencedExistingJumpHostIds.add(existingJump.id);
+      continue;
+    }
+
+    // Auto-create a Jump Host entry for undeclared ProxyJump references
+    seq += 1;
+    const jumpId = `host_ssh_jump_${slugifyHostId(spec.aliasOrHost)}_${seq}_${randomHex(3)}`;
+    const autoJump = {
+      id: jumpId,
+      name: spec.aliasOrHost,
+      address: spec.aliasOrHost,
+      port: spec.port,
+      protocol: 'ssh',
+      folder: defaultFolder,
+      osLabel: '',
+      domain: '',
+      username: spec.username,
+      password: '',
+      privateKeyPem: '',
+      jumpHostId: null,
+      credentialId: null,
+      isJumpHost: true,
+      isFavorite: false,
+      accentTint: 'gold',
+      updatedAtMs: nowMs,
+      proxyJump: '',
+      identityFile: '',
+      autoCreatedJumpHost: true,
+    };
+
+    autoCreatedJumpHosts.push(autoJump);
+    parsedByAlias.set(targetKey, autoJump);
+    parsedByEndpoint.set(epKey, autoJump);
+    if (!parsedByAddress.has(targetKey)) {
+      parsedByAddress.set(targetKey, autoJump);
+    }
+    host.jumpHostId = autoJump.id;
+  }
+
+  const allHosts = [...autoCreatedJumpHosts, ...parsedHosts];
+  const jumpHosts = allHosts.filter((h) => h.isJumpHost);
+
+  return {
+    hosts: allHosts,
+    jumpHosts,
+    referencedExistingJumpHostIds: Array.from(referencedExistingJumpHostIds),
+    skippedWildcards,
+    duplicatesSkipped,
+    warnings,
+  };
+}
+
+// ============================================================================
+// 7. Vault Security Health & Zero-Secret Posture Audit
+// ============================================================================
+
+function formatAutoLockDuration(seconds, lockOnHidden) {
+  if (lockOnHidden) return 'Immediate';
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return 'Off';
+  if (seconds < 60) return `${Math.trunc(seconds)}s`;
+  const mins = Math.round(seconds / 60);
+  return `${mins}m`;
+}
+
+/**
+ * Computes a real-time 0–100 security health score and actionable posture pills for an
+ * unlocked vault. Strictly NEVER includes any password, private key, TOTP secret, token,
+ * or passphrase material in its return payload.
+ *
+ * @param {Record<string, unknown> | null | undefined} vault
+ * @param {{
+ *   autoLockSeconds?: number,
+ *   lockOnHidden?: boolean,
+ *   syncProvider?: string,
+ *   hasCloudBinding?: boolean,
+ *   lastSyncedAtMs?: number,
+ *   vaultAuthMode?: string,
+ *   useCustomPassphrase?: boolean,
+ * }} [runtimeMeta]
+ */
+export function computeVaultSecurityHealth(vault, runtimeMeta = {}) {
+  const safeVault = isPlainObject(vault) ? vault : {};
+  const safeMeta = isPlainObject(runtimeMeta) ? runtimeMeta : {};
+
+  const hosts = Array.isArray(safeVault.hosts) ? safeVault.hosts.filter(isPlainObject) : [];
+  const credentials = Array.isArray(safeVault.credentials) ? safeVault.credentials.filter(isPlainObject) : [];
+  const totp = Array.isArray(safeVault.totp) ? safeVault.totp.filter(isPlainObject) : [];
+  const jumpHostCount = hosts.filter((h) => Boolean(h.isJumpHost)).length;
+
+  const lockOnHidden = Boolean(safeMeta.lockOnHidden);
+  const autoLockSeconds =
+    typeof safeMeta.autoLockSeconds === 'number' && Number.isFinite(safeMeta.autoLockSeconds)
+      ? Math.max(0, Math.trunc(safeMeta.autoLockSeconds))
+      : 300;
+  const syncProvider = typeof safeMeta.syncProvider === 'string' ? safeMeta.syncProvider : 'googleDrive';
+  const lastSyncedAtMs =
+    typeof safeMeta.lastSyncedAtMs === 'number' && Number.isFinite(safeMeta.lastSyncedAtMs)
+      ? Math.max(0, Math.trunc(safeMeta.lastSyncedAtMs))
+      : 0;
+  const hasCloudBinding = Boolean(safeMeta.hasCloudBinding || lastSyncedAtMs > 0);
+
+  const providerNames = {
+    googleDrive: 'Google Drive',
+    githubGist: 'GitHub Gist',
+    webdav: 'WebDAV',
+  };
+  const providerLabel = providerNames[syncProvider] || 'Cloud Sync';
+
+  const findings = [];
+
+  // 1. Encryption posture (25 pts — always AES-256-GCM zero plaintext)
+  const encryptionScore = 25;
+  const encryptionPill = {
+    id: 'encryption',
+    label: 'AES-256-GCM',
+    detail: 'PBKDF2-HMAC-SHA256 client-side enclave · Zero plaintext storage',
+    tone: 'ok',
+    action: 'sync',
+  };
+
+  // 2. Cloud Sync Binding (20 pts)
+  const totalItems = hosts.length + credentials.length + totp.length;
+  let cloudSyncScore = 20;
+  let cloudSyncPill;
+  if (hasCloudBinding) {
+    cloudSyncPill = {
+      id: 'cloudSync',
+      label: `Sync: ${providerLabel}`,
+      detail: lastSyncedAtMs > 0 ? `Zero-knowledge ciphertext synced via ${providerLabel}.` : `Bound to ${providerLabel} for E2EE sync.`,
+      tone: 'ok',
+      action: 'sync',
+    };
+  } else {
+    cloudSyncScore = totalItems > 0 ? 14 : 18;
+    cloudSyncPill = {
+      id: 'cloudSync',
+      label: 'Sync: Local Only',
+      detail: 'Vault stays sealed on this device only. Bind Google Drive or export a .jvault backup.',
+      tone: totalItems > 0 ? 'info' : 'ok',
+      action: 'sync',
+    };
+    if (totalItems > 0) {
+      findings.push({
+        id: 'cloud-local-only',
+        severity: 'info',
+        title: 'Local-only vault without cloud backup',
+        detail: 'Connect Google Drive AppData sync or export an encrypted .jvault archive to avoid device loss.',
+        action: 'sync',
+      });
+    }
+  }
+
+  // 3. Auto-Lock Posture (25 pts)
+  const autoLockDisplay = formatAutoLockDuration(autoLockSeconds, lockOnHidden);
+  let autoLockScore = 25;
+  let autoLockPill;
+  if (lockOnHidden || (autoLockSeconds > 0 && autoLockSeconds <= 300)) {
+    autoLockScore = 25;
+    autoLockPill = {
+      id: 'autoLock',
+      label: `Auto-Lock: ${autoLockDisplay}`,
+      detail: lockOnHidden
+        ? 'Locks immediately and zeroes RAM whenever the browser tab is hidden.'
+        : `Automatically locks and zeroes RAM after ${autoLockDisplay} of inactivity.`,
+      tone: 'ok',
+      action: 'autolock',
+    };
+  } else if (autoLockSeconds > 300 && autoLockSeconds <= 900) {
+    autoLockScore = 22;
+    autoLockPill = {
+      id: 'autoLock',
+      label: `Auto-Lock: ${autoLockDisplay}`,
+      detail: `Locks after ${autoLockDisplay} idle. Consider 1m–5m on shared workstations.`,
+      tone: 'ok',
+      action: 'autolock',
+    };
+  } else if (autoLockSeconds > 900) {
+    autoLockScore = 15;
+    autoLockPill = {
+      id: 'autoLock',
+      label: `Auto-Lock: ${autoLockDisplay}`,
+      detail: 'Long idle lock timeout leaves decrypted secrets in RAM longer.',
+      tone: 'warn',
+      action: 'autolock',
+    };
+    findings.push({
+      id: 'autolock-long',
+      severity: 'warn',
+      title: `Long auto-lock timeout (${autoLockDisplay})`,
+      detail: 'Lower Auto-Lock to 5m or Immediate in the sidebar footer.',
+      action: 'autolock',
+    });
+  } else {
+    autoLockScore = 5;
+    autoLockPill = {
+      id: 'autoLock',
+      label: 'Auto-Lock: Off',
+      detail: 'Idle auto-lock is disabled. Enable 1m–15m or Immediate lock to protect unlocked sessions.',
+      tone: 'warn',
+      action: 'autolock',
+    };
+    findings.push({
+      id: 'autolock-off',
+      severity: 'warn',
+      title: 'Auto-Lock is turned Off',
+      detail: 'Enable an idle timeout (Immediate, 1m, 5m, or 15m) so secrets clear from RAM automatically.',
+      action: 'autolock',
+    });
+  }
+
+  // 4. 2FA Coverage (15 pts)
+  let totpScore = 15;
+  let totpPill;
+  if (totp.length > 0) {
+    totpPill = {
+      id: 'totp',
+      label: `2FA: ${totp.length} ${totp.length === 1 ? 'Token' : 'Tokens'}`,
+      detail: 'RFC 6238 WebCrypto authenticator active with 1-click Auto-Type.',
+      tone: 'ok',
+      action: 'totp',
+    };
+  } else if (hosts.length > 0) {
+    totpScore = 7;
+    totpPill = {
+      id: 'totp',
+      label: '2FA: None',
+      detail: 'Add RFC 6238 authenticator accounts for hardware-free 1-click Gateway Auto-Type.',
+      tone: 'warn',
+      action: 'totp',
+    };
+    findings.push({
+      id: 'totp-missing',
+      severity: 'info',
+      title: 'No 2FA authenticator tokens configured',
+      detail: 'Store TOTP accounts in JalaDesk to copy codes from Command Palette or auto-type into remote sessions.',
+      action: 'totp',
+    });
+  } else {
+    totpPill = {
+      id: 'totp',
+      label: '2FA: Ready',
+      detail: 'RFC 6238 SHA1/SHA256/SHA512 WebCrypto authenticator ready.',
+      tone: 'info',
+      action: 'totp',
+    };
+  }
+
+  // 5. Credential Hygiene (15 pts; NEVER leaks secret values)
+  const credById = new Map();
+  for (const cred of credentials) {
+    if (typeof cred.id === 'string' && cred.id) {
+      credById.set(cred.id, cred);
+    }
+  }
+
+  let emptyUsernameCount = 0;
+  let weakPasswordCount = 0;
+  let inlinePasswordCount = 0;
+  const passwordUsageCounts = new Map();
+
+  for (const cred of credentials) {
+    const user = typeof cred.username === 'string' ? cred.username.trim() : '';
+    const pass = typeof cred.password === 'string' ? cred.password : '';
+    const pem = typeof cred.privateKeyPem === 'string' ? cred.privateKeyPem.trim() : '';
+    if (!user) {
+      emptyUsernameCount += 1;
+    }
+    if (pass.length > 0) {
+      if (pass.length < 8 && !pem) {
+        weakPasswordCount += 1;
+      }
+      passwordUsageCounts.set(pass, (passwordUsageCounts.get(pass) ?? 0) + 1);
+    }
+  }
+
+  for (const host of hosts) {
+    const inlinePass = typeof host.password === 'string' ? host.password : '';
+    const linked = typeof host.credentialId === 'string' ? credById.get(host.credentialId) : null;
+    const effectiveUser = String(host.username || (linked && linked.username) || '').trim();
+    if (inlinePass.length > 0) {
+      inlinePasswordCount += 1;
+      if (!effectiveUser) {
+        emptyUsernameCount += 1;
+      }
+      if (inlinePass.length < 8) {
+        weakPasswordCount += 1;
+      }
+      passwordUsageCounts.set(inlinePass, (passwordUsageCounts.get(inlinePass) ?? 0) + 1);
+    }
+  }
+
+  let duplicatePasswordCount = 0;
+  for (const count of passwordUsageCounts.values()) {
+    if (count > 1) {
+      duplicatePasswordCount += count - 1;
+    }
+  }
+  passwordUsageCounts.clear();
+
+  let hygienePenalty = 0;
+  if (duplicatePasswordCount > 0) {
+    hygienePenalty += Math.min(18, 10 + (duplicatePasswordCount - 1) * 4);
+    findings.push({
+      id: 'hygiene-duplicate',
+      severity: 'danger',
+      title: `${duplicatePasswordCount} reused password ${duplicatePasswordCount === 1 ? 'entry' : 'entries'} detected`,
+      detail: 'Rotate shared passwords or consolidate into scoped credentials to contain blast radius.',
+      action: 'credentials',
+    });
+  }
+  if (weakPasswordCount > 0) {
+    hygienePenalty += Math.min(10, 6 + (weakPasswordCount - 1) * 2);
+    findings.push({
+      id: 'hygiene-weak',
+      severity: 'warn',
+      title: `${weakPasswordCount} short password ${weakPasswordCount === 1 ? 'value' : 'values'} (< 8 chars)`,
+      detail: 'Strengthen short secrets or switch SSH hosts to public-key authentication.',
+      action: 'credentials',
+    });
+  }
+  if (emptyUsernameCount > 0) {
+    hygienePenalty += Math.min(8, 4 + (emptyUsernameCount - 1) * 2);
+    findings.push({
+      id: 'hygiene-empty-user',
+      severity: 'warn',
+      title: `${emptyUsernameCount} ${emptyUsernameCount === 1 ? 'entry is' : 'entries are'} missing a username`,
+      detail: 'Add explicit usernames on saved credentials and password-authenticated hosts for 1-click launch.',
+      action: 'credentials',
+    });
+  }
+
+  const hygieneScore = Math.max(0, 15 - hygienePenalty);
+  const extraHygieneDeduction = Math.max(0, hygienePenalty - 15);
+  const totalIssues = duplicatePasswordCount + weakPasswordCount + emptyUsernameCount;
+  const hygienePill =
+    totalIssues === 0
+      ? {
+          id: 'hygiene',
+          label: 'Hygiene: Clean',
+          detail:
+            credentials.length > 0 || inlinePasswordCount > 0
+              ? 'No duplicate passwords, short secrets, or missing usernames detected.'
+              : 'Ready to audit saved credentials and hosts.',
+          tone: 'ok',
+          action: 'credentials',
+        }
+      : {
+          id: 'hygiene',
+          label:
+            duplicatePasswordCount > 0
+              ? `Hygiene: ${duplicatePasswordCount} Reused`
+              : weakPasswordCount > 0
+                ? `Hygiene: ${weakPasswordCount} Weak`
+                : `Hygiene: ${emptyUsernameCount} No User`,
+          detail: `${duplicatePasswordCount} reused · ${weakPasswordCount} short · ${emptyUsernameCount} missing username.`,
+          tone: duplicatePasswordCount > 0 ? 'danger' : 'warn',
+          action: 'credentials',
+        };
+
+  const rawScore = encryptionScore + cloudSyncScore + autoLockScore + totpScore + hygieneScore - extraHygieneDeduction;
+  const score = Math.max(0, Math.min(100, Math.round(rawScore)));
+  const tier = score >= 85 ? 'strong' : score >= 65 ? 'good' : 'attention';
+  const tone = tier === 'strong' ? 'ok' : tier === 'good' ? 'warn' : 'danger';
+  const gradeLabel = tier === 'strong' ? 'Hardened' : tier === 'good' ? 'Review' : 'Action Needed';
+
+  return {
+    score,
+    tier,
+    tone,
+    gradeLabel,
+    pills: [encryptionPill, cloudSyncPill, autoLockPill, totpPill, hygienePill],
+    findings,
+    metrics: {
+      hostCount: hosts.length,
+      jumpHostCount,
+      credentialCount: credentials.length,
+      totpCount: totp.length,
+      emptyUsernameCount,
+      duplicatePasswordCount,
+      weakPasswordCount,
+      inlinePasswordCount,
+    },
+  };
+}

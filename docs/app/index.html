@@ -454,6 +454,22 @@
           </select>
         </div>
 
+        <button class="rail-action-btn rail-shortcuts-btn" id="sidebar-shortcuts-btn" type="button">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="4" width="20" height="16" rx="2"></rect>
+            <path d="M6 8h.01"></path>
+            <path d="M10 8h.01"></path>
+            <path d="M14 8h.01"></path>
+            <path d="M18 8h.01"></path>
+            <path d="M8 12h.01"></path>
+            <path d="M12 12h.01"></path>
+            <path d="M16 12h.01"></path>
+            <path d="M7 16h10"></path>
+          </svg>
+          <span class="rail-action-label">Shortcuts</span>
+          <kbd class="kbd-chip mono" aria-hidden="true">?</kbd>
+        </button>
+
         <button class="rail-action-btn rail-lock-btn" id="btn-lock-vault" type="button">
           <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="3" y="11" width="18" height="11" rx="2"></rect>
@@ -492,6 +508,14 @@
         </div>
 
         <div class="topbar-actions">
+          <button class="btn btn-secondary btn-sm cmdk-trigger-btn" id="topbar-cmdk-btn" type="button" aria-label="Open Command Palette (Command K)">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"></path>
+            </svg>
+            <span class="cmdk-trigger-label">Command</span>
+            <kbd class="kbd-chip mono" aria-hidden="true">⌘K</kbd>
+          </button>
+
           <div class="security-pill" id="vault-security-pill" role="status" aria-live="polite">
             <span class="status-dot status-dot-ok" id="vault-security-pill-dot" aria-hidden="true"></span>
             <span id="vault-security-pill-text">AES-256-GCM &middot; Local-Only</span>
@@ -535,11 +559,40 @@
               <p class="view-summary" id="connections-summary">0 hosts &middot; 0 jump gateways</p>
             </div>
             <div class="view-head-actions">
+              <button class="btn btn-secondary btn-sm" id="btn-import-ssh-config" type="button">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                <span>Import SSH Config</span>
+              </button>
               <button class="btn btn-secondary btn-sm" id="btn-add-bastion-quick" type="button">
                 <span>Add Jump Host</span>
               </button>
             </div>
           </div>
+
+          <section id="vault-health-strip" class="vault-health-strip" aria-label="Vault security health and posture">
+            <div class="vault-health-bar">
+              <div class="vault-health-lead">
+                <span class="vault-health-shield" id="vault-health-shield" aria-hidden="true">
+                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path>
+                  </svg>
+                </span>
+                <div class="vault-health-score-wrap">
+                  <span class="vault-health-score mono" id="vault-health-score">100/100</span>
+                  <span class="status-pill status-pill-ok" id="vault-health-grade">Hardened</span>
+                </div>
+              </div>
+              <div class="vault-health-pills" id="vault-health-pills" role="list" aria-label="Security posture indicators"></div>
+              <button class="btn btn-ghost btn-sm vault-health-toggle" id="btn-vault-health-details" type="button" aria-expanded="false" aria-controls="vault-health-findings">
+                <span id="btn-vault-health-details-label">Audit</span>
+              </button>
+            </div>
+            <div class="vault-health-findings" id="vault-health-findings" hidden></div>
+          </section>
 
           <div class="filter-bar" id="folder-filter-bar" role="tablist" aria-label="Filter connections by folder"></div>
 
@@ -556,6 +609,7 @@
             <p class="empty-copy">Add your RDP workstations, VNC hosts, SSH bastions, SFTP servers, or hypervisors. Everything encrypts locally before touching storage.</p>
             <div class="empty-actions">
               <button class="btn btn-primary" id="btn-empty-add-host" type="button">Add Connection</button>
+              <button class="btn btn-secondary" id="btn-empty-import-ssh" type="button">Import SSH Config</button>
               <button class="btn btn-secondary" id="btn-empty-go-sync" type="button">Import .jvault Backup</button>
             </div>
           </div>
@@ -633,6 +687,23 @@
               <p class="view-summary" id="sync-summary">Envelope format: jaladesk-encrypted-vault-v1 (syncSchema 2)</p>
             </div>
           </div>
+
+          <section id="sync-vault-health-strip" class="vault-health-strip vault-health-strip-compact" aria-label="Sync and enclave security summary">
+            <div class="vault-health-bar">
+              <div class="vault-health-lead">
+                <span class="vault-health-shield" id="sync-health-shield" aria-hidden="true">
+                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path>
+                  </svg>
+                </span>
+                <div class="vault-health-score-wrap">
+                  <span class="vault-health-score mono" id="sync-health-score">100/100</span>
+                  <span class="status-pill status-pill-ok" id="sync-health-grade">Hardened</span>
+                </div>
+              </div>
+              <div class="vault-health-pills" id="sync-health-pills" role="list" aria-label="Security posture indicators"></div>
+            </div>
+          </section>
 
           <div class="studio-two-col">
             <!-- Cloud Sync Panel -->
@@ -880,13 +951,16 @@
               <p class="view-summary">Self-hosted browser bridge for live RDP, VNC, SSH &amp; SFTP sessions over JSR1 binary WebSocket.</p>
             </div>
             <div class="gateway-head-actions">
-              <button class="btn btn-secondary btn-sm" id="btn-gateway-toggle-setup" type="button" hidden>Show Setup &amp; Docker</button>
+              <button class="btn btn-secondary btn-sm" id="btn-gateway-toggle-setup" type="button" hidden>Show Setup &amp; Deploy</button>
               <div class="gateway-state-pill mono" id="gateway-state-pill">
                 <span class="status-dot status-dot-idle" id="gateway-state-dot" aria-hidden="true"></span>
                 <span id="gateway-state-text">DISCONNECTED</span>
               </div>
             </div>
           </div>
+
+          <!-- Multi-Session Tab Bar -->
+          <div id="gateway-session-tabs" class="gateway-session-tabs" role="tablist" aria-label="Open Web Gateway sessions" hidden></div>
 
           <!-- Live Interactive Session Stage -->
           <div id="gateway-live-stage" class="gateway-live-stage" hidden>
@@ -1185,24 +1259,30 @@
               </div>
             </div>
 
-            <!-- Self-Hosted Docker Quickstart -->
+            <!-- 4-Tab Cloud Deploy Wizard -->
             <div class="studio-panel">
               <div class="panel-head">
-                <h2>Self-Hosted Docker Gateway</h2>
+                <h2>Deploy Self-Hosted Gateway</h2>
                 <p class="panel-desc">Deploy your own zero-trust JSR1 protocol bridge in seconds. Browsers authenticate via 60s single-use WebSocket tickets while raw RDP, VNC, SSH, and SFTP stay inside your private network.</p>
               </div>
 
-              <div class="segmented-control" role="tablist" aria-label="Docker quickstart format" id="docker-quickstart-tabs">
-                <button class="seg-btn is-active" type="button" role="tab" aria-selected="true" data-docker-tab="run">docker run</button>
-                <button class="seg-btn" type="button" role="tab" aria-selected="false" data-docker-tab="compose">docker compose</button>
+              <div class="segmented-control deploy-tabs" role="tablist" aria-label="Gateway deployment target" id="gateway-deploy-tabs">
+                <button class="seg-btn is-active" type="button" role="tab" aria-selected="true" data-deploy-tab="desktop">Desktop Bridge</button>
+                <button class="seg-btn" type="button" role="tab" aria-selected="false" data-deploy-tab="caddy">Docker + Caddy</button>
+                <button class="seg-btn" type="button" role="tab" aria-selected="false" data-deploy-tab="cloudflare">Cloudflare Tunnel</button>
+                <button class="seg-btn" type="button" role="tab" aria-selected="false" data-deploy-tab="cloud">Fly.io / Railway</button>
               </div>
 
+              <p class="deploy-tab-hint" id="gateway-deploy-hint">1-click inside JalaDesk.app &rarr; Web Bridge, or start a local loopback bridge on 127.0.0.1:8443.</p>
+
               <div class="code-well">
-                <pre class="code-block mono" id="docker-snippet-code">docker run --rm -p 127.0.0.1:8443:8443 \
-  -e JALADESK_GATEWAY_CORS_ORIGINS=https://ribato22.github.io \
-  -e JALADESK_GATEWAY_DEMO=1 \
-  ghcr.io/ribato22/jaladesk-gateway:1.17.0</pre>
-                <button class="btn btn-secondary btn-sm code-copy-btn" id="btn-copy-docker" type="button">Copy Snippet</button>
+                <pre class="code-block mono" id="gateway-deploy-code"># 1-Click in JalaDesk Desktop:
+# Open JalaDesk.app -> Toggle "Web Bridge" ON -> Click "Open Web App"
+# Endpoint: http://127.0.0.1:8443 (auto-pairs via RAM-only #token)
+
+# Or run from CLI:
+npm run gateway -- --host 127.0.0.1 --port 8443</pre>
+                <button class="btn btn-secondary btn-sm code-copy-btn" id="btn-copy-deploy-snippet" type="button">Copy Snippet</button>
               </div>
 
               <div class="capability-list" aria-label="Gateway protocol capabilities">
@@ -1574,6 +1654,152 @@
       <footer class="modal-footer">
         <button class="btn btn-ghost" id="btn-confirm-delete-cancel" type="button" data-modal-close>Cancel</button>
         <button class="btn btn-danger" id="btn-confirm-delete-submit" type="button">Delete</button>
+      </footer>
+    </div>
+
+    <!-- Modal 5: Global Command Palette (⌘K / Ctrl+K) -->
+    <div id="modal-command-palette" class="modal-dialog modal-dialog-cmdk" role="dialog" aria-modal="true" aria-labelledby="cmdk-dialog-title" hidden>
+      <h2 id="cmdk-dialog-title" class="sr-only">Command Palette</h2>
+      <div class="cmdk-search-bar">
+        <svg class="icon-sm cmdk-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="8"></circle>
+          <path d="m21 21-4.3-4.3"></path>
+        </svg>
+        <input
+          id="cmdk-input"
+          class="cmdk-input"
+          type="search"
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="cmdk-listbox"
+          aria-autocomplete="list"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Search hosts, jump bastions, 2FA tokens, or workspace actions..."
+        >
+        <kbd class="kbd-chip mono" aria-hidden="true">Esc</kbd>
+      </div>
+      <div id="cmdk-listbox" class="cmdk-listbox" role="listbox" aria-label="Command palette results"></div>
+      <footer class="cmdk-footer">
+        <div class="cmdk-footer-hints">
+          <span class="cmdk-footer-hint"><kbd class="kbd-chip mono">&uarr;&darr;</kbd> Navigate</span>
+          <span class="cmdk-footer-hint"><kbd class="kbd-chip mono">&crarr;</kbd> Run</span>
+          <span class="cmdk-footer-hint"><kbd class="kbd-chip mono">Esc</kbd> Close</span>
+        </div>
+        <span class="cmdk-footer-count mono" id="cmdk-result-count">0 items</span>
+      </footer>
+    </div>
+
+    <!-- Modal 6: OpenSSH ~/.ssh/config Importer -->
+    <div id="modal-ssh-import" class="modal-dialog modal-dialog-wide" role="dialog" aria-modal="true" aria-labelledby="modal-ssh-import-title" hidden>
+      <div class="modal-header">
+        <h2 id="modal-ssh-import-title">Import OpenSSH Config</h2>
+        <button class="modal-close-btn" type="button" data-modal-close aria-label="Close modal">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <form id="form-ssh-import" class="modal-form" novalidate>
+        <div class="modal-body">
+          <p class="panel-desc">Parse your <code class="mono">~/.ssh/config</code> strictly inside this browser. Wildcard blocks are skipped safely and <code class="mono">ProxyJump</code> bastions are auto-linked.</p>
+
+          <div class="dropzone dropzone-compact" id="ssh-import-dropzone" tabindex="0" role="button" aria-label="Select or drop OpenSSH config file">
+            <input id="ssh-import-file" class="sr-only" type="file" accept=".conf,.config,.txt,text/plain,*/*">
+            <span class="dropzone-title" id="ssh-import-dropzone-label">Drop ~/.ssh/config here or click to select file</span>
+            <span class="dropzone-meta" id="ssh-import-dropzone-meta">Client-side only &middot; zero plaintext upload</span>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="ssh-import-textarea">Or Paste OpenSSH Config</label>
+            <textarea
+              id="ssh-import-textarea"
+              class="text-input text-area mono"
+              rows="6"
+              spellcheck="false"
+              placeholder="Host bastion&#10;  HostName 203.0.113.10&#10;  User ops&#10;&#10;Host prod-api&#10;  HostName 10.24.0.15&#10;  Port 2222&#10;  User deploy&#10;  ProxyJump bastion"
+            ></textarea>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="ssh-import-folder">Assign Folder (Optional)</label>
+            <input id="ssh-import-folder" class="text-input" type="text" placeholder="SSH Import">
+          </div>
+
+          <div id="ssh-import-preview-box" class="ssh-import-preview-box" hidden>
+            <div class="ssh-import-preview-head">
+              <strong class="ssh-import-preview-title">Detected Hosts Preview</strong>
+              <span id="ssh-import-preview-summary" class="ssh-import-preview-summary mono"></span>
+            </div>
+            <div id="ssh-import-preview-list" class="ssh-import-preview-list" aria-live="polite"></div>
+          </div>
+
+          <div id="ssh-import-warnings" class="inline-alert inline-alert-warn" role="status" hidden></div>
+          <div id="modal-ssh-import-error" class="inline-alert inline-alert-danger" role="alert" hidden></div>
+        </div>
+
+        <footer class="modal-footer">
+          <button class="btn btn-ghost" type="button" data-modal-close>Cancel</button>
+          <button class="btn btn-primary" id="btn-ssh-import-confirm" type="submit" disabled>Import Hosts</button>
+        </footer>
+      </form>
+    </div>
+
+    <!-- Modal 7: Keyboard Shortcuts Cheat Sheet (?) -->
+    <div id="modal-shortcuts" class="modal-dialog modal-dialog-wide" role="dialog" aria-modal="true" aria-labelledby="modal-shortcuts-title" hidden>
+      <div class="modal-header">
+        <h2 id="modal-shortcuts-title">Keyboard Shortcuts</h2>
+        <button class="modal-close-btn" type="button" data-modal-close aria-label="Close modal">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <p class="panel-desc">Workspace hotkeys pause automatically while typing inside form inputs or active SSH / RDP sessions.</p>
+
+        <div class="shortcuts-grid">
+          <div class="shortcut-row">
+            <span class="shortcut-desc">Open Command Palette</span>
+            <span class="shortcut-keys"><kbd class="kbd-chip mono">⌘K</kbd><span class="shortcut-sep">/</span><kbd class="kbd-chip mono">Ctrl+K</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-desc">Focus Workspace Search</span>
+            <span class="shortcut-keys"><kbd class="kbd-chip mono">/</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-desc">New Connection</span>
+            <span class="shortcut-keys"><kbd class="kbd-chip mono">N</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-desc">Open Web Gateway</span>
+            <span class="shortcut-keys"><kbd class="kbd-chip mono">G</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-desc">Sync Cloud Now</span>
+            <span class="shortcut-keys"><kbd class="kbd-chip mono">S</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-desc">Lock Vault &amp; Wipe RAM</span>
+            <span class="shortcut-keys"><kbd class="kbd-chip mono">L</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-desc">Keyboard Shortcuts</span>
+            <span class="shortcut-keys"><kbd class="kbd-chip mono">?</kbd></span>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-desc">Close Active Modal</span>
+            <span class="shortcut-keys"><kbd class="kbd-chip mono">Esc</kbd></span>
+          </div>
+        </div>
+      </div>
+
+      <footer class="modal-footer">
+        <button class="btn btn-primary" type="button" data-modal-close>Done</button>
       </footer>
     </div>
   </div>

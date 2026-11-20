@@ -1120,6 +1120,7 @@ body {
 
 .view-head-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
 }
@@ -3090,6 +3091,654 @@ body {
 }
 
 /* ==========================================================================
+   Pro Studio Enhancements: ⌘K Palette, Health Strip, Multi-Session Tabs,
+   SSH Config Importer, 4-Tab Deploy Wizard & Shortcuts Modal
+   ========================================================================== */
+
+.kbd-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.625rem;
+  padding: 0.0625rem 0.4375rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-studio);
+  background-color: var(--surface-input);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.rail-action-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+}
+
+.rail-shortcuts-btn .kbd-chip {
+  margin-left: auto;
+}
+
+.cmdk-trigger-btn {
+  gap: 0.4375rem;
+  padding-inline: 0.6875rem;
+}
+
+.cmdk-trigger-btn .kbd-chip {
+  border-color: var(--hairline-strong);
+  background-color: var(--bg-recessed);
+  color: var(--accent-gold);
+}
+
+/* Vault Security Health & Posture Strip */
+.vault-health-strip {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-studio);
+  background-color: var(--surface-card);
+  box-shadow: var(--specular-top);
+  overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.vault-health-strip.is-warn {
+  border-color: rgba(251, 191, 36, 0.36);
+}
+
+.vault-health-strip.is-danger {
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.vault-health-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  padding: 0.75rem 1rem;
+  min-width: 0;
+}
+
+.vault-health-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.625rem;
+  flex-shrink: 0;
+}
+
+.vault-health-shield {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.125rem;
+  height: 2.125rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid rgba(52, 211, 153, 0.38);
+  background-color: var(--status-ok-soft);
+  color: var(--status-ok);
+  flex-shrink: 0;
+}
+
+.vault-health-shield.is-warn {
+  border-color: rgba(251, 191, 36, 0.44);
+  background-color: var(--status-warn-soft);
+  color: var(--status-warn);
+}
+
+.vault-health-shield.is-danger {
+  border-color: rgba(248, 113, 113, 0.44);
+  background-color: var(--status-danger-soft);
+  color: var(--status-danger);
+}
+
+.vault-health-score-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vault-health-score {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.status-pill-danger {
+  background-color: var(--status-danger-soft);
+  border-color: rgba(248, 113, 113, 0.44);
+  color: #FECACA;
+}
+
+.vault-health-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4375rem;
+  flex: 1 1 20rem;
+  min-width: 0;
+}
+
+.health-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4375rem;
+  min-height: 2rem;
+  padding: 0.25rem 0.6875rem;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background-color: var(--bg-recessed);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+  max-width: 100%;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.health-pill-btn:hover {
+  border-color: var(--hairline-strong);
+  background-color: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.health-pill-btn.is-ok {
+  border-color: rgba(52, 211, 153, 0.3);
+}
+
+.health-pill-btn.is-info {
+  border-color: rgba(56, 189, 248, 0.34);
+  color: #E0F2FE;
+}
+
+.health-pill-btn.is-warn {
+  border-color: rgba(251, 191, 36, 0.44);
+  background-color: rgba(251, 191, 36, 0.1);
+  color: #FEF3C7;
+}
+
+.health-pill-btn.is-danger {
+  border-color: rgba(248, 113, 113, 0.46);
+  background-color: var(--status-danger-soft);
+  color: #FECACA;
+}
+
+.vault-health-toggle {
+  flex-shrink: 0;
+}
+
+.vault-health-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.875rem 1rem;
+  border-top: 1px solid var(--hairline);
+  background-color: var(--bg-recessed);
+}
+
+.health-finding-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  padding: 0.625rem 0.75rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--hairline);
+  background-color: var(--surface-card);
+}
+
+.health-finding-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+  flex: 1 1 16rem;
+}
+
+.health-finding-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.health-finding-detail {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.health-finding-clean {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--status-ok);
+  font-weight: 500;
+}
+
+/* Gateway Multi-Session Tab Bar & 4-Tab Cloud Deploy Wizard */
+.gateway-session-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-studio);
+  background-color: var(--bg-recessed);
+  overflow-x: auto;
+  max-width: 100%;
+  scrollbar-width: thin;
+}
+
+.session-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--hairline);
+  background-color: var(--surface-card);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  max-width: 19rem;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.session-tab:hover {
+  border-color: var(--hairline-strong);
+  color: var(--text-primary);
+}
+
+.session-tab.is-active {
+  background-color: var(--surface-raised);
+  border-color: var(--accent-cyan);
+  color: var(--text-primary);
+  box-shadow: var(--specular-top);
+}
+
+.session-tab-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4375rem;
+  min-height: 2.25rem;
+  padding: 0.25rem 0.5rem 0.25rem 0.625rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.session-tab-proto {
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.session-tab-proto.proto-rdp {
+  color: var(--proto-rdp);
+}
+
+.session-tab-proto.proto-vnc {
+  color: var(--proto-vnc);
+}
+
+.session-tab-proto.proto-ssh {
+  color: var(--proto-ssh);
+}
+
+.session-tab-proto.proto-sftp {
+  color: var(--proto-sftp);
+}
+
+.session-tab-proto.proto-hypervisor {
+  color: var(--proto-hypervisor);
+}
+
+.session-tab-proto.proto-demo {
+  color: var(--accent-gold);
+}
+
+.session-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 11rem;
+}
+
+.session-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  margin-right: 0.25rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.session-tab-close:hover {
+  background-color: var(--status-danger-soft);
+  color: var(--status-danger);
+}
+
+.deploy-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: visible;
+}
+
+.deploy-tabs .seg-btn {
+  padding-inline: 0.5625rem;
+  white-space: normal;
+  text-align: center;
+}
+
+.deploy-tab-hint {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+/* Global Command Palette Modal (#modal-command-palette) */
+.modal-dialog-cmdk {
+  max-width: 640px;
+  align-self: flex-start;
+  margin-top: min(10vh, 5.5rem);
+}
+
+.modal-dialog-wide {
+  max-width: 640px;
+}
+
+.cmdk-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.875rem 1.125rem;
+  border-bottom: 1px solid var(--hairline);
+  background-color: var(--bg-recessed);
+}
+
+.cmdk-search-icon {
+  color: var(--accent-cyan);
+  flex-shrink: 0;
+}
+
+.cmdk-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.4;
+  outline: none;
+}
+
+.cmdk-input::placeholder {
+  color: var(--text-muted);
+}
+
+.cmdk-listbox {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.625rem;
+  max-height: min(56vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.cmdk-group-label {
+  padding: 0.5rem 0.625rem 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.cmdk-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.cmdk-option:hover,
+.cmdk-option.is-active {
+  background-color: var(--surface-raised);
+  border-color: var(--border-studio);
+}
+
+.cmdk-option.is-active {
+  border-color: var(--accent-cyan);
+  box-shadow: var(--specular-top);
+}
+
+.cmdk-option-main {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.cmdk-option-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.0625rem;
+  min-width: 0;
+}
+
+.cmdk-option-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmdk-option-sub {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmdk-option-action {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--accent-gold);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cmdk-empty {
+  margin: 0;
+  padding: 1.75rem 1rem;
+  text-align: center;
+  font-size: 0.9375rem;
+  color: var(--text-muted);
+}
+
+.cmdk-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  padding: 0.6875rem 1.125rem;
+  border-top: 1px solid var(--hairline);
+  background-color: var(--bg-recessed);
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.cmdk-footer-hints {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.875rem;
+}
+
+.cmdk-footer-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.cmdk-footer-count {
+  color: var(--text-secondary);
+}
+
+/* OpenSSH ~/.ssh/config Importer Modal */
+.dropzone-compact {
+  padding: 1rem;
+}
+
+.ssh-import-preview-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.875rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-studio);
+  background-color: var(--bg-recessed);
+}
+
+.ssh-import-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.ssh-import-preview-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ssh-import-preview-summary {
+  font-size: 0.875rem;
+  color: var(--accent-cyan);
+}
+
+.ssh-import-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  max-height: 13rem;
+  overflow-y: auto;
+}
+
+.ssh-preview-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6875rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--hairline);
+  background-color: var(--surface-card);
+}
+
+.ssh-preview-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.ssh-preview-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ssh-preview-endpoint {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.ssh-preview-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+/* Keyboard Shortcuts Cheat Sheet Modal */
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.625rem;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 0.875rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  background-color: var(--bg-recessed);
+  min-width: 0;
+}
+
+.shortcut-desc {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.shortcut-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+
+.shortcut-sep {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+/* ==========================================================================
    Mobile Bottom Bar & Responsive Breakpoints (< 1024px & < 768px)
    ========================================================================== */
 
@@ -3124,6 +3773,44 @@ body {
 
   .kbd-hint {
     display: none;
+  }
+
+  .cmdk-trigger-label,
+  .cmdk-trigger-btn svg {
+    display: none;
+  }
+
+  .cmdk-trigger-btn {
+    padding-inline: 0.4375rem;
+  }
+
+  .topbar-actions {
+    gap: 0.375rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .topbar-actions .btn {
+    min-width: 0;
+    padding-inline: 0.625rem;
+    gap: 0.375rem;
+  }
+
+  .topbar-actions .btn-primary {
+    overflow: hidden;
+  }
+
+  #btn-primary-add-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .shortcuts-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .modal-dialog-cmdk {
+    margin-top: 1rem;
   }
 
   .mobile-lock-btn {
@@ -3240,11 +3927,13 @@ body {
 
   .topbar-actions {
     width: 100%;
+    flex-wrap: wrap;
     justify-content: space-between;
   }
 
   .topbar-actions #btn-primary-add {
-    flex: 1 1 auto;
+    flex: 1 1 0;
+    min-width: 0;
   }
 
   .input-with-btn-row {
