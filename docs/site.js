@@ -236,6 +236,13 @@
     if (!sections.length) return;
 
     var currentActiveId = "";
+    var cachedTops = new Array(sections.length);
+    var cachedMaxScroll = 0;
+    var cachedActivationOffset = 148;
+    var ticking = false;
+    var resizeTimer = 0;
+    var clickLockId = "";
+    var clickLockUntil = 0;
 
     function setActive(activeId) {
       if (!activeId || activeId === currentActiveId) return;
@@ -252,10 +259,81 @@
       }
     }
 
+    function computeActiveSectionId() {
+      var scrollY = window.scrollY || window.pageYOffset || 0;
+      if (scrollY <= 8) {
+        return sections[0].id;
+      }
+      if (cachedMaxScroll > 40 && scrollY >= cachedMaxScroll - 24) {
+        return sections[sections.length - 1].id;
+      }
+      var probeY = scrollY + cachedActivationOffset;
+      var activeId = sections[0].id;
+      for (var i = 0; i < sections.length; i += 1) {
+        if (cachedTops[i] <= probeY) {
+          activeId = sections[i].id;
+        } else {
+          break;
+        }
+      }
+      return activeId;
+    }
+
+    function applyScrollSpy() {
+      ticking = false;
+      if (clickLockId && Date.now() < clickLockUntil) {
+        setActive(clickLockId);
+        return;
+      }
+      clickLockId = "";
+      setActive(computeActiveSectionId());
+    }
+
+    function scheduleScrollSpy() {
+      if (!ticking) {
+        ticking = true;
+        window.requestAnimationFrame(applyScrollSpy);
+      }
+    }
+
+    function measureSections() {
+      var scrollY = window.scrollY || window.pageYOffset || 0;
+      var root = document.documentElement;
+      var docHeight = Math.max(
+        root ? root.scrollHeight : 0,
+        document.body ? document.body.scrollHeight : 0
+      );
+      var viewportHeight = window.innerHeight || (root ? root.clientHeight : 0) || 900;
+      cachedMaxScroll = Math.max(0, docHeight - viewportHeight);
+      cachedActivationOffset = Math.min(180, Math.max(112, Math.round(viewportHeight * 0.2)));
+
+      for (var i = 0; i < sections.length; i += 1) {
+        cachedTops[i] = sections[i].section.getBoundingClientRect().top + scrollY;
+      }
+      scheduleScrollSpy();
+    }
+
+    function scheduleMeasure() {
+      if (resizeTimer) {
+        window.clearTimeout(resizeTimer);
+      }
+      resizeTimer = window.setTimeout(function () {
+        resizeTimer = 0;
+        measureSections();
+      }, 100);
+    }
+
+    function clearClickLock() {
+      clickLockId = "";
+      clickLockUntil = 0;
+    }
+
     links.forEach(function (link) {
       link.addEventListener("click", function () {
         var id = link.getAttribute("href").slice(1);
         if (id && Object.prototype.hasOwnProperty.call(indexById, id)) {
+          clickLockId = id;
+          clickLockUntil = Date.now() + 650;
           setActive(id);
         }
       });
@@ -263,84 +341,31 @@
 
     var initialHash = window.location.hash ? window.location.hash.slice(1) : "";
     if (initialHash && Object.prototype.hasOwnProperty.call(indexById, initialHash)) {
+      clickLockId = initialHash;
+      clickLockUntil = Date.now() + 450;
       setActive(initialHash);
     } else {
       setActive(sections[0].id);
     }
 
-    if (typeof window.IntersectionObserver !== "function") {
-      return;
+    window.addEventListener("scroll", scheduleScrollSpy, { passive: true });
+    window.addEventListener("wheel", clearClickLock, { passive: true });
+    window.addEventListener("touchstart", clearClickLock, { passive: true });
+    window.addEventListener("resize", scheduleMeasure, { passive: true });
+    window.addEventListener("load", measureSections, { once: true, passive: true });
+
+    if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === "function") {
+      document.fonts.ready.then(measureSections);
     }
 
-    var inActiveBand = Object.create(null);
-    var footerVisible = false;
-    var lastCandidateId = currentActiveId || sections[0].id;
-
-    function resolveActiveSection() {
-      if (footerVisible) {
-        setActive(sections[sections.length - 1].id);
-        return;
-      }
-      for (var i = 0; i < sections.length; i += 1) {
-        if (inActiveBand[sections[i].id]) {
-          lastCandidateId = sections[i].id;
-          setActive(lastCandidateId);
-          return;
-        }
-      }
-      if (lastCandidateId) {
-        setActive(lastCandidateId);
-      }
+    if (typeof window.ResizeObserver === "function" && document.body) {
+      var docRo = new window.ResizeObserver(function () {
+        scheduleMeasure();
+      });
+      docRo.observe(document.body);
     }
 
-    var bandObserver = new window.IntersectionObserver(
-      function (entries) {
-        for (var i = 0; i < entries.length; i += 1) {
-          var entry = entries[i];
-          var id = entry.target.id;
-          if (!Object.prototype.hasOwnProperty.call(indexById, id)) continue;
-
-          inActiveBand[id] = entry.isIntersecting;
-          if (entry.isIntersecting) {
-            lastCandidateId = id;
-          } else if (entry.boundingClientRect.top > 0) {
-            var prevIdx = Math.max(0, indexById[id] - 1);
-            lastCandidateId = sections[prevIdx].id;
-          } else {
-            lastCandidateId = id;
-          }
-        }
-        resolveActiveSection();
-      },
-      {
-        rootMargin: "-18% 0px -68% 0px",
-        threshold: 0
-      }
-    );
-
-    for (var s = 0; s < sections.length; s += 1) {
-      bandObserver.observe(sections[s].section);
-    }
-
-    var bottomTarget =
-      document.querySelector(".site-footer") || sections[sections.length - 1].section;
-    var isFooterTarget = bottomTarget && bottomTarget.classList.contains("site-footer");
-
-    if (bottomTarget) {
-      var bottomObserver = new window.IntersectionObserver(
-        function (entries) {
-          for (var i = 0; i < entries.length; i += 1) {
-            footerVisible = entries[i].isIntersecting;
-          }
-          resolveActiveSection();
-        },
-        {
-          rootMargin: isFooterTarget ? "0px 0px -8% 0px" : "-35% 0px 0px 0px",
-          threshold: isFooterTarget ? 0.05 : 0.85
-        }
-      );
-      bottomObserver.observe(bottomTarget);
-    }
+    measureSections();
   }
 
   function boot() {
