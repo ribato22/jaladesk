@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import type { Duplex } from 'node:stream';
 
@@ -32,6 +36,9 @@ import {
 import { TargetPolicy } from '../src/gateway/target-policy.js';
 import {
   createGatewayServer,
+  parseJumpHostHops,
+  startGatewayServer,
+  validateSshUsername,
   type BackendSink,
   type GatewayBackend,
   type GatewaySessionFactory,
@@ -158,6 +165,9 @@ function attemptWsUpgrade(
       };
 
       socket.on('data', parse);
+      socket.on('error', () => {
+        // Ignore expected ECONNRESET during abrupt teardown tests
+      });
       if (head.byteLength > 0) parse(head);
 
       const client: TestWsClient = {
@@ -849,5 +859,475 @@ test('7. Built-in --demo-session live desktop tiles, 2FA Unicode auto-type, SSH 
     assert.equal(gw.activeSessionCount(), 0);
   } finally {
     await gw.close();
+  }
+});
+
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+async function waitForPidDead(pid: number, timeoutMs = 2000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isPidAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  return !isPidAlive(pid);
+}
+
+function collectSshOutput(client: TestWsClient): string {
+  let out = '';
+  for (const m of client.messages) {
+    if (m.type === Jsr1MsgType.CONTROL_JSON && m.control.type === 'sshData' && typeof m.control.data === 'string') {
+      out += m.control.data;
+    }
+  }
+  return out;
+}
+
+test('8. Programmatic startGatewayServer() API, Private Network Access CORS, pairing rotation & clean stop()', async () => {
+  const gw = await startGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    corsOrigins: ['https://ribato22.github.io', 'http://127.0.0.1:8443', 'http://localhost:8443'],
+  });
+
+  try {
+    assert.equal(gw.host, '127.0.0.1');
+    assert.ok(gw.port > 0);
+    assert.equal(gw.protocol, 'http');
+    assert.equal(gw.url, `http://127.0.0.1:${gw.port}`);
+    assert.equal(gw.wsUrl, `ws://127.0.0.1:${gw.port}/ws`);
+    assert.equal(gw.running, true);
+    assert.equal(gw.activeSessions, 0);
+    assert.equal(gw.activeClients, 0);
+    assert.match(gw.pairingCode ?? '', /^\d{6}$/);
+    assert.ok(gw.pairingExpiresInSec > 0);
+    assert.match(gw.token, /^[0-9a-f]{64}$/);
+
+    // Verify Chrome Private Network Access preflight allows https://ribato22.github.io -> 127.0.0.1
+    const preflight = await fetch(`${gw.url}/api/tickets`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://ribato22.github.io',
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Private-Network': 'true',
+      },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), 'https://ribato22.github.io');
+    assert.equal(preflight.headers.get('access-control-allow-private-network'), 'true');
+
+    // Verify disallowed origin does NOT receive PNA header
+    const badPreflight = await fetch(`${gw.url}/api/tickets`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://evil.example.com',
+        'Access-Control-Request-Private-Network': 'true',
+      },
+    });
+    assert.equal(badPreflight.headers.get('access-control-allow-origin'), null);
+    assert.equal(badPreflight.headers.get('access-control-allow-private-network'), null);
+
+    // Direct token auto-pairing ticket issuance (used by JalaDesk.app Open Web App)
+    const ticketRes = await fetch(`${gw.url}/api/tickets`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${gw.token}` },
+    });
+    assert.equal(ticketRes.status, 200);
+    const ticketJson = (await ticketRes.json()) as { ok: boolean; ticket: string };
+    assert.equal(ticketJson.ok, true);
+    assert.ok(ticketJson.ticket.length > 10);
+
+    // Consuming pairingCode clears live getter; rotatePairingCode() mints a fresh 6-digit code
+    const initialCode = gw.pairingCode!;
+    const pairRes = await fetch(`${gw.url}/api/pair/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: initialCode }),
+    });
+    assert.equal(pairRes.status, 200);
+    const pairJson = (await pairRes.json()) as { ok: boolean; token: string };
+    assert.equal(pairJson.token, gw.token);
+    assert.equal(gw.pairingCode, null);
+
+    const rotated = gw.rotatePairingCode();
+    assert.match(rotated.code, /^\d{6}$/);
+    assert.equal(gw.pairingCode, rotated.code);
+  } finally {
+    await gw.stop();
+    await gw.stop(); // Idempotent stop
+    assert.equal(gw.running, false);
+  }
+});
+
+test('9. Real loopback interactive SSH PTY (pty.openpty + TIOCSWINSZ resize + ANSI/UTF-8 + JumpHost -J + 0600 key + SSH_ASKPASS + 0 orphans)', async () => {
+  const fixtureDir = await mkdtemp(join(tmpdir(), 'jaladesk-pty-test-'));
+  const fakeSshPath = join(fixtureDir, 'fake-ssh.py');
+  const pythonShebang = existsSync('/usr/bin/python3') ? '#!/usr/bin/python3' : '#!/usr/bin/env python3';
+  const fakeSshScript = [
+    pythonShebang,
+    'import os, sys, fcntl, termios, struct, signal, select, subprocess, stat, tty',
+    '',
+    'def get_winsize():',
+    '    rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\\x00" * 8))',
+    '    return rows, cols',
+    '',
+    'child = subprocess.Popen(["/bin/sleep", "30"])',
+    'argv = sys.argv[1:]',
+    'key_path = ""',
+    'jump_arg = ""',
+    'port_arg = ""',
+    'for i, a in enumerate(argv):',
+    '    if a == "-i" and i + 1 < len(argv):',
+    '        key_path = argv[i + 1]',
+    '    elif a == "-J" and i + 1 < len(argv):',
+    '        jump_arg = argv[i + 1]',
+    '    elif a == "-p" and i + 1 < len(argv):',
+    '        port_arg = argv[i + 1]',
+    '',
+    'key_mode = oct(stat.S_IMODE(os.stat(key_path).st_mode)) if key_path and os.path.exists(key_path) else "none"',
+    'key_text = open(key_path, "r", encoding="utf-8").read().strip() if key_path and os.path.exists(key_path) else ""',
+    'askpass = os.environ.get("SSH_ASKPASS", "")',
+    'askpass_jump = subprocess.run([askpass, "ops@10.20.30.1\'s password: "], capture_output=True, text=True) if askpass else None',
+    'askpass_target = subprocess.run([askpass, "admin@127.0.0.1\'s password: "], capture_output=True, text=True) if askpass else None',
+    'askpass_nonpass = subprocess.run([askpass, "Are you sure you want to continue connecting?"], capture_output=True, text=True) if askpass else None',
+    'rows, cols = get_winsize()',
+    'env_scrubbed = ("JALADESK_GW_SSH_PASS" not in os.environ) and ("JALADESK_GW_JUMP_PASS" not in os.environ)',
+    'pass_in_argv = any(("secret-value" in a) for a in argv)',
+    '',
+    'def emit(line):',
+    '    os.write(1, (line + "\\r\\n").encode("utf-8"))',
+    '',
+    'emit(f"TTY={int(os.isatty(0) and os.isatty(1))}")',
+    'emit(f"PID={os.getpid()} CHILD_PID={child.pid}")',
+    'emit(f"TERM={os.environ.get(\'TERM\', \'\')}")',
+    'emit(f"ENV_SCRUBBED={int(env_scrubbed)} PASS_IN_ARGV={int(pass_in_argv)}")',
+    'emit(f"JUMP_ARG={jump_arg} PORT_ARG={port_arg} TARGET_ARG={argv[-1]}")',
+    'emit(f"KEY_PATH={key_path} KEY_MODE={key_mode} KEY_MATCH={int(\'TESTKEYDATA\' in key_text)}")',
+    'emit(f"ASKPASS_JUMP_OK={int(bool(askpass_jump and askpass_jump.returncode == 0 and askpass_jump.stdout == \'jump-secret-value\'))}")',
+    'emit(f"ASKPASS_TARGET_OK={int(bool(askpass_target and askpass_target.returncode == 0 and askpass_target.stdout == \'target-secret-value\'))}")',
+    'emit(f"ASKPASS_NONPASS_REJECTED={int(bool(askpass_nonpass and askpass_nonpass.returncode != 0))}")',
+    'emit(f"SIZE={rows}x{cols}")',
+    'emit("\\x1b[1;32m┌─JalaDesk TUI─┐\\x1b[0m")',
+    '',
+    'resized_flag = False',
+    'def on_winch(signum, frame):',
+    '    global resized_flag',
+    '    resized_flag = True',
+    '',
+    'signal.signal(signal.SIGWINCH, on_winch)',
+    'tty.setraw(0)',
+    'try:',
+    '    while True:',
+    '        if resized_flag:',
+    '            resized_flag = False',
+    '            r, c = get_winsize()',
+    '            emit(f"RESIZED={r}x{c}")',
+    '        try:',
+    '            rlist, _, _ = select.select([0], [], [], 0.05)',
+    '        except InterruptedError:',
+    '            continue',
+    '        if 0 in rlist:',
+    '            data = os.read(0, 4096)',
+    '            if not data:',
+    '                break',
+    '            emit("RX_HEX=" + data.hex())',
+    '            if b"q" in data:',
+    '                break',
+    'finally:',
+    '    try:',
+    '        child.terminate()',
+    '    except Exception:',
+    '        pass',
+  ].join('\n');
+
+  await writeFile(fakeSshPath, `${fakeSshScript}\n`, { mode: 0o755 });
+  await chmod(fakeSshPath, 0o755);
+
+  const gw = await startGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    sshBinary: fakeSshPath,
+  });
+
+  try {
+    const ticketRes = await fetch(`${gw.url}/api/tickets`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${gw.token}` },
+    });
+    const { ticket } = (await ticketRes.json()) as { ticket: string };
+    const wsUp = await attemptWsUpgrade(gw.host, gw.port, '/ws', [`ticket.${ticket}`]);
+    assert.equal(wsUp.upgraded, true);
+    if (!wsUp.upgraded) throw new Error('Expected WS upgrade');
+    const client = wsUp.client;
+
+    client.sendBinary(
+      encodeControlJson({
+        type: 'open',
+        protocol: 'ssh',
+        host: '127.0.0.1',
+        port: 22022,
+        username: 'admin',
+        jumpHost: 'ops@10.20.30.1:2222',
+        jumpPassword: 'jump-secret-value',
+        password: 'target-secret-value',
+        privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nTESTKEYDATA\n-----END OPENSSH PRIVATE KEY-----',
+        cols: 96,
+        rows: 28,
+      }),
+    );
+
+    const opened = await client.waitFor(
+      (m) => m.type === Jsr1MsgType.CONTROL_JSON && m.control.type === 'opened',
+    );
+    assert.equal(opened.type, Jsr1MsgType.CONTROL_JSON);
+    if (opened.type === Jsr1MsgType.CONTROL_JSON) {
+      assert.equal(opened.control.protocol, 'ssh');
+      assert.equal(opened.control.pty, true);
+      assert.equal(opened.control.cols, 96);
+      assert.equal(opened.control.rows, 28);
+    }
+    assert.equal(gw.activeSessions, 1);
+
+    // Wait until initial ANSI + UTF-8 banner arrives over sshData
+    await client.waitFor(() => collectSshOutput(client).includes('┌─JalaDesk TUI─┐'), 4000);
+    const initialOut = collectSshOutput(client);
+    assert.ok(initialOut.includes('TTY=1'), `Expected real PTY, got:\n${initialOut}`);
+    assert.ok(initialOut.includes('TERM=xterm-256color'));
+    assert.ok(initialOut.includes('ENV_SCRUBBED=1 PASS_IN_ARGV=0'));
+    assert.ok(initialOut.includes('JUMP_ARG=ops@10.20.30.1:2222 PORT_ARG=22022 TARGET_ARG=admin@127.0.0.1'));
+    assert.ok(initialOut.includes('KEY_MODE=0o600 KEY_MATCH=1'));
+    assert.ok(initialOut.includes('ASKPASS_JUMP_OK=1'));
+    assert.ok(initialOut.includes('ASKPASS_TARGET_OK=1'));
+    assert.ok(initialOut.includes('ASKPASS_NONPASS_REJECTED=1'));
+    assert.ok(initialOut.includes('SIZE=28x96'));
+    assert.ok(initialOut.includes('\x1b[1;32m┌─JalaDesk TUI─┐\x1b[0m'));
+    assert.equal(initialOut.includes('jump-secret-value'), false, 'Password must never appear in stream');
+    assert.equal(initialOut.includes('target-secret-value'), false, 'Password must never appear in stream');
+
+    const pidMatch = /PID=(\d+) CHILD_PID=(\d+)/.exec(initialOut);
+    assert.ok(pidMatch, 'Expected PID & CHILD_PID markers');
+    const sshPid = Number(pidMatch[1]);
+    const childPid = Number(pidMatch[2]);
+    const keyPathMatch = /KEY_PATH=(\S+)/.exec(initialOut);
+    assert.ok(keyPathMatch, 'Expected KEY_PATH marker');
+    const keyDir = dirname(keyPathMatch[1]!);
+    assert.equal(existsSync(keyPathMatch[1]!), true, 'Ephemeral key exists while session is active');
+
+    // Dynamic TIOCSWINSZ resize via sshResize (must NOT inject stty text into stdin!)
+    client.sendBinary(encodeControlJson({ type: 'sshResize', cols: 132, rows: 42 }));
+    await client.waitFor(() => collectSshOutput(client).includes('RESIZED=42x132'), 3000);
+
+    // Send raw ANSI arrow + control keystrokes over sshData
+    client.sendBinary(encodeControlJson({ type: 'sshData', data: '\x1b[Ahi' }));
+    await client.waitFor(() => collectSshOutput(client).includes('RX_HEX=1b5b416869'), 3000);
+    assert.equal(
+      collectSshOutput(client).includes(Buffer.from('stty').toString('hex')),
+      false,
+      'sshResize must use TIOCSWINSZ ioctl, never inject stty commands into stdin',
+    );
+
+    // Abrupt client disconnect -> must cleanly terminate PTY process group & delete 0600 temp dir (0 orphans!)
+    client.destroy();
+    const sshDead = await waitForPidDead(sshPid, 2500);
+    const childDead = await waitForPidDead(childPid, 2500);
+    assert.equal(sshDead, true, `SSH PTY process ${sshPid} must be terminated on disconnect`);
+    assert.equal(childDead, true, `Descendant process ${childPid} must be terminated (0 orphans)`);
+    assert.equal(gw.activeSessions, 0);
+    assert.equal(existsSync(keyDir), false, `Ephemeral key temp dir ${keyDir} must be removed immediately`);
+  } finally {
+    await gw.stop();
+    await rm(fixtureDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('10. JumpHost SSRF/injection defense, non-PTY python3-absent fallback & PTY password prompt injection', async () => {
+  // Unit validation of jumpHost & username parsers
+  assert.deepEqual(parseJumpHostHops('ops@bastion.internal:22022,admin@[2001:db8::1]:2222'), [
+    { spec: 'ops@bastion.internal:22022', user: 'ops', host: 'bastion.internal', port: 22022 },
+    { spec: 'admin@[2001:db8::1]:2222', user: 'admin', host: '2001:db8::1', port: 2222 },
+  ]);
+  assert.throws(() => parseJumpHostHops('-oProxyCommand=id'));
+  assert.throws(() => parseJumpHostHops('ops@host;rm -rf /'));
+  assert.equal(validateSshUsername('ops.user'), 'ops.user');
+  assert.throws(() => validateSshUsername('-oProxyCommand=id'));
+
+  const fixtureDir = await mkdtemp(join(tmpdir(), 'jaladesk-pty-fb-test-'));
+  const fakePipeSsh = join(fixtureDir, 'fake-pipe-ssh.py');
+  const fakePromptSsh = join(fixtureDir, 'fake-prompt-ssh.py');
+  const pythonShebang = existsSync('/usr/bin/python3') ? '#!/usr/bin/python3' : '#!/usr/bin/env python3';
+
+  await writeFile(
+    fakePipeSsh,
+    [
+      pythonShebang,
+      'import os, sys',
+      'sys.stdout.write(f"PIPE_PID={os.getpid()} ISATTY={int(os.isatty(0))}\\n")',
+      'sys.stdout.flush()',
+      'line = sys.stdin.readline()',
+      'sys.stdout.write(f"PIPE_ECHO={line.strip()}\\n")',
+      'sys.stdout.flush()',
+    ].join('\n') + '\n',
+    { mode: 0o755 },
+  );
+  await chmod(fakePipeSsh, 0o755);
+
+  await writeFile(
+    fakePromptSsh,
+    [
+      pythonShebang,
+      'import os, sys',
+      'os.write(1, b"admin@127.0.0.1\'s password: ")',
+      'pw = sys.stdin.readline().strip()',
+      'ok = int(pw == "pty-injected-pass")',
+      'os.write(1, f"LOGIN_OK={ok}\\r\\nWelcome to JalaDesk\\r\\n$ ".encode())',
+      '# Subsequent sudo prompt after login must NOT receive auto-injected password',
+      'os.write(1, b"[sudo] password: ")',
+      'line2 = sys.stdin.readline().strip()',
+      'os.write(1, f"MANUAL_LINE={line2}\\r\\n".encode())',
+    ].join('\n') + '\n',
+    { mode: 0o755 },
+  );
+  await chmod(fakePromptSsh, 0o755);
+
+  // Part A: JumpHost SSRF block + clean fallback when python3 is absent (pythonBinary: null)
+  const gwFallback = await startGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    sshBinary: fakePipeSsh,
+    pythonBinary: null,
+  });
+
+  try {
+    const tRes = await fetch(`${gwFallback.url}/api/tickets`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${gwFallback.token}` },
+    });
+    const { ticket } = (await tRes.json()) as { ticket: string };
+    const wsUp = await attemptWsUpgrade(gwFallback.host, gwFallback.port, '/ws', [`ticket.${ticket}`]);
+    assert.equal(wsUp.upgraded, true);
+    if (!wsUp.upgraded) throw new Error('Expected WS upgrade');
+    const client = wsUp.client;
+
+    // SSRF via jumpHost -> blocked before spawning
+    client.sendBinary(
+      encodeControlJson({
+        type: 'open',
+        protocol: 'ssh',
+        host: '10.10.0.5',
+        port: 22,
+        jumpHost: 'ops@169.254.169.254:22',
+      }),
+    );
+    const jumpSsrf = await client.waitFor(
+      (m) => m.type === Jsr1MsgType.CONTROL_JSON && m.control.type === 'error',
+    );
+    assert.equal(jumpSsrf.type, Jsr1MsgType.CONTROL_JSON);
+    if (jumpSsrf.type === Jsr1MsgType.CONTROL_JSON) {
+      assert.equal(jumpSsrf.control.code, 'ssrf_blocked');
+    }
+
+    // Option injection via jumpHost -> rejected
+    const prevErrs = client.messages.length;
+    client.sendBinary(
+      encodeControlJson({
+        type: 'open',
+        protocol: 'ssh',
+        host: '10.10.0.5',
+        port: 22,
+        jumpHost: '-oProxyCommand=id',
+      }),
+    );
+    const jumpInj = await client.waitFor(
+      (m) =>
+        client.messages.indexOf(m) >= prevErrs &&
+        m.type === Jsr1MsgType.CONTROL_JSON &&
+        m.control.type === 'error',
+    );
+    if (jumpInj.type === Jsr1MsgType.CONTROL_JSON) {
+      assert.equal(jumpInj.control.code, 'invalid_jump_host');
+    }
+
+    // Valid open in python3-absent fallback mode
+    client.sendBinary(
+      encodeControlJson({
+        type: 'open',
+        protocol: 'ssh',
+        host: '127.0.0.1',
+        port: 22,
+        username: 'ops',
+      }),
+    );
+    const openedFb = await client.waitFor(
+      (m) => m.type === Jsr1MsgType.CONTROL_JSON && m.control.type === 'opened',
+    );
+    if (openedFb.type === Jsr1MsgType.CONTROL_JSON) {
+      assert.equal(openedFb.control.pty, false);
+    }
+
+    await client.waitFor(() => collectSshOutput(client).includes('PIPE_PID='), 3000);
+    const fbPidMatch = /PIPE_PID=(\d+) ISATTY=0/.exec(collectSshOutput(client));
+    assert.ok(fbPidMatch, 'Expected fallback pipe output');
+    const fbPid = Number(fbPidMatch[1]);
+
+    // sshResize in fallback mode must NOT inject stty text before real stdin input
+    client.sendBinary(encodeControlJson({ type: 'sshResize', cols: 120, rows: 40 }));
+    client.sendBinary(encodeControlJson({ type: 'sshData', data: 'clean-input\n' }));
+    await client.waitFor(() => collectSshOutput(client).includes('PIPE_ECHO=clean-input'), 3000);
+
+    client.close();
+    assert.equal(await waitForPidDead(fbPid, 2000), true);
+  } finally {
+    await gwFallback.stop();
+  }
+
+  // Part B: PTY password prompt fallback injection (legacy SSH without SSH_ASKPASS support)
+  const gwPrompt = await startGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    sshBinary: fakePromptSsh,
+  });
+
+  try {
+    const tRes = await fetch(`${gwPrompt.url}/api/tickets`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${gwPrompt.token}` },
+    });
+    const { ticket } = (await tRes.json()) as { ticket: string };
+    const wsUp = await attemptWsUpgrade(gwPrompt.host, gwPrompt.port, '/ws', [`ticket.${ticket}`]);
+    assert.equal(wsUp.upgraded, true);
+    if (!wsUp.upgraded) throw new Error('Expected WS upgrade');
+    const client = wsUp.client;
+
+    client.sendBinary(
+      encodeControlJson({
+        type: 'open',
+        protocol: 'ssh',
+        host: '127.0.0.1',
+        port: 22,
+        username: 'admin',
+        password: 'pty-injected-pass',
+      }),
+    );
+
+    await client.waitFor(() => collectSshOutput(client).includes('[sudo] password: '), 4000);
+    assert.ok(collectSshOutput(client).includes('LOGIN_OK=1'));
+
+    // Now send manual input for the post-login sudo prompt -> proves auto_passwords was cleared after login!
+    client.sendBinary(encodeControlJson({ type: 'sshData', data: 'manual-typed\n' }));
+    await client.waitFor(() => collectSshOutput(client).includes('MANUAL_LINE=manual-typed'), 3000);
+    client.close();
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(gwPrompt.activeSessions, 0);
+  } finally {
+    await gwPrompt.stop();
+    await rm(fixtureDir, { recursive: true, force: true }).catch(() => {});
   }
 });

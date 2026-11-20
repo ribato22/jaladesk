@@ -129,6 +129,43 @@ export function normalizeGatewayEndpoints(rawUrl) {
   };
 }
 
+/**
+ * Parse a URL hash fragment such as `#gateway=http://127.0.0.1:8443&token=<hex>`
+ * or `#token=<hex>` for 1-click auto-pairing from JalaDesk Desktop.
+ * Returns null if no gateway/token parameter is present or if it is an OAuth fragment.
+ */
+export function parseGatewayFragment(rawHash) {
+  const cleaned = String(rawHash || '').replace(/^#/, '').trim();
+  if (!cleaned || cleaned.includes('access_token=')) {
+    return null;
+  }
+  if (!cleaned.includes('token=') && !cleaned.includes('gateway=')) {
+    return null;
+  }
+
+  const params = new URLSearchParams(cleaned);
+  const token = (params.get('token') || '').trim();
+  const rawGateway = (params.get('gateway') || '').trim();
+  let gatewayUrl = '';
+  if (rawGateway) {
+    try {
+      const normalized = normalizeGatewayEndpoints(rawGateway);
+      gatewayUrl = normalized.httpBaseUrl;
+    } catch {
+      gatewayUrl = '';
+    }
+  }
+
+  if (!token && !gatewayUrl) {
+    return null;
+  }
+  return {
+    hasPairing: Boolean(token),
+    gatewayUrl,
+    token,
+  };
+}
+
 async function parseJsonResponse(response) {
   const text = await response.text();
   if (!text) return {};
@@ -1101,7 +1138,8 @@ export class JalaGatewayClient {
 
   sendSshData(data) {
     if (!this.canSendInput()) return false;
-    return this.sendControl({ type: 'sshData', data: String(data || '') });
+    if (data === null || data === undefined || data === '') return false;
+    return this.sendControl({ type: 'sshData', data: String(data) });
   }
 
   sendSshResize(cols, rows) {

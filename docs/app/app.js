@@ -20,7 +20,12 @@ import {
   GOOGLE_CLOUD_PROJECT_NUMBER,
   resolveGoogleWebOAuthClientId,
 } from './web-oauth-config.js';
-import { JalaGatewayClient, normalizeGatewayEndpoints } from './gateway-client.js';
+import {
+  JalaGatewayClient,
+  normalizeGatewayEndpoints,
+  parseGatewayFragment,
+} from './gateway-client.js';
+import { WebVtTerminal } from './vt-terminal-web.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -54,7 +59,7 @@ const PRIMARY_ADD_LABELS = Object.freeze({
   totp: 'Add 2FA Token',
   credentials: 'Add Credential',
   sync: 'Export .jvault',
-  gateway: 'Connect Bridge',
+  gateway: 'Connect Live Session',
 });
 
 const PROVIDER_LABELS = Object.freeze({
@@ -125,9 +130,14 @@ const appState = {
   gatewayPane: 'desktop',
   gatewaySetupVisible: true,
   gatewaySessionProtocol: '',
+  gatewayTargetLabel: '',
   gatewaySftpPath: '/',
   gatewaySshBuffer: '',
+  gatewaySshCols: 100,
+  gatewaySshRows: 30,
+  sshTerminal: null,
   gatewayFragmentScrubbed: false,
+  gatewayFragmentUrl: '',
   dockerTab: 'run',
   activeModalId: null,
   lastModalTriggerEl: null,
@@ -620,38 +630,41 @@ function inspectUrlHash(isLiveChange = false) {
     return;
   }
 
-  if (cleaned.includes('token=')) {
-    const params = new URLSearchParams(cleaned);
-    const token = (params.get('token') || '').trim();
-    const gwUrl = (params.get('gateway') || '').trim();
-    if (token) {
-      ramSecrets.gatewayToken = token;
+  const parsedGw = parseGatewayFragment(rawHash);
+  if (parsedGw) {
+    if (parsedGw.gatewayUrl) {
+      appState.gatewayFragmentUrl = parsedGw.gatewayUrl;
+      const urlInput = byId('gateway-ws-url');
+      if (urlInput) {
+        urlInput.value = parsedGw.gatewayUrl;
+        syncGatewayUrlPresetsUi();
+      }
+    }
+    if (parsedGw.token) {
+      ramSecrets.gatewayToken = parsedGw.token;
       appState.gatewayAuthMode = 'token';
       appState.gatewayFragmentScrubbed = true;
-      appState.activeView = 'gateway';
-      if (
-        gwUrl &&
-        (gwUrl.startsWith('wss://') ||
-          gwUrl.startsWith('ws://') ||
-          gwUrl.startsWith('https://') ||
-          gwUrl.startsWith('http://'))
-      ) {
-        const urlInput = byId('gateway-ws-url');
-        if (urlInput) urlInput.value = gwUrl;
+    }
+    appState.activeView = 'gateway';
+    try {
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    } catch {
+      // Ignore restricted history state
+    }
+    if (isLiveChange && store.isUnlocked()) {
+      if (parsedGw.gatewayUrl) {
+        store.saveUiPrefs({ gatewayUrl: parsedGw.gatewayUrl });
       }
-      try {
-        history.replaceState(null, '', window.location.pathname + window.location.search);
-      } catch {
-        // Ignore restricted history state
+      if (parsedGw.token) {
+        applyAutoPairedGatewayUi({ silentToast: false });
       }
-      if (isLiveChange && store.isUnlocked()) {
-        setGatewayAuthMode('token');
-        const tokInput = byId('gateway-session-token');
-        if (tokInput) tokInput.value = token;
-        setAlert('gateway-fragment-notice', 'URL fragment #token= was captured into RAM and scrubbed from browser history.');
-        switchWorkspaceView('gateway', true);
-        appendGatewayLog('Captured ephemeral #token= from URL fragment and scrubbed browser history.', 'ok');
-      }
+      switchWorkspaceView('gateway', true, { skipGatewayProbe: Boolean(parsedGw.token) });
+      appendGatewayLog(
+        parsedGw.gatewayUrl
+          ? `Auto-paired with Web Gateway (${parsedGw.gatewayUrl}); token stored in RAM only and scrubbed from URL.`
+          : 'Captured ephemeral #token= from URL fragment into RAM and scrubbed browser history.',
+        'ok',
+      );
     }
   }
 }
@@ -664,6 +677,7 @@ function zeroSensitiveInputsAndDom(options = {}) {
   const preserveToken = Boolean(options.preservePendingGatewayToken);
   const pendingToken = preserveToken ? ramSecrets.gatewayToken : '';
   const pendingScrubbed = preserveToken ? appState.gatewayFragmentScrubbed : false;
+  const pendingGatewayUrl = preserveToken ? appState.gatewayFragmentUrl : '';
 
   ramSecrets.unlockedPassphrase = '';
   ramSecrets.gdriveToken = '';
@@ -697,6 +711,7 @@ function zeroSensitiveInputsAndDom(options = {}) {
   appState.searchQuery = '';
   appState.gatewayTargetHostId = '__demo__';
   appState.gatewayFragmentScrubbed = pendingScrubbed;
+  appState.gatewayFragmentUrl = pendingGatewayUrl;
   if (appState.clipboardClearTimer) {
     clearTimeout(appState.clipboardClearTimer);
     appState.clipboardClearTimer = null;
@@ -725,7 +740,6 @@ function zeroSensitiveInputsAndDom(options = {}) {
     'gateway-session-token',
     'gateway-runtime-password',
     'gateway-runtime-key',
-    'gateway-ssh-input',
     'global-search',
     'conn-id',
     'conn-name',
@@ -982,14 +996,16 @@ function hydratePrefsIntoUi() {
   if (wdUser && prefs.webdavUsername) wdUser.value = prefs.webdavUsername;
   const gwUrl = byId('gateway-ws-url');
   if (gwUrl) {
-    if (prefs.gatewayUrl) {
+    if (appState.gatewayFragmentUrl) {
+      gwUrl.value = appState.gatewayFragmentUrl;
+      store.saveUiPrefs({ gatewayUrl: appState.gatewayFragmentUrl });
+    } else if (prefs.gatewayUrl) {
       gwUrl.value = prefs.gatewayUrl;
     } else if (
       (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') &&
-      window.location.port === '8443'
+      window.location.port
     ) {
-      const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      gwUrl.value = `${wsProto}//${window.location.host}`;
+      gwUrl.value = `${window.location.protocol}//${window.location.host}`;
     } else {
       gwUrl.value = LOCAL_GATEWAY_DEFAULT_URL;
     }
@@ -997,10 +1013,7 @@ function hydratePrefsIntoUi() {
   }
 
   if (appState.gatewayFragmentScrubbed && ramSecrets.gatewayToken) {
-    setGatewayAuthMode('token');
-    const tokInput = byId('gateway-session-token');
-    if (tokInput) tokInput.value = ramSecrets.gatewayToken;
-    setAlert('gateway-fragment-notice', 'URL fragment #token= was captured into RAM and scrubbed from browser history.');
+    applyAutoPairedGatewayUi({ silentToast: true });
   }
 
   renderGoogleDriveStudioState();
@@ -1486,7 +1499,7 @@ function openHostInGateway(hostId) {
     const guidanceEl = byId('gateway-setup-guidance');
     if (guidanceEl) guidanceEl.hidden = true;
 
-    if (hostHasStoredSecret(host, creds)) {
+    if (proto === 'ssh' || hostHasStoredSecret(host, creds)) {
       clearGatewayRuntimeCredentials();
       appendGatewayLog(`Gateway already paired — launching live ${proto.toUpperCase()} session to ${host.name || host.address}...`, 'ok');
       connectGatewayBridge();
@@ -2759,23 +2772,207 @@ function applyGatewayUrlPreset(presetUrl) {
   }
 }
 
+function applyAutoPairedGatewayUi(options = {}) {
+  const token = String(ramSecrets.gatewayToken || '').trim();
+  if (!token) return;
+  setGatewayAuthMode('token');
+  const tokInput = byId('gateway-session-token');
+  if (tokInput) tokInput.value = token;
+  const guidance = byId('gateway-setup-guidance');
+  if (guidance) guidance.hidden = true;
+
+  const activeUrl = (byId('gateway-ws-url')?.value || appState.gatewayFragmentUrl || LOCAL_GATEWAY_DEFAULT_URL).trim();
+  const pill = byId('gateway-local-probe-pill');
+  const dot = byId('gateway-local-probe-dot');
+  const textEl = byId('gateway-local-probe-text');
+  if (pill) {
+    pill.hidden = false;
+    pill.className = 'gateway-probe-pill is-ready';
+  }
+  if (dot) dot.className = 'status-dot status-dot-ok';
+  if (textEl) {
+    textEl.textContent = `Auto-Paired with Web Gateway (${activeUrl}) — Ready to Connect Live`;
+  }
+  setAlert(
+    'gateway-fragment-notice',
+    `Auto-paired with ${activeUrl}. Session token is held in RAM only and scrubbed from browser history.`,
+  );
+  if (!options.silentToast) {
+    showToast('Web Gateway auto-paired (RAM-only token scrubbed from URL).', 'ok');
+  }
+}
+
+function resolveInitialGatewayPane(protocol) {
+  const proto = String(protocol || '').toLowerCase();
+  if (proto === 'ssh') return 'ssh';
+  if (proto === 'sftp') return 'sftp';
+  return 'desktop';
+}
+
+function syncGatewayPaneTabsForProtocol(protocol) {
+  const tabs = byId('gateway-pane-tabs');
+  if (!tabs) return;
+  const proto = String(protocol || 'demo').toLowerCase();
+  const isTerminalOnly = proto === 'ssh' || proto === 'sftp';
+  const isDesktopOnly = proto === 'rdp' || proto === 'vnc' || proto === 'hypervisor';
+
+  for (const btn of tabs.querySelectorAll('[data-gateway-pane]')) {
+    const pane = btn.getAttribute('data-gateway-pane');
+    if (pane === 'desktop') {
+      btn.hidden = isTerminalOnly;
+    } else if (pane === 'ssh' || pane === 'sftp') {
+      btn.hidden = isDesktopOnly;
+    }
+  }
+}
+
+function updateGatewaySshHud(cols, rows, inAltScreen = false, ptyLabel = '') {
+  const dimsEl = byId('hud-ssh-dims');
+  const modeEl = byId('hud-ssh-mode');
+  if (dimsEl) dimsEl.textContent = `${cols}×${rows}`;
+  if (modeEl) {
+    modeEl.textContent = inAltScreen ? 'VT100 · ALT SCREEN' : ptyLabel || 'VT100 TUI';
+  }
+  if (appState.gatewayPane === 'ssh' && appState.gatewayTargetLabel) {
+    const hudTarget = byId('hud-target-badge');
+    if (hudTarget) {
+      const prefix = appState.gatewayPreviewActive ? 'PREVIEW · ' : '';
+      hudTarget.textContent = `${prefix}${appState.gatewayTargetLabel} · ${cols}×${rows}`;
+    }
+  }
+}
+
+function ensureSshTerminal() {
+  if (!appState.sshTerminal) {
+    appState.sshTerminal = new WebVtTerminal({
+      cols: appState.gatewaySshCols || 100,
+      rows: appState.gatewaySshRows || 30,
+      onData: (seq) => {
+        dispatchSshTerminalInput(seq);
+      },
+      onResize: (cols, rows) => {
+        appState.gatewaySshCols = cols;
+        appState.gatewaySshRows = rows;
+        updateGatewaySshHud(cols, rows, Boolean(appState.sshTerminal?.inAltScreen));
+        const client = appState.gatewayClient;
+        if (client && client.connected && client.canSendInput()) {
+          client.sendSshResize(cols, rows);
+        }
+      },
+      onCtrlLatchChange: (active) => {
+        const btn = byId('btn-ssh-ctrl-latch');
+        if (btn) {
+          btn.classList.toggle('is-active', active);
+          btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        }
+      },
+      onRender: (term) => {
+        const mirror = byId('gateway-ssh-console');
+        if (mirror) {
+          mirror.textContent = term.renderText(false);
+        }
+        updateGatewaySshHud(term.cols, term.rows, term.inAltScreen);
+      },
+    });
+  }
+
+  const canvasEl = byId('gateway-ssh-terminal');
+  const stageEl = byId('gateway-ssh-stage');
+  if (canvasEl && !appState.sshTerminal._canvas) {
+    appState.sshTerminal.attach(canvasEl, stageEl || canvasEl.parentElement);
+  }
+  return appState.sshTerminal;
+}
+
+function dispatchSshTerminalInput(seq) {
+  if (typeof seq !== 'string' || seq.length === 0) return false;
+  if (appState.gatewayPreviewActive) {
+    if (appState.gatewayViewOnly) {
+      showToast('View-Only mode active. Switch to Interactive to type.', 'danger');
+      return false;
+    }
+    handleGatewayPreviewSshData(seq);
+    return true;
+  }
+  const client = appState.gatewayClient;
+  if (!client || !client.connected) return false;
+  if (!client.canSendInput()) {
+    showToast('View-Only mode active. Take Control to send SSH input.', 'danger');
+    return false;
+  }
+  return client.sendSshData(seq);
+}
+
+async function handleSshPasteFromClipboard() {
+  const term = ensureSshTerminal();
+  if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function') {
+    showToast('Press Cmd+V / Ctrl+V directly inside the terminal to paste.', 'warn');
+    term.focus();
+    return;
+  }
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) {
+      showToast('Clipboard is empty.', 'warn');
+      term.focus();
+      return;
+    }
+    term.pasteText(text);
+    term.focus();
+  } catch {
+    showToast('Clipboard read blocked — press Cmd+V / Ctrl+V inside the terminal.', 'warn');
+    term.focus();
+  }
+}
+
 function setGatewayPane(pane) {
   const next = pane === 'ssh' || pane === 'sftp' ? pane : 'desktop';
+  const isDesktop = next === 'desktop';
+  const isSsh = next === 'ssh';
+  const isSftp = next === 'sftp';
+
   appState.gatewayPane = next;
   setSegmentedValue(byId('gateway-pane-tabs'), 'data-gateway-pane', next);
+
+  const stage = byId('gateway-live-stage');
+  if (stage) stage.dataset.activePane = next;
+
   const desk = byId('gateway-desktop-pane');
   const ssh = byId('gateway-ssh-pane');
   const sftp = byId('gateway-sftp-pane');
   const scaleGroup = byId('gateway-scale-group');
   const cadBtn = byId('btn-gateway-cad');
+  const ctrlToggle = byId('btn-gateway-control-toggle');
+  const pasteBtn = byId('btn-gateway-ssh-paste');
+  const totpGroup = byId('gateway-totp-autotype-group');
+  const deskTelemetry = byId('gateway-telemetry-strip');
+  const sshTelemetry = byId('gateway-ssh-telemetry-strip');
 
-  if (desk) desk.hidden = next !== 'desktop';
-  if (ssh) ssh.hidden = next !== 'ssh';
-  if (sftp) sftp.hidden = next !== 'sftp';
-  if (scaleGroup) scaleGroup.hidden = next !== 'desktop';
-  if (cadBtn) cadBtn.hidden = next !== 'desktop';
+  if (desk) desk.hidden = !isDesktop;
+  if (ssh) ssh.hidden = !isSsh;
+  if (sftp) sftp.hidden = !isSftp;
 
-  if (next === 'sftp') {
+  // Hide RDP/VNC-only controls on SSH & SFTP; show SSH-relevant controls on SSH
+  if (scaleGroup) scaleGroup.hidden = !isDesktop;
+  if (cadBtn) cadBtn.hidden = !isDesktop;
+  if (ctrlToggle) ctrlToggle.hidden = !isDesktop;
+  if (deskTelemetry) deskTelemetry.hidden = !isDesktop;
+  if (sshTelemetry) sshTelemetry.hidden = !isSsh;
+  if (pasteBtn) pasteBtn.hidden = !isSsh;
+  if (totpGroup) totpGroup.hidden = isSftp;
+
+  if (isSsh) {
+    const term = ensureSshTerminal();
+    requestAnimationFrame(() => {
+      term.fit();
+      term.focus();
+      updateGatewaySshHud(term.cols, term.rows, term.inAltScreen);
+    });
+  } else if (isDesktop) {
+    requestAnimationFrame(() => {
+      byId('gateway-canvas')?.focus({ preventScroll: true });
+    });
+  } else if (isSftp) {
     if (appState.gatewayClient && appState.gatewayClient.connected) {
       refreshGatewaySftpList();
     } else if (appState.gatewayPreviewActive) {
@@ -2840,6 +3037,7 @@ function resetGatewayLiveDom() {
   appState.gatewaySshBuffer = '';
   appState.gatewaySftpPath = '/';
   appState.gatewaySessionProtocol = '';
+  appState.gatewayTargetLabel = '';
 
   const liveStage = byId('gateway-live-stage');
   if (liveStage) {
@@ -2850,17 +3048,22 @@ function resetGatewayLiveDom() {
     liveStage.dataset.kbPerSec = '0';
     liveStage.dataset.hasControl = 'false';
     liveStage.dataset.viewOnly = 'false';
+    liveStage.dataset.activePane = 'desktop';
   }
   const toggleBtn = byId('btn-gateway-toggle-setup');
   if (toggleBtn) toggleBtn.hidden = true;
   const previewBanner = byId('gateway-preview-banner');
   if (previewBanner) previewBanner.hidden = true;
+  syncGatewayPaneTabsForProtocol('demo');
   setGatewaySetupVisible(true);
 
   const canvas = byId('gateway-canvas');
   if (canvas) {
     const ctx = canvas.getContext('2d');
     if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  if (appState.sshTerminal) {
+    appState.sshTerminal.reset();
   }
   const sshConsole = byId('gateway-ssh-console');
   if (sshConsole) sshConsole.textContent = '';
@@ -2887,24 +3090,10 @@ function appendGatewayLog(message, tone = 'default') {
 }
 
 function appendGatewaySshOutput(chunk) {
-  let buf = appState.gatewaySshBuffer;
-  for (let i = 0; i < chunk.length; i += 1) {
-    const ch = chunk[i];
-    if (ch === '\b') {
-      buf = buf.slice(0, -1);
-    } else if (ch !== '\r') {
-      buf += ch;
-    }
-  }
-  if (buf.length > 65536) {
-    buf = buf.slice(-65536);
-  }
-  appState.gatewaySshBuffer = buf;
-  const consoleEl = byId('gateway-ssh-console');
-  if (consoleEl) {
-    consoleEl.textContent = buf;
-    consoleEl.scrollTop = consoleEl.scrollHeight;
-  }
+  if (!chunk) return;
+  const term = ensureSshTerminal();
+  term.write(String(chunk));
+  appState.gatewaySshBuffer = term.renderText(false);
 }
 
 function renderGatewayTotpSelect() {
@@ -2984,7 +3173,7 @@ function updateSelectedTargetBanner() {
   const selectedId = appState.gatewayTargetHostId || '__demo__';
   if (!banner || selectedId === '__demo__') {
     if (banner) banner.hidden = true;
-    if (connectBtn) connectBtn.textContent = 'Connect Bridge';
+    if (connectBtn) connectBtn.textContent = 'Connect Live Session';
     clearGatewayRuntimeCredentials();
     return;
   }
@@ -2995,7 +3184,7 @@ function updateSelectedTargetBanner() {
   const host = hosts.find((h) => String(h.id) === String(selectedId));
   if (!host) {
     banner.hidden = true;
-    if (connectBtn) connectBtn.textContent = 'Connect Bridge';
+    if (connectBtn) connectBtn.textContent = 'Connect Live Session';
     clearGatewayRuntimeCredentials();
     return;
   }
@@ -3030,7 +3219,7 @@ function updateSelectedTargetBanner() {
     }
   }
   if (connectBtn) {
-    connectBtn.textContent = `Connect to ${host.name || host.address}`;
+    connectBtn.textContent = `Connect Live · ${host.name || host.address}`;
   }
   banner.hidden = false;
 }
@@ -3240,8 +3429,8 @@ function buildGatewayOpenParamsFromVault(selectedTargetId) {
     jumpPassword: jumpPassword || undefined,
     width: 1280,
     height: 720,
-    cols: 100,
-    rows: 30,
+    cols: appState.gatewaySshCols || 100,
+    rows: appState.gatewaySshRows || 30,
     viewOnly: appState.gatewayViewOnly,
     displayLabel: `${protocol.toUpperCase()} · ${host.name || host.address}:${port}`,
   };
@@ -3344,7 +3533,10 @@ async function connectGatewayBridge() {
     onLog: (msg, tone) => appendGatewayLog(msg, tone),
     onOpened: (msg) => {
       clearGatewayRuntimeCredentials();
-      appState.gatewaySessionProtocol = msg.protocol || openParams.protocol;
+      const activeProto = String(msg.protocol || openParams.protocol || 'demo').toLowerCase();
+      appState.gatewaySessionProtocol = activeProto;
+      appState.gatewayTargetLabel = openParams.protocol === 'demo' ? 'DEMO' : displayLabel;
+
       const liveStage = byId('gateway-live-stage');
       const toggleBtn = byId('btn-gateway-toggle-setup');
       const hudTarget = byId('hud-target-badge');
@@ -3352,30 +3544,36 @@ async function connectGatewayBridge() {
       if (toggleBtn) toggleBtn.hidden = false;
       setGatewaySetupVisible(false);
 
-      const dims = msg.width && msg.height ? ` · ${msg.width}×${msg.height}` : '';
-      if (hudTarget) {
-        hudTarget.textContent =
-          openParams.protocol === 'demo' ? `DEMO${dims}` : `${displayLabel}${dims}`;
+      const initialPane = resolveInitialGatewayPane(activeProto);
+      syncGatewayPaneTabsForProtocol(activeProto);
+
+      if (initialPane === 'ssh') {
+        const sshCols = Number(msg.cols) || appState.gatewaySshCols || 100;
+        const sshRows = Number(msg.rows) || appState.gatewaySshRows || 30;
+        if (hudTarget) {
+          hudTarget.textContent = `${appState.gatewayTargetLabel} · ${sshCols}×${sshRows}`;
+        }
+        updateGatewaySshHud(sshCols, sshRows, false, msg.pty ? 'PTY · xterm-256color' : 'VT100 TUI');
+      } else {
+        const dims = msg.width && msg.height ? ` · ${msg.width}×${msg.height}` : '';
+        if (hudTarget) {
+          hudTarget.textContent = `${appState.gatewayTargetLabel}${dims}`;
+        }
       }
 
       updateGatewayControlUi(Boolean(msg.hasControl), Boolean(msg.viewOnly));
       renderGatewayTotpSelect();
       setGatewayScaleMode(appState.gatewayScaleMode);
-
-      const initialPane =
-        appState.gatewaySessionProtocol === 'ssh'
-          ? 'ssh'
-          : appState.gatewaySessionProtocol === 'sftp'
-            ? 'sftp'
-            : 'desktop';
       setGatewayPane(initialPane);
 
-      if (canvasEl) {
+      if (canvasEl && initialPane === 'desktop') {
+        client.attachCanvasInput(canvasEl, () => appState.gatewayScaleMode);
+      } else if (canvasEl && activeProto === 'demo') {
         client.attachCanvasInput(canvasEl, () => appState.gatewayScaleMode);
       }
 
       appendGatewayLog(
-        `Session ${msg.sessionId} open (${String(msg.protocol).toUpperCase()}, ${msg.hasControl ? 'exclusive input control' : 'view-only observer'}).`,
+        `Session ${msg.sessionId} open (${activeProto.toUpperCase()}, ${msg.hasControl ? 'exclusive input control' : 'view-only observer'}).`,
         'ok',
       );
       showToast(`Connected to ${displayLabel}`, 'ok');
@@ -3397,6 +3595,9 @@ async function connectGatewayBridge() {
     },
     onError: (msg) => {
       const text = msg && msg.message ? msg.message : 'Gateway session error.';
+      if (appState.gatewayPane === 'ssh') {
+        appendGatewaySshOutput(`\r\n\x1b[31m[gateway] ${text}\x1b[0m\r\n`);
+      }
       appendGatewayLog(`Gateway error (${msg.code || 'error'}): ${text}`, 'err');
       showToast(text, 'danger');
     },
@@ -3753,35 +3954,148 @@ function stopGatewayPreview() {
   if (previewBanner) previewBanner.hidden = true;
 }
 
-function handleGatewayPreviewSshCommand(rawCmd) {
+function formatPreviewSshPrompt(state) {
+  const user = (state && state.sshUser) || 'operator';
+  const hostName = (state && state.sshHostSlug) || 'jaladesk-preview';
+  return `\x1b[1;32m${user}@${hostName}\x1b[0m:\x1b[1;34m~\x1b[0m$ `;
+}
+
+function renderPreviewHtopAltScreen(state) {
+  const hostName = (state && state.sshHostSlug) || 'jaladesk-preview';
+  appendGatewaySshOutput(
+    '\x1b[?1049h\x1b[2J\x1b[H' +
+      `\x1b[1;30;46m  JalaDesk Preview htop — ${hostName} (Alt-Screen ?1049h)   Press q or Esc to exit  \x1b[0m\r\n\r\n` +
+      '  \x1b[1;36mCPU\x1b[0m [\x1b[32m||||||||\x1b[33m||\x1b[90m....................\x1b[0m 28.4%]   \x1b[1;36mTasks:\x1b[0m 42, 1 running\r\n' +
+      '  \x1b[1;36mMem\x1b[0m [\x1b[32m||||||||||||||\x1b[90m..............\x1b[0m 2.4G/8.0G] \x1b[1;36mLoad:\x1b[0m 0.14 0.11 0.08\r\n\r\n' +
+      '\x1b[30;42m  PID USER       PRI  NI  VIRT   RES S CPU% MEM%   TIME+  Command                        \x1b[0m\r\n' +
+      ' 1042 jaladesk    20   0  184M   38M S  1.2  0.5  0:12.44 sshd: bright@pts/0\r\n' +
+      ' 1089 jaladesk    20   0   92M   19M R  0.8  0.2  0:01.08 htop --offline-preview\r\n' +
+      '  412 root        20   0  310M   44M S  0.3  0.6  4:22.10 systemd-journald\r\n\r\n' +
+      '\x1b[33mOffline UI Preview — press q, Esc, or Ctrl+C to return to shell.\x1b[0m',
+  );
+}
+
+function executePreviewSshCommand(rawCmd, state) {
   const cmd = String(rawCmd || '').trim();
-  const state = appState.gatewayPreviewState;
-  const hostName = state ? state.sshHostSlug : 'jaladesk-preview';
-  appendGatewaySshOutput(`operator@${hostName}:~$ ${cmd}\n`);
   if (!cmd) return;
+  if (state) {
+    state.sshHistory.push(cmd);
+    if (state.sshHistory.length > 50) state.sshHistory.shift();
+    state.sshHistoryIdx = state.sshHistory.length;
+  }
+
   if (cmd === 'clear') {
-    appState.gatewaySshBuffer = '';
-    const consoleEl = byId('gateway-ssh-console');
-    if (consoleEl) consoleEl.textContent = '';
+    appendGatewaySshOutput('\x1b[2J\x1b[H');
+    return;
+  }
+  if (cmd === 'htop' || cmd === 'top') {
+    if (state) state.sshAltApp = 'htop';
+    renderPreviewHtopAltScreen(state);
     return;
   }
   if (cmd === 'help') {
     appendGatewaySshOutput(
-      'Interactive Browser SSH Preview commands: help, whoami, uname -a, ls, uptime, date, clear\n' +
-        'Start JalaDesk Gateway locally (127.0.0.1:8443) or via Docker to open live PTY sessions.\n',
+      '\x1b[1;36mOffline SSH Preview commands:\x1b[0m help, whoami, uname -a, ls, uptime, date, echo <text>, htop, clear\r\n' +
+        '\x1b[90mToggle Web Bridge ON in JalaDesk Desktop (or run npm run gateway) to open live PTY sessions.\x1b[0m\r\n',
     );
   } else if (cmd === 'whoami') {
-    appendGatewaySshOutput('operator (JalaDesk Web Preview)\n');
+    appendGatewaySshOutput('jaladesk-demo\r\n');
   } else if (cmd.startsWith('uname')) {
-    appendGatewaySshOutput('Linux jaladesk-bastion 6.8.0-generic #1 SMP x86_64 GNU/Linux (Interactive Preview)\n');
+    appendGatewaySshOutput('Linux jaladesk-bastion 6.8.0-generic #1 SMP x86_64 GNU/Linux\r\n');
   } else if (cmd === 'ls' || cmd.startsWith('ls ')) {
-    appendGatewaySshOutput('deploy.sh  docker-compose.gateway.yml  logs/  nginx.conf  README.md\n');
+    appendGatewaySshOutput(
+      '\x1b[1;32mdeploy.sh\x1b[0m  docker-compose.gateway.yml  \x1b[1;34mlogs/\x1b[0m  nginx.conf  README.md\r\n',
+    );
   } else if (cmd === 'uptime') {
-    appendGatewaySshOutput(' 12:04:19 up 42 days,  6:18,  1 user,  load average: 0.14, 0.11, 0.08\n');
+    appendGatewaySshOutput(' 12:04:19 up 42 days,  6:18,  1 user,  load average: 0.14, 0.11, 0.08\r\n');
   } else if (cmd === 'date') {
-    appendGatewaySshOutput(`${new Date().toUTCString()}\n`);
+    appendGatewaySshOutput(`${new Date().toUTCString()}\r\n`);
+  } else if (cmd.startsWith('echo ')) {
+    appendGatewaySshOutput(`${cmd.slice(5)}\r\n`);
   } else {
-    appendGatewaySshOutput(`[preview] executed: ${cmd}\n`);
+    appendGatewaySshOutput(`\x1b[33m[preview]\x1b[0m executed: ${cmd}\r\n`);
+  }
+}
+
+function handleGatewayPreviewSshData(seq) {
+  const state = appState.gatewayPreviewState;
+  if (!state) return;
+
+  // Handle alternate screen preview app (htop)
+  if (state.sshAltApp) {
+    if (seq === 'q' || seq === 'Q' || seq === '\x1b' || seq === '\x03') {
+      state.sshAltApp = '';
+      appendGatewaySshOutput(`\x1b[?1049l${formatPreviewSshPrompt(state)}`);
+    }
+    return;
+  }
+
+  // Strip bracketed paste wrappers in offline preview
+  const cleanSeq = seq.replace(/^\x1b\[200~/, '').replace(/\x1b\[201~$/, '');
+
+  // History navigation on Up / Down arrows
+  if (cleanSeq === '\x1b[A' || cleanSeq === '\x1bOA') {
+    if (state.sshHistory.length > 0 && state.sshHistoryIdx > 0) {
+      state.sshHistoryIdx -= 1;
+      const entry = state.sshHistory[state.sshHistoryIdx] || '';
+      state.sshLine = entry;
+      appendGatewaySshOutput(`\r\x1b[2K${formatPreviewSshPrompt(state)}${entry}`);
+    }
+    return;
+  }
+  if (cleanSeq === '\x1b[B' || cleanSeq === '\x1bOB') {
+    if (state.sshHistoryIdx < state.sshHistory.length - 1) {
+      state.sshHistoryIdx += 1;
+      const entry = state.sshHistory[state.sshHistoryIdx] || '';
+      state.sshLine = entry;
+      appendGatewaySshOutput(`\r\x1b[2K${formatPreviewSshPrompt(state)}${entry}`);
+    } else {
+      state.sshHistoryIdx = state.sshHistory.length;
+      state.sshLine = '';
+      appendGatewaySshOutput(`\r\x1b[2K${formatPreviewSshPrompt(state)}`);
+    }
+    return;
+  }
+  if (cleanSeq.startsWith('\x1b')) {
+    return;
+  }
+
+  for (let i = 0; i < cleanSeq.length; i += 1) {
+    const ch = cleanSeq[i];
+    if (ch === '\x03') {
+      state.sshLine = '';
+      appendGatewaySshOutput(`^C\r\n${formatPreviewSshPrompt(state)}`);
+    } else if (ch === '\x04') {
+      state.sshLine = '';
+      appendGatewaySshOutput(`\r\n\x1b[90m[preview] EOF (^D) — offline UI preview shell stays open.\x1b[0m\r\n${formatPreviewSshPrompt(state)}`);
+    } else if (ch === '\x0c') {
+      appendGatewaySshOutput(`\x1b[2J\x1b[H${formatPreviewSshPrompt(state)}${state.sshLine}`);
+    } else if (ch === '\r' || ch === '\n') {
+      const cmd = state.sshLine;
+      state.sshLine = '';
+      appendGatewaySshOutput('\r\n');
+      executePreviewSshCommand(cmd, state);
+      if (!state.sshAltApp) {
+        appendGatewaySshOutput(formatPreviewSshPrompt(state));
+      }
+    } else if (ch === '\x7f' || ch === '\b') {
+      if (state.sshLine.length > 0) {
+        state.sshLine = state.sshLine.slice(0, -1);
+        appendGatewaySshOutput('\b \b');
+      }
+    } else if (ch === '\t') {
+      const matches = ['help', 'whoami', 'uname -a', 'ls', 'uptime', 'date', 'htop', 'clear'].filter((c) =>
+        c.startsWith(state.sshLine),
+      );
+      if (state.sshLine && matches.length === 1) {
+        const rest = matches[0].slice(state.sshLine.length);
+        state.sshLine += rest;
+        appendGatewaySshOutput(rest);
+      }
+    } else if (ch.charCodeAt(0) >= 32) {
+      state.sshLine += ch;
+      appendGatewaySshOutput(ch);
+    }
   }
 }
 
@@ -3818,9 +4132,11 @@ function startGatewayInteractivePreview() {
 
   const selectedTargetId = byId('gateway-host-select')?.value || '__demo__';
   const built = buildGatewayOpenParamsFromVault(selectedTargetId);
+  const targetProto = selectedTargetId === '__demo__' ? 'demo' : built.protocol;
   const targetLabel =
     selectedTargetId === '__demo__' ? 'bastion-prod-01.internal (RDP 3389)' : built.displayLabel;
   const sshHostSlug = String(built.host || 'jaladesk-preview').replace(/[^a-zA-Z0-9._-]/g, '');
+  const sshUser = String(built.username || 'operator').replace(/[^a-zA-Z0-9._-]/g, '') || 'operator';
 
   const authWin = { x: 48, y: 66, w: 568, h: 430 };
   const termWin = { x: 644, y: 98, w: 588, h: 460 };
@@ -3828,6 +4144,11 @@ function startGatewayInteractivePreview() {
   const previewState = {
     targetLabel,
     sshHostSlug,
+    sshUser,
+    sshLine: '',
+    sshHistory: [],
+    sshHistoryIdx: 0,
+    sshAltApp: '',
     focusedWindow: 'auth',
     cursorX: 340,
     cursorY: 268,
@@ -3855,7 +4176,7 @@ function startGatewayInteractivePreview() {
       { win: 'term', label: 'Remote Console', x: 202, y: 682, w: 144, h: 28 },
     ],
     termLines: [
-      `$ ssh operator@${sshHostSlug}`,
+      `$ ssh ${sshUser}@${sshHostSlug}`,
       `[OK] JSR1 interactive preview canvas ready (${targetLabel})`,
       '[OK] FreeRDP / VNC / SSH browser compositor active',
       'Click buttons above, click windows to focus, or try 2FA Auto-Type.',
@@ -3866,7 +4187,8 @@ function startGatewayInteractivePreview() {
 
   appState.gatewayPreviewActive = true;
   appState.gatewayPreviewState = previewState;
-  appState.gatewaySessionProtocol = 'demo';
+  appState.gatewaySessionProtocol = targetProto;
+  appState.gatewayTargetLabel = targetLabel;
 
   const liveStage = byId('gateway-live-stage');
   const previewBanner = byId('gateway-preview-banner');
@@ -3878,22 +4200,33 @@ function startGatewayInteractivePreview() {
   if (previewBanner) previewBanner.hidden = false;
   if (toggleBtn) toggleBtn.hidden = false;
   if (discBtn) discBtn.disabled = false;
-  if (hudTarget) hudTarget.textContent = `PREVIEW · ${targetLabel} · 1280×720`;
+
+  const initialPane = resolveInitialGatewayPane(targetProto);
+  syncGatewayPaneTabsForProtocol(targetProto);
+
+  if (hudTarget) {
+    hudTarget.textContent =
+      initialPane === 'ssh'
+        ? `PREVIEW · ${targetLabel} · ${appState.gatewaySshCols}×${appState.gatewaySshRows}`
+        : `PREVIEW · ${targetLabel} · 1280×720`;
+  }
 
   setGatewaySetupVisible(false);
-  setGatewayStatus('PREVIEW · INTERACTIVE', 'ok');
+  setGatewayStatus('OFFLINE PREVIEW', 'warn');
   updateGatewayControlUi(true, false);
   renderGatewayTotpSelect();
   setGatewayScaleMode(appState.gatewayScaleMode);
-  setGatewayPane('desktop');
 
-  appState.gatewaySshBuffer = '';
+  const term = ensureSshTerminal();
+  term.reset();
   appendGatewaySshOutput(
-    `JalaDesk Web Gateway — Interactive Browser SSH Preview\n` +
-      `Target: ${targetLabel}\n` +
-      `Type "help", "whoami", "uname -a", or "ls" below (or click 2FA Auto-Type).\n\n`,
+    `\x1b[1;36mJalaDesk Web Terminal\x1b[0m \x1b[90m(Offline UI Preview — VT100/ANSI xterm-256color)\x1b[0m\r\n` +
+      `\x1b[33mTarget:\x1b[0m ${targetLabel}\r\n` +
+      `Type directly here (\x1b[32mhelp\x1b[0m, \x1b[32mwhoami\x1b[0m, \x1b[32mhtop\x1b[0m, \x1b[32mls\x1b[0m, \x1b[32muname -a\x1b[0m) or use the shortcut ribbon below.\r\n\r\n` +
+      formatPreviewSshPrompt(previewState),
   );
   renderGatewayPreviewSftpList();
+  setGatewayPane(initialPane);
 
   const canvas = byId('gateway-canvas');
   if (canvas) {
@@ -4100,7 +4433,8 @@ async function handleGatewayAutoType2fa() {
     if (isPreview && appState.gatewayPreviewState) {
       const pState = appState.gatewayPreviewState;
       if (appState.gatewayPane === 'ssh') {
-        appendGatewaySshOutput(`${code}\n`);
+        dispatchSshTerminalInput(code);
+        appState.sshTerminal?.focus();
       } else {
         pState.focusedWindow = 'auth';
         pState.authInputText = code;
@@ -4111,7 +4445,7 @@ async function handleGatewayAutoType2fa() {
         updateGatewayHudMetrics({ fps: 30, rttMs: 1, kbPerSec: 196, tilesDecoded: pState.tilesDecoded });
         renderGatewayPreviewCanvas();
       }
-      appendGatewayLog(`Auto-typed ${digits}-digit 2FA code (${label}) into Interactive Browser Preview.`, 'ok');
+      appendGatewayLog(`Auto-typed ${digits}-digit 2FA code (${label}) into Offline UI Preview.`, 'ok');
       showToast(`2FA code auto-typed into Preview (${label}).`, 'ok');
       return;
     }
@@ -4121,6 +4455,9 @@ async function handleGatewayAutoType2fa() {
         ? client.sendSshData(code)
         : client.sendText(code);
     if (sent) {
+      if (appState.gatewayPane === 'ssh') {
+        appState.sshTerminal?.focus();
+      }
       appendGatewayLog(`Auto-typed live ${digits}-digit 2FA code for ${label} via JSR1 input.`, 'ok');
       showToast(`2FA code auto-typed for ${label}.`, 'ok');
     } else {
@@ -5364,74 +5701,69 @@ function wireEventListeners() {
       fsBtn.textContent =
         document.fullscreenElement === byId('gateway-live-stage') ? 'Exit Fullscreen' : 'Fullscreen';
     }
+    if (appState.gatewayPane === 'ssh' && appState.sshTerminal) {
+      requestAnimationFrame(() => {
+        appState.sshTerminal?.fit();
+        appState.sshTerminal?.focus();
+      });
+    }
   });
 
-  // SSH Terminal controls
-  byId('form-gateway-ssh-input')?.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const input = byId('gateway-ssh-input');
-    if (!input) return;
-    if (appState.gatewayPreviewActive) {
-      if (appState.gatewayViewOnly) {
-        showToast('View-Only mode active. Click Take Control to send SSH commands.', 'danger');
-        return;
+  // SSH Terminal HUD Paste & Compact Tactile Shortcut Ribbon
+  byId('btn-gateway-ssh-paste')?.addEventListener('click', () => {
+    handleSshPasteFromClipboard();
+  });
+
+  const sshRibbon = byId('gateway-ssh-ribbon');
+  sshRibbon?.addEventListener('pointerdown', (e) => {
+    if (e.target instanceof Element && e.target.closest('button')) {
+      e.preventDefault();
+    }
+  });
+  sshRibbon?.addEventListener('click', (e) => {
+    const btn = e.target instanceof Element ? e.target.closest('button') : null;
+    if (!btn) return;
+    const term = ensureSshTerminal();
+    const seqKey = btn.getAttribute('data-ssh-seq');
+    const action = btn.getAttribute('data-ssh-action');
+
+    if (seqKey) {
+      const ss3 = term.appCursorKeys ? '\x1bO' : '\x1b[';
+      const seqMap = {
+        esc: '\x1b',
+        tab: '\t',
+        'ctrl-c': '\x03',
+        'ctrl-d': '\x04',
+        'ctrl-l': '\x0c',
+        up: `${ss3}A`,
+        down: `${ss3}B`,
+        left: `${ss3}D`,
+        right: `${ss3}C`,
+      };
+      const seq = seqMap[seqKey];
+      if (seq) {
+        term.setCtrlLatch(false);
+        term.sendSequence(seq);
       }
-      handleGatewayPreviewSshCommand(input.value);
-      input.value = '';
+      term.focus();
       return;
     }
-    const client = appState.gatewayClient;
-    if (!client || !client.connected) return;
-    if (!client.canSendInput()) {
-      showToast('View-Only mode active. Click Take Control to send SSH commands.', 'danger');
-      return;
-    }
-    const cmd = input.value;
-    client.sendSshData(`${cmd}\n`);
-    input.value = '';
-  });
 
-  byId('gateway-ssh-console')?.addEventListener('keydown', (e) => {
-    if (appState.gatewayPreviewActive) {
-      if (appState.gatewayViewOnly) return;
-      if (e.ctrlKey && e.key.toLowerCase() === 'c') {
-        e.preventDefault();
-        appendGatewaySshOutput('^C\n');
+    if (action === 'ctrl-latch') {
+      term.toggleCtrlLatch();
+      term.focus();
+    } else if (action === 'paste') {
+      handleSshPasteFromClipboard();
+    } else if (action === '2fa') {
+      handleGatewayAutoType2fa();
+    } else if (action === 'clear') {
+      term.clearScrollbackAndScreen();
+      appState.gatewaySshBuffer = '';
+      if (appState.gatewayPreviewActive && appState.gatewayPreviewState && !appState.gatewayPreviewState.sshAltApp) {
+        appendGatewaySshOutput(formatPreviewSshPrompt(appState.gatewayPreviewState));
       }
-      return;
+      term.focus();
     }
-    const client = appState.gatewayClient;
-    if (!client || !client.connected || !client.canSendInput()) return;
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      client.sendSshData('\n');
-    } else if (e.key === 'Backspace') {
-      e.preventDefault();
-      client.sendSshData('\x7f');
-    } else if (e.ctrlKey && e.key.toLowerCase() === 'c') {
-      e.preventDefault();
-      client.sendSshData('\x03');
-    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      client.sendSshData(e.key);
-    }
-  });
-
-  byId('btn-gateway-ssh-ctrlc')?.addEventListener('click', () => {
-    if (appState.gatewayPreviewActive && !appState.gatewayViewOnly) {
-      appendGatewaySshOutput('^C\n');
-      return;
-    }
-    const client = appState.gatewayClient;
-    if (client && client.connected && client.canSendInput()) {
-      client.sendSshData('\x03');
-    }
-  });
-
-  byId('btn-gateway-ssh-clear')?.addEventListener('click', () => {
-    appState.gatewaySshBuffer = '';
-    const consoleEl = byId('gateway-ssh-console');
-    if (consoleEl) consoleEl.textContent = '';
   });
 
   // SFTP File Browser controls
@@ -5588,7 +5920,10 @@ function wireEventListeners() {
       tag === 'INPUT' ||
       tag === 'TEXTAREA' ||
       tag === 'SELECT' ||
-      (activeEl && (activeEl.id === 'gateway-canvas' || activeEl.id === 'gateway-ssh-console'));
+      (activeEl &&
+        (activeEl.id === 'gateway-canvas' ||
+          activeEl.id === 'gateway-ssh-terminal' ||
+          activeEl.id === 'gateway-ssh-console'));
     if ((e.key === '/' && !isEditing) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !isEditing)) {
       e.preventDefault();
       byId('global-search')?.focus();

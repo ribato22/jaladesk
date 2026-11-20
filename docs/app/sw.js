@@ -7,7 +7,7 @@
  */
 
 const CACHE_PREFIX = 'jaladesk-web-pwa-';
-const CACHE_NAME = `${CACHE_PREFIX}v6`;
+const CACHE_NAME = `${CACHE_PREFIX}v7`;
 
 const PRECACHE_PATHS = [
   './',
@@ -15,6 +15,7 @@ const PRECACHE_PATHS = [
   './app.css',
   './app.js',
   './gateway-client.js',
+  './vt-terminal-web.js',
   './vault-core.js',
   './web-oauth-config.js',
   './manifest.webmanifest',

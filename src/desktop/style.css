@@ -627,6 +627,7 @@ dialog.jala-studio-dialog[open]{display:flex;flex-direction:column}
 dialog.jala-cloud-sync-dialog{width:min(580px,94vw)}
 dialog.jala-vault-2fa-dialog{width:min(640px,94vw)}
 dialog.jala-pin-settings-dialog{width:min(540px,94vw)}
+dialog.jala-web-bridge-dialog{width:min(560px,94vw)}
 dialog.jala-user-guide-dialog{width:min(960px,95vw);max-height:90vh}
 
 .jala-studio-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 20px;background:color-mix(in srgb,var(--header) 92%,var(--tabs));color:var(--header-text);border-bottom:1px solid var(--line);flex:none}
@@ -812,9 +813,28 @@ dialog.jala-user-guide-dialog{width:min(960px,95vw);max-height:90vh}
 .jala-guide-bullet-title{font-size:12.5px;font-weight:650;color:var(--text)}
 .jala-guide-bullet-text{margin:0;font-size:12.5px;line-height:1.5;color:var(--muted)}
 
+/* Built-In Local Web Bridge Studio */
+#tb-web-bridge[data-running=true]{background:color-mix(in srgb,var(--ok) 20%,var(--chip));border-color:color-mix(in srgb,var(--ok) 62%,transparent);color:var(--header-text)}
+#tb-web-bridge[data-running=true] svg{color:var(--ok)}
+.wb-pill-dot{width:7px;height:7px;border-radius:999px;background:var(--glyph);flex:none;transition:background-color .16s ease}
+#tb-web-bridge[data-running=true] .wb-pill-dot{background:var(--ok)}
+.wb-control-strip{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 16px;border-radius:10px;background:color-mix(in srgb,var(--surface) 90%,var(--bar));border:1px solid var(--line)}
+.wb-endpoint-meta{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.wb-endpoint-heading{font-size:13.5px;font-weight:650;color:var(--text)}
+.wb-control-actions{display:flex;align-items:flex-end;gap:8px;flex:none}
+.wb-port-field{margin:0;display:flex;flex-direction:column;gap:3px;width:86px;font-size:12px;font-weight:600;color:var(--muted)}
+.wb-port-field input{height:30px;margin:0;padding:4px 8px;font-size:12.5px}
+.wb-pairing-section{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:10px;background:var(--surface);border:1px solid var(--line)}
+.wb-pairing-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.wb-pairing-code{font-size:26px;font-weight:750;letter-spacing:.14em;line-height:1.2;color:var(--text);user-select:all}
+.wb-pairing-code[data-empty=true]{color:var(--muted);letter-spacing:.1em}
+.wb-launch-section{display:flex;flex-direction:column;gap:8px}
+.wb-gold-cta{width:100%;height:38px;padding:0 16px;font-size:13px;font-weight:700;background:var(--brand);border:1px solid color-mix(in srgb,var(--amber) 72%,var(--brand));color:var(--header);box-shadow:0 2px 8px var(--shadow)}
+.wb-gold-cta:hover:not(:disabled){filter:brightness(1.04);background:var(--brand);border-color:var(--amber);color:var(--header)}
+
 @media(max-width:950px){
   .jala-guide-grid,.jala-form-grid-2,.jala-jvault-grid{grid-template-columns:1fr}
-  .cs-gdrive-hero,.jala-totp-row-main{flex-direction:column;align-items:stretch}
+  .cs-gdrive-hero,.jala-totp-row-main,.wb-control-strip,.wb-pairing-row{flex-direction:column;align-items:stretch}
   .jala-totp-right{justify-content:space-between}
   .layout{grid-template-columns:224px 1fr}
   .overview-proto-grid{grid-template-columns:repeat(2,minmax(160px,1fr))}

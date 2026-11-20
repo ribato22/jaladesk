@@ -894,7 +894,7 @@
               <div class="gateway-hud-left">
                 <span class="status-dot status-dot-ok" id="hud-live-dot" aria-hidden="true"></span>
                 <span class="gateway-hud-target mono" id="hud-target-badge">DEMO &middot; 1280&times;720</span>
-                <div class="gateway-telemetry-strip mono" aria-label="Live stream telemetry">
+                <div class="gateway-telemetry-strip mono" id="gateway-telemetry-strip" aria-label="Live stream telemetry">
                   <span class="hud-metric" id="hud-metric-fps">0 FPS</span>
                   <span class="hud-metric-sep" aria-hidden="true">&middot;</span>
                   <span class="hud-metric" id="hud-metric-rtt">0 ms</span>
@@ -902,6 +902,11 @@
                   <span class="hud-metric" id="hud-metric-kbps">0 KB/s</span>
                   <span class="hud-metric-sep" aria-hidden="true">&middot;</span>
                   <span class="hud-metric" id="hud-metric-tiles">0 tiles</span>
+                </div>
+                <div class="gateway-telemetry-strip gateway-ssh-telemetry mono" id="gateway-ssh-telemetry-strip" aria-label="SSH terminal geometry" hidden>
+                  <span class="hud-metric" id="hud-ssh-dims">100&times;30</span>
+                  <span class="hud-metric-sep" aria-hidden="true">&middot;</span>
+                  <span class="hud-metric" id="hud-ssh-mode">VT100 TUI</span>
                 </div>
               </div>
 
@@ -920,6 +925,8 @@
 
                 <button class="btn btn-secondary btn-sm" id="btn-gateway-control-toggle" type="button" aria-pressed="true">Interactive &middot; Release</button>
 
+                <button class="btn btn-secondary btn-sm" id="btn-gateway-ssh-paste" type="button" hidden>Paste</button>
+
                 <div class="gateway-totp-autotype" id="gateway-totp-autotype-group">
                   <select id="gateway-totp-select" class="select-compact gateway-totp-select" aria-label="2FA token to auto-type">
                     <option value="">No 2FA tokens</option>
@@ -933,11 +940,11 @@
               </div>
             </div>
 
-            <!-- Interactive Browser Preview Banner -->
+            <!-- Offline UI Preview Banner -->
             <div id="gateway-preview-banner" class="gateway-preview-banner" role="status" hidden>
               <div class="gateway-preview-banner-copy">
                 <span class="status-dot status-dot-warn" aria-hidden="true"></span>
-                <span>Interactive Browser Preview &mdash; Start JalaDesk Gateway to connect to live servers</span>
+                <span id="gateway-preview-banner-text">Offline UI Preview &mdash; Toggle Web Bridge ON in JalaDesk Desktop or start Docker Gateway for live servers</span>
               </div>
               <button class="btn btn-secondary btn-sm" id="btn-gateway-preview-setup" type="button">Show Gateway Setup</button>
             </div>
@@ -952,15 +959,38 @@
               </div>
             </div>
 
-            <!-- Live SSH Terminal Pane -->
+            <!-- Live Interactive SSH VT100/ANSI Terminal TUI Pane -->
             <div id="gateway-ssh-pane" class="gateway-ssh-pane" hidden>
-              <pre id="gateway-ssh-console" class="gateway-ssh-console mono" tabindex="0" aria-label="Live SSH terminal console"></pre>
-              <form id="form-gateway-ssh-input" class="gateway-ssh-form" novalidate>
-                <input id="gateway-ssh-input" class="text-input mono" type="text" autocomplete="off" placeholder="Type command (e.g. help, whoami, uname -a, ls) and press Enter...">
-                <button class="btn btn-primary btn-sm" id="btn-gateway-ssh-send" type="submit">Send</button>
-                <button class="btn btn-secondary btn-sm" id="btn-gateway-ssh-ctrlc" type="button">Ctrl+C</button>
-                <button class="btn btn-ghost btn-sm" id="btn-gateway-ssh-clear" type="button">Clear</button>
-              </form>
+              <div id="gateway-ssh-stage" class="gateway-ssh-stage">
+                <canvas
+                  id="gateway-ssh-terminal"
+                  class="gateway-ssh-terminal"
+                  width="960"
+                  height="600"
+                  tabindex="0"
+                  role="application"
+                  aria-label="Interactive SSH VT100 terminal — click and type directly"
+                ></canvas>
+                <pre id="gateway-ssh-console" class="sr-only" aria-live="polite"></pre>
+              </div>
+              <div id="gateway-ssh-ribbon" class="gateway-ssh-ribbon" role="toolbar" aria-label="Terminal keyboard shortcuts">
+                <button class="ssh-key-btn mono" type="button" data-ssh-seq="esc">Esc</button>
+                <button class="ssh-key-btn mono" type="button" data-ssh-seq="tab">Tab</button>
+                <button class="ssh-key-btn mono" id="btn-ssh-ctrl-latch" type="button" data-ssh-action="ctrl-latch" aria-pressed="false">Ctrl</button>
+                <span class="ssh-ribbon-sep" aria-hidden="true"></span>
+                <button class="ssh-key-btn mono" type="button" data-ssh-seq="ctrl-c" id="btn-gateway-ssh-ctrlc">^C</button>
+                <button class="ssh-key-btn mono" type="button" data-ssh-seq="ctrl-d">^D</button>
+                <button class="ssh-key-btn mono" type="button" data-ssh-seq="ctrl-l">^L</button>
+                <span class="ssh-ribbon-sep" aria-hidden="true"></span>
+                <button class="ssh-key-btn mono" type="button" data-ssh-seq="up" aria-label="Arrow Up">&uarr;</button>
+                <button class="ssh-key-btn mono" type="button" data-ssh-seq="down" aria-label="Arrow Down">&darr;</button>
+                <button class="ssh-key-btn mono" type="button" data-ssh-seq="left" aria-label="Arrow Left">&larr;</button>
+                <button class="ssh-key-btn mono" type="button" data-ssh-seq="right" aria-label="Arrow Right">&rarr;</button>
+                <span class="ssh-ribbon-sep" aria-hidden="true"></span>
+                <button class="ssh-key-btn" type="button" data-ssh-action="paste" id="btn-ssh-ribbon-paste">Paste</button>
+                <button class="ssh-key-btn ssh-key-btn-accent" type="button" data-ssh-action="2fa" id="btn-ssh-ribbon-2fa">2FA Auto-Type</button>
+                <button class="ssh-key-btn" type="button" data-ssh-action="clear" id="btn-gateway-ssh-clear">Clear</button>
+              </div>
             </div>
 
             <!-- Live SFTP File Browser Pane -->
@@ -1004,44 +1034,11 @@
                 <span id="gateway-local-probe-text" class="gateway-probe-text">Checking Local Gateway (127.0.0.1:8443)...</span>
               </div>
 
-              <!-- Interactive Browser Remote Desktop GUI Preview Callout -->
-              <div id="gateway-preview-callout" class="gateway-preview-callout">
-                <p class="gateway-preview-callout-text">Live RDP, VNC &amp; SSH remote sessions render right inside this browser tab. Try the interactive desktop canvas, Fit/Fill/1:1 scaling, 2FA Auto-Type &amp; SSH preview now.</p>
-                <button class="btn btn-primary" id="btn-gateway-preview-demo" type="button">
-                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <rect x="2" y="3" width="20" height="14" rx="2"></rect>
-                    <line x1="8" y1="21" x2="16" y2="21"></line>
-                    <line x1="12" y1="17" x2="12" y2="21"></line>
-                  </svg>
-                  <span>Preview Live Remote GUI (Interactive Demo)</span>
-                </button>
-              </div>
+              <p id="gateway-desktop-bridge-note" class="gateway-bridge-note">
+                Have JalaDesk Desktop installed? Toggle <code class="mono">Web Bridge</code> ON inside JalaDesk.app (or run <code class="mono">npm run gateway</code>) to connect live from your browser.
+              </p>
 
-              <!-- 2-Step Inline Guidance When No Local Gateway Is Running -->
-              <section id="gateway-setup-guidance" class="gateway-guidance-block" aria-label="Local gateway setup steps" hidden>
-                <p class="gateway-guidance-reason">Browsers block raw TCP :22/:3389/:5900 sockets; run JalaDesk Gateway locally on your Mac/PC or Docker server, then enter the 6-digit Pairing Code.</p>
-                <ol class="gateway-guidance-steps">
-                  <li class="gateway-guidance-step">
-                    <span class="gateway-step-label">Start JalaDesk Gateway locally or with Docker:</span>
-                    <div class="gateway-cmd-list">
-                      <div class="gateway-cmd-row">
-                        <code class="gateway-cmd-code mono" id="gateway-cmd-npm">npm run gateway -- --host 127.0.0.1 --port 8443</code>
-                        <button class="btn btn-secondary btn-sm" id="btn-copy-gw-npm" type="button">Copy Command</button>
-                      </div>
-                      <div class="gateway-cmd-row">
-                        <code class="gateway-cmd-code mono" id="gateway-cmd-docker">docker compose -f docker-compose.gateway.yml up -d</code>
-                        <button class="btn btn-secondary btn-sm" id="btn-copy-gw-docker" type="button">Copy Command</button>
-                      </div>
-                    </div>
-                  </li>
-                  <li class="gateway-guidance-step">
-                    <span class="gateway-step-label">Detect your running gateway, then enter the 6-digit Pairing Code below to launch this host automatically.</span>
-                  </li>
-                </ol>
-                <div class="gateway-guidance-actions">
-                  <button class="btn btn-secondary btn-sm" id="btn-check-local-gateway" type="button">Check Local Gateway</button>
-                </div>
-              </section>
+              <div id="gateway-fragment-notice" class="inline-alert inline-alert-info" role="status" hidden></div>
 
               <!-- RAM-Only Missing Credentials Prompt (when Gateway is already paired) -->
               <section id="gateway-cred-prompt" class="gateway-cred-prompt" aria-label="Target credentials prompt" hidden>
@@ -1066,12 +1063,10 @@
                   <textarea id="gateway-runtime-key" class="text-input text-area mono" rows="3" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
                 </div>
                 <div class="gateway-cred-prompt-actions">
-                  <button class="btn btn-primary btn-sm" id="btn-gateway-launch-with-creds" type="button">Launch Session</button>
+                  <button class="btn btn-primary btn-sm" id="btn-gateway-launch-with-creds" type="button">Launch Live Session</button>
                   <button class="btn btn-ghost btn-sm" id="btn-gateway-launch-no-creds" type="button">Connect Without Password</button>
                 </div>
               </section>
-
-              <div id="gateway-fragment-notice" class="inline-alert inline-alert-info" role="status" hidden></div>
 
               <form id="form-gateway-connect" class="stack-form" novalidate>
                 <div class="field-group">
@@ -1120,7 +1115,7 @@
                     class="text-input mono"
                     type="password"
                     autocomplete="off"
-                    placeholder="Auto-captured from #token= URL fragment or paste token"
+                    placeholder="Auto-paired from JalaDesk Desktop or paste token"
                   >
                 </div>
 
@@ -1142,10 +1137,42 @@
                 </div>
 
                 <div class="action-bar-wrap">
-                  <button class="btn btn-primary" id="btn-gateway-connect" type="submit">Connect Bridge</button>
+                  <button class="btn btn-primary" id="btn-gateway-connect" type="submit">Connect Live Session</button>
                   <button class="btn btn-secondary" id="btn-gateway-disconnect" type="button" disabled>Disconnect</button>
                 </div>
               </form>
+
+              <!-- 2-Step Inline Guidance When No Local Gateway Is Running -->
+              <section id="gateway-setup-guidance" class="gateway-guidance-block" aria-label="Local gateway setup steps" hidden>
+                <p class="gateway-guidance-reason">Browsers block raw TCP :22/:3389/:5900 sockets; toggle Web Bridge ON in JalaDesk Desktop, or run JalaDesk Gateway locally / with Docker:</p>
+                <ol class="gateway-guidance-steps">
+                  <li class="gateway-guidance-step">
+                    <span class="gateway-step-label">Start JalaDesk Gateway locally or with Docker:</span>
+                    <div class="gateway-cmd-list">
+                      <div class="gateway-cmd-row">
+                        <code class="gateway-cmd-code mono" id="gateway-cmd-npm">npm run gateway -- --host 127.0.0.1 --port 8443</code>
+                        <button class="btn btn-secondary btn-sm" id="btn-copy-gw-npm" type="button">Copy Command</button>
+                      </div>
+                      <div class="gateway-cmd-row">
+                        <code class="gateway-cmd-code mono" id="gateway-cmd-docker">docker compose -f docker-compose.gateway.yml up -d</code>
+                        <button class="btn btn-secondary btn-sm" id="btn-copy-gw-docker" type="button">Copy Command</button>
+                      </div>
+                    </div>
+                  </li>
+                  <li class="gateway-guidance-step">
+                    <span class="gateway-step-label">Detect your running gateway, then enter the 6-digit Pairing Code above to launch this host automatically.</span>
+                  </li>
+                </ol>
+                <div class="gateway-guidance-actions">
+                  <button class="btn btn-secondary btn-sm" id="btn-check-local-gateway" type="button">Check Local Gateway</button>
+                </div>
+              </section>
+
+              <!-- Subtle Secondary Offline Preview Link (Demoted from Primary CTA) -->
+              <div id="gateway-preview-callout" class="gateway-preview-footer">
+                <span class="gateway-preview-footer-label">No gateway running yet?</span>
+                <button class="btn btn-ghost btn-sm" id="btn-gateway-preview-demo" type="button">Try Offline UI Preview</button>
+              </div>
 
               <div class="gateway-viewport" id="gateway-viewport">
                 <div class="gateway-viewport-bar">

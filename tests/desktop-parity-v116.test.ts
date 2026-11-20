@@ -26,6 +26,7 @@ import {
 } from '../src/desktop/studios-sre-ha.js';
 import { JALADESK_GUIDE_TOPICS } from '../src/desktop/user-guide-ui.js';
 import { DocumentLibrary } from '../src/documents/library.js';
+import { startGatewayServer } from '../src/gateway/server.js';
 
 const readDesktopFile = (name: string) =>
   readFile(fileURLToPath(new URL(`../../src/desktop/${name}`, import.meta.url)), 'utf8');
@@ -488,4 +489,104 @@ test('Connection Action Sheet, 1-row segmented controls, separated footers, IPC 
   for (const forbiddenIndo of ['Pengaturan', 'Koneksi', 'Sandinya', 'Simpan Otomatis', 'Bahasa Indonesia']) {
     assert.equal(allGuideText.includes(forbiddenIndo), false, `User Guide has zero Indonesian word: ${forbiddenIndo}`);
   }
+});
+
+test('Desktop Web Bridge IPC, UI elements, lifecycle cleanup, and embedded startGatewayServer auto-pairing contract', async () => {
+  const [html, css, preload, mainTs, rendererTs] = await Promise.all([
+    readDesktopFile('index.html'),
+    readDesktopFile('style.css'),
+    readDesktopFile('preload.cjs'),
+    readDesktopFile('main.ts'),
+    readDesktopFile('renderer.ts'),
+  ]);
+
+  // 1. Preload & Main IPC channels + sender guard + shutdown lifecycle hooks
+  assert.ok(preload.includes("contextBridge.exposeInMainWorld('webBridge'"), 'preload exposes window.webBridge');
+  for (const channel of [
+    'webBridge:status',
+    'webBridge:start',
+    'webBridge:stop',
+    'webBridge:openWebApp',
+    'webBridge:copyCode',
+    'webBridge:rotateCode',
+  ]) {
+    assert.ok(preload.includes(channel), `preload.cjs exposes ${channel}`);
+    assert.ok(mainTs.includes(channel), `main.ts handles ${channel}`);
+  }
+  assert.ok(mainTs.includes('startGatewayServer'), 'main.ts imports and invokes startGatewayServer');
+  assert.ok(mainTs.includes("'https://ribato22.github.io'"), 'main.ts allows GitHub Pages origin via CORS');
+  assert.ok(
+    mainTs.includes('https://ribato22.github.io/jaladesk/app/') && mainTs.includes('#gateway='),
+    'main.ts opens auto-paired JalaDesk Web URL fragment',
+  );
+  assert.ok(mainTs.includes("app.on('before-quit'") && mainTs.includes('stopWebBridge()'), 'main.ts stops Web Bridge on before-quit');
+  assert.match(mainTs, /app\.on\('window-all-closed'[^]*stopWebBridge\(\)/, 'main.ts stops Web Bridge on window-all-closed');
+
+  // 2. Desktop UI elements, classes & renderer wiring
+  for (const id of [
+    'tb-web-bridge',
+    'web-bridge-dialog',
+    'web-bridge-status-pill',
+    'web-bridge-toggle-btn',
+    'web-bridge-pairing-code',
+    'web-bridge-copy-btn',
+    'web-bridge-open-web-btn',
+  ]) {
+    assert.ok(html.includes(`id="${id}"`), `index.html contains #${id}`);
+  }
+  assert.ok(css.includes('#tb-web-bridge[data-running=true]'), 'style.css styles active toolbar bridge pill');
+  assert.ok(css.includes('.wb-gold-cta'), 'style.css styles gold auto-pair launch CTA');
+  assert.ok(rendererTs.includes('createWebBridgeStudio') && rendererTs.includes('webBridgeApi.openWebApp'));
+
+  // 3. Real embedded startGatewayServer lifecycle matching Desktop main.ts options
+  const gw = await startGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    corsOrigins: ['https://ribato22.github.io', 'http://127.0.0.1:8443', 'http://localhost:8443'],
+  });
+  try {
+    assert.equal(gw.running, true);
+    assert.match(gw.url, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.match(gw.pairingCode ?? '', /^\d{6}$/);
+    assert.match(gw.token, /^[0-9a-f]{64}$/);
+    assert.equal(gw.activeSessions, 0);
+
+    // Verify auto-pair fragment roundtrip + CORS/PNA preflight + authenticated ticket issuance
+    const launchUrl = `https://ribato22.github.io/jaladesk/app/#gateway=${gw.url}&token=${gw.token}`;
+    const parsedFragment = new URLSearchParams(new URL(launchUrl).hash.slice(1));
+    assert.equal(parsedFragment.get('gateway'), gw.url);
+    assert.equal(parsedFragment.get('token'), gw.token);
+
+    const preflight = await fetch(`${gw.url}/api/tickets`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://ribato22.github.io',
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Private-Network': 'true',
+      },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), 'https://ribato22.github.io');
+    assert.equal(preflight.headers.get('access-control-allow-private-network'), 'true');
+
+    const ticketRes = await fetch(`${gw.url}/api/tickets`, {
+      method: 'POST',
+      headers: {
+        Origin: 'https://ribato22.github.io',
+        Authorization: `Bearer ${gw.token}`,
+      },
+    });
+    assert.equal(ticketRes.status, 200);
+    const ticketBody = (await ticketRes.json()) as { ticket?: string; expiresInSec?: number };
+    assert.ok(typeof ticketBody.ticket === 'string' && ticketBody.ticket.length >= 16);
+
+    const rotated = gw.rotatePairingCode();
+    assert.match(rotated.code, /^\d{6}$/);
+    assert.equal(gw.pairingCode, rotated.code);
+  } finally {
+    await gw.stop();
+    await gw.stop(); // idempotent teardown
+  }
+  assert.equal(gw.running, false);
+  await assert.rejects(() => fetch(`${gw.url}/healthz`));
 });

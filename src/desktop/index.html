@@ -37,6 +37,7 @@
       <div id="toolbar" role="toolbar" aria-label="Toolbar" hidden></div>
 
       <div class="topbar-right">
+        <button id="tb-web-bridge" type="button" class="quiet topbar-studio-pill" title="Built-In Local Web Bridge for JalaDesk Web" data-tooltip="Web Bridge (Local Gateway)">Web Bridge</button>
         <button id="cloud-sync-btn" type="button" class="quiet topbar-studio-pill" title="Zero-Knowledge Cloud Sync &amp; .jvault Backup" data-tooltip="Cloud Sync &amp; .jvault">Cloud Sync</button>
         <button id="vault-2fa-btn" type="button" class="quiet topbar-studio-pill" title="2FA Authenticator Vault (RFC 6238)" data-tooltip="Authenticator (2FA)">2FA Vault</button>
         <button id="user-guide-btn" type="button" class="quiet topbar-studio-pill" title="JalaDesk Built-In User Guide" data-tooltip="JalaDesk Guide">Guide</button>
@@ -115,6 +116,7 @@
             <span class="nav-group-title">Application</span>
           </div>
           <ul id="app-tree" class="app-tree" role="list">
+            <li><button type="button" class="app-tree-row" data-app-action="web-bridge"><span class="app-tree-icon">⇄</span><span>Web Bridge (Browser)</span></button></li>
             <li><button type="button" class="app-tree-row" data-app-action="cloud-sync"><span class="app-tree-icon">☁</span><span>Cloud Sync &amp; Backup</span></button></li>
             <li><button type="button" class="app-tree-row" data-app-action="authenticator-2fa"><span class="app-tree-icon">🛡</span><span>Authenticator (2FA)</span></button></li>
             <li><button type="button" class="app-tree-row" data-app-action="app-lock-pin"><span class="app-tree-icon">🔒</span><span>App Lock PIN</span></button></li>
@@ -1137,6 +1139,70 @@
       </div>
     </div>
   </div>
+
+  <dialog id="web-bridge-dialog" class="jala-studio-dialog jala-web-bridge-dialog" aria-labelledby="web-bridge-title">
+    <div class="jala-studio-header">
+      <div class="jala-studio-header-lead">
+        <span id="web-bridge-header-icon" class="jala-studio-icon-badge" data-tone="gold" aria-hidden="true"></span>
+        <div class="jala-studio-title-group">
+          <h2 id="web-bridge-title" class="jala-studio-title">Web Bridge</h2>
+          <p class="jala-studio-subtitle">Local loopback gateway for JalaDesk Web (SSH TUI · RDP · VNC · SFTP)</p>
+        </div>
+      </div>
+      <div class="jala-studio-header-actions">
+        <span id="web-bridge-status-pill" class="jala-status-pill" role="status" aria-live="polite">Bridge Stopped</span>
+        <button type="button" id="web-bridge-close" class="jala-icon-close-btn" aria-label="Close Web Bridge" title="Close">✕</button>
+      </div>
+    </div>
+    <div class="jala-studio-body">
+      <div class="wb-control-strip">
+        <div class="wb-endpoint-meta">
+          <strong id="web-bridge-endpoint-heading" class="wb-endpoint-heading">Local Gateway Inactive</strong>
+          <p id="web-bridge-endpoint-detail" class="jala-helper-note">Binds exclusively to 127.0.0.1 · 0 active browser sessions</p>
+        </div>
+        <div class="wb-control-actions">
+          <label class="wb-port-field">
+            <span>Port</span>
+            <input id="web-bridge-port" class="jala-input jala-mono" type="number" min="1024" max="65535" value="8443" autocomplete="off">
+          </label>
+          <button type="button" id="web-bridge-toggle-btn" class="jala-btn jala-btn-primary">Start Web Bridge</button>
+        </div>
+      </div>
+
+      <div class="wb-pairing-section">
+        <div class="jala-section-row-between">
+          <span class="jala-section-heading">6-Digit Pairing Code</span>
+          <span id="web-bridge-pairing-meta" class="jala-helper-note">Start Web Bridge to generate a single-use code</span>
+        </div>
+        <div class="wb-pairing-row">
+          <output id="web-bridge-pairing-code" class="wb-pairing-code jala-mono" data-empty="true" aria-live="polite">--- ---</output>
+          <div class="jala-inline-actions">
+            <button type="button" id="web-bridge-copy-btn" class="jala-btn" disabled>Copy Code</button>
+            <button type="button" id="web-bridge-rotate-btn" class="jala-btn" disabled>New Code</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="wb-launch-section">
+        <button type="button" id="web-bridge-open-web-btn" class="jala-btn wb-gold-cta">Open JalaDesk Web (Auto-Paired)</button>
+        <p class="jala-helper-note">Starts the local bridge automatically if stopped and opens JalaDesk Web in your default browser pre-paired — zero terminal commands required.</p>
+      </div>
+
+      <div id="web-bridge-feedback" class="jala-unified-callout" role="status" aria-live="polite" hidden>
+        <span id="web-bridge-feedback-icon" class="jala-callout-icon" aria-hidden="true"></span>
+        <div class="jala-callout-content">
+          <p id="web-bridge-feedback-text" class="jala-callout-text"></p>
+        </div>
+      </div>
+    </div>
+    <div class="jala-studio-footer">
+      <p class="jala-footer-note">Loopback-only (127.0.0.1) · Shuts down cleanly on quit.</p>
+      <div class="jala-studio-footer-right">
+        <button type="button" id="web-bridge-refresh-btn" class="jala-btn jala-btn-compact">Refresh</button>
+        <button type="button" id="web-bridge-done-btn" class="jala-btn jala-btn-compact">Done</button>
+      </div>
+    </div>
+  </dialog>
 
   <div id="conn-action-sheet" class="conn-action-sheet" role="menu" aria-label="Connection Actions" hidden></div>
   <div id="cloud-sync-root"></div>

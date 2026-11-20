@@ -56,3 +56,12 @@ contextBridge.exposeInMainWorld('appLock',{
   recordActivity:()=>ipcRenderer.send('appLock:activity'),
   onStateChanged:callback=>listen('appLock:state',callback),
 });
+
+contextBridge.exposeInMainWorld('webBridge',{
+  status:()=>ipcRenderer.invoke('webBridge:status'),
+  start:options=>ipcRenderer.invoke('webBridge:start',options),
+  stop:()=>ipcRenderer.invoke('webBridge:stop'),
+  openWebApp:options=>ipcRenderer.invoke('webBridge:openWebApp',options),
+  copyCode:()=>ipcRenderer.invoke('webBridge:copyCode'),
+  rotateCode:()=>ipcRenderer.invoke('webBridge:rotateCode'),
+});

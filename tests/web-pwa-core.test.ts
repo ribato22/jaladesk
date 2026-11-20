@@ -240,6 +240,8 @@ interface WebOAuthConfigModule {
 
 const VAULT_CORE_URL = new URL('../../docs/app/vault-core.js', import.meta.url);
 const WEB_OAUTH_CONFIG_URL = new URL('../../docs/app/web-oauth-config.js', import.meta.url);
+const VT_TERMINAL_WEB_URL = new URL('../../docs/app/vt-terminal-web.js', import.meta.url);
+const GATEWAY_CLIENT_URL = new URL('../../docs/app/gateway-client.js', import.meta.url);
 const INDEX_HTML_URL = new URL('../../docs/app/index.html', import.meta.url);
 const APP_JS_URL = new URL('../../docs/app/app.js', import.meta.url);
 const MANIFEST_URL = new URL('../../docs/app/manifest.webmanifest', import.meta.url);
@@ -1191,6 +1193,8 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
     './index.html',
     './app.css',
     './app.js',
+    './gateway-client.js',
+    './vt-terminal-web.js',
     './vault-core.js',
     './web-oauth-config.js',
     './manifest.webmanifest',
@@ -1203,8 +1207,8 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
   assert.ok(swRaw.includes('api.github.com'));
   assert.ok(swRaw.includes('Authorization'));
   assert.ok(
-    swRaw.includes('`${CACHE_PREFIX}v6`') || swRaw.includes("'jaladesk-web-pwa-v6'"),
-    'sw.js must bump CACHE_NAME to jaladesk-web-pwa-v6',
+    swRaw.includes('`${CACHE_PREFIX}v7`') || swRaw.includes("'jaladesk-web-pwa-v7'"),
+    'sw.js must bump CACHE_NAME to jaladesk-web-pwa-v7',
   );
 
   const indexRaw = await readFile(fileURLToPath(INDEX_HTML_URL), 'utf8');
@@ -1232,12 +1236,19 @@ test('f. PWA manifest.webmanifest and sw.js integrity checks', async () => {
     'id="btn-gw-preset-https"',
     'id="btn-gateway-preview-demo"',
     'id="gateway-preview-banner"',
+    'id="gateway-ssh-terminal"',
+    'id="gateway-ssh-ribbon"',
+    'id="btn-ssh-ctrl-latch"',
+    'id="btn-gateway-ssh-paste"',
+    'id="gateway-desktop-bridge-note"',
   ]) {
     assert.ok(indexRaw.includes(requiredId), `index.html must include ${requiredId}`);
   }
 
   const appJsRaw = await readFile(fileURLToPath(APP_JS_URL), 'utf8');
+  const vtJsRaw = await readFile(fileURLToPath(VT_TERMINAL_WEB_URL), 'utf8');
   assert.equal(/\binnerHTML\b/.test(appJsRaw), false, 'app.js must contain zero innerHTML usage');
+  assert.equal(/\binnerHTML\b/.test(vtJsRaw), false, 'vt-terminal-web.js must contain zero innerHTML usage');
   assert.equal(appJsRaw.includes('Open in Gateway'), false, 'host cards must replace ambiguous Open in Gateway with Connect');
   assert.ok(appJsRaw.includes("el('span', '', 'Connect')"), 'host cards must render Connect button');
   assert.ok(appJsRaw.includes('btn-toast-undo'), 'app.js must render undo toast button #btn-toast-undo');
@@ -1715,4 +1726,166 @@ test('h. vaultAuthMode allow-list & returning Google local-unlock-then-smartMerg
   } finally {
     await driveServer.close();
   }
+});
+
+test('i. WebVtTerminal ANSI/CSI/256-color/TrueColor/alt-screen, keyEventToAnsi & parseGatewayFragment auto-pairing', async () => {
+  interface VtCell {
+    ch: string;
+    fg: string | null;
+    bg: string | null;
+    bold: boolean;
+    dim: boolean;
+    italic: boolean;
+    underline: boolean;
+    inverse: boolean;
+  }
+  interface WebVtTerminalInstance {
+    cols: number;
+    rows: number;
+    cursorRow: number;
+    cursorCol: number;
+    inAltScreen: boolean;
+    appCursorKeys: boolean;
+    cursorVisible: boolean;
+    bracketedPaste: boolean;
+    title: string;
+    write(chunk: string): void;
+    resize(cols: number, rows: number): boolean;
+    reset(): void;
+    getCell(row: number, col: number): VtCell;
+    getLineText(row: number): string;
+    renderText(showCursor?: boolean): string;
+    pasteText(text: string): void;
+  }
+  interface VtModule {
+    ANSI_16_COLORS: readonly string[];
+    ansi256ToHex(index: number): string;
+    keyEventToAnsi(
+      ev: Record<string, unknown>,
+      options?: { appCursorKeys?: boolean; ctrlLatch?: boolean },
+    ): { data: string | null; consumeCtrlLatch: boolean; preventDefault: boolean };
+    WebVtTerminal: new (options?: {
+      cols?: number;
+      rows?: number;
+      onData?: (data: string) => void;
+    }) => WebVtTerminalInstance;
+  }
+  interface GatewayClientModule {
+    parseGatewayFragment(rawHash: string): { hasPairing: boolean; gatewayUrl: string; token: string } | null;
+  }
+
+  const vtMod = (await import(VT_TERMINAL_WEB_URL.href)) as VtModule;
+  const gwMod = (await import(GATEWAY_CLIENT_URL.href)) as GatewayClientModule;
+
+  // 1. ANSI 16-color, 256-color, 24-bit TrueColor, bold/dim/underline/inverse & reset
+  const sentReplies: string[] = [];
+  const term = new vtMod.WebVtTerminal({
+    cols: 40,
+    rows: 10,
+    onData: (seq) => sentReplies.push(seq),
+  });
+
+  term.write('\x1b[1;4;31mERR\x1b[0m \x1b[38;5;196;48;5;236m256\x1b[0m \x1b[38;2;56;189;248;2;7mRGB\x1b[0m');
+  assert.equal(term.getLineText(0), 'ERR 256 RGB');
+
+  const errCell = term.getCell(0, 0);
+  assert.equal(errCell.ch, 'E');
+  assert.equal(errCell.fg, vtMod.ANSI_16_COLORS[1]);
+  assert.equal(errCell.bold, true);
+  assert.equal(errCell.underline, true);
+
+  const cell256 = term.getCell(0, 4);
+  assert.equal(cell256.ch, '2');
+  assert.equal(cell256.fg, vtMod.ansi256ToHex(196));
+  assert.equal(cell256.bg, vtMod.ansi256ToHex(236));
+  assert.equal(cell256.bold, false);
+
+  const rgbCell = term.getCell(0, 8);
+  assert.equal(rgbCell.ch, 'R');
+  assert.equal(rgbCell.fg, '#38BDF8');
+  assert.equal(rgbCell.dim, true);
+  assert.equal(rgbCell.inverse, true);
+
+  // 2. Split escape sequence carry across chunks, OSC title, CSI cursor movement & erase
+  term.write('\x1b]0;bright-');
+  term.write('jump-host\x07');
+  assert.equal(term.title, 'bright-jump-host');
+
+  term.write('\x1b[2;1Hhello world\x1b[2;7H\x1b[Kssh');
+  assert.equal(term.getLineText(1), 'hello ssh');
+
+  // DSR cursor position query (CSI 6 n)
+  term.write('\x1b[6n');
+  assert.equal(sentReplies.includes('\x1b[2;10R'), true);
+
+  // 3. Alternate screen buffer (?1049h / ?1049l for vim/htop/nano/tmux) preserves & restores normal buffer
+  term.write('\x1b[3;5Hnormal-marker');
+  const savedRowBeforeAlt = term.cursorRow;
+  const savedColBeforeAlt = term.cursorCol;
+
+  term.write('\x1b[?1049h\x1b[?25l\x1b[1;1H\x1b[1;32mHTOP ALT SCREEN\x1b[0m');
+  assert.equal(term.inAltScreen, true);
+  assert.equal(term.cursorVisible, false);
+  assert.equal(term.getLineText(0), 'HTOP ALT SCREEN');
+  assert.equal(term.getLineText(2), '');
+
+  term.write('\x1b[?25h\x1b[?1049l');
+  assert.equal(term.inAltScreen, false);
+  assert.equal(term.cursorVisible, true);
+  assert.equal(term.cursorRow, savedRowBeforeAlt);
+  assert.equal(term.cursorCol, savedColBeforeAlt);
+  assert.equal(term.getLineText(0), 'ERR 256 RGB');
+  assert.equal(term.getLineText(2), '    normal-marker');
+
+  // 4. Scroll regions (DECSTBM CSI r) keep header/footer fixed while scrolling interior
+  term.reset();
+  term.write('HEADER\r\nline1\r\nline2\r\nline3\r\nFOOTER');
+  term.write('\x1b[2;4r\x1b[4;1H\r\nline4');
+  assert.equal(term.getLineText(0), 'HEADER');
+  assert.equal(term.getLineText(1), 'line2');
+  assert.equal(term.getLineText(2), 'line3');
+  assert.equal(term.getLineText(3), 'line4');
+  assert.equal(term.getLineText(4), 'FOOTER');
+
+  // 5. Bracketed paste mode (?2004h)
+  sentReplies.length = 0;
+  term.write('\x1b[?2004h');
+  assert.equal(term.bracketedPaste, true);
+  term.pasteText('echo hi\n');
+  assert.equal(sentReplies[0], '\x1b[200~echo hi\r\x1b[201~');
+
+  // 6. Direct keyboard event -> ANSI encoding (arrows, appCursorKeys, Ctrl chords, sticky Ctrl latch, Cmd pass-through)
+  assert.equal(vtMod.keyEventToAnsi({ key: 'Enter' }).data, '\r');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'Backspace' }).data, '\x7f');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'Tab' }).data, '\t');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'Tab', shiftKey: true }).data, '\x1b[Z');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'Escape' }).data, '\x1b');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'ArrowUp' }).data, '\x1b[A');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'ArrowDown' }, { appCursorKeys: true }).data, '\x1bOB');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'PageUp' }).data, '\x1b[5~');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'PageDown' }).data, '\x1b[6~');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'Home' }).data, '\x1b[H');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'End' }).data, '\x1b[F');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'c', ctrlKey: true }).data, '\x03');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'd', ctrlKey: true }).data, '\x04');
+  assert.equal(vtMod.keyEventToAnsi({ key: 'l', ctrlKey: true }).data, '\x0c');
+  const latched = vtMod.keyEventToAnsi({ key: 'c' }, { ctrlLatch: true });
+  assert.equal(latched.data, '\x03');
+  assert.equal(latched.consumeCtrlLatch, true);
+  // macOS Cmd+V must pass through to browser paste event
+  assert.equal(vtMod.keyEventToAnsi({ key: 'v', metaKey: true }).data, null);
+
+  // 7. #gateway=...&token=... URL fragment auto-pairing parser & security validation
+  const paired = gwMod.parseGatewayFragment('#gateway=http://127.0.0.1:8443&token=deadbeef01234567');
+  assert.deepStrictEqual(paired, {
+    hasPairing: true,
+    gatewayUrl: 'http://127.0.0.1:8443',
+    token: 'deadbeef01234567',
+  });
+  const tokenOnly = gwMod.parseGatewayFragment('#token=abc123');
+  assert.deepStrictEqual(tokenOnly, { hasPairing: true, gatewayUrl: '', token: 'abc123' });
+  const badUrl = gwMod.parseGatewayFragment('#gateway=javascript:alert(1)&token=abc123');
+  assert.deepStrictEqual(badUrl, { hasPairing: true, gatewayUrl: '', token: 'abc123' });
+  assert.equal(gwMod.parseGatewayFragment('#access_token=ya29.oauth&scope=openid'), null);
+  assert.equal(gwMod.parseGatewayFragment('#gateway'), null);
 });

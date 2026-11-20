@@ -14,6 +14,7 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 
 import { createProfiledOwner } from '../protocols/rdp/profiled-owner.js';
@@ -96,6 +97,7 @@ export interface GatewayBackend {
   readonly protocol: GatewayProtocol;
   readonly width: number;
   readonly height: number;
+  readonly ptyAllocated?: boolean;
   sendInput(event: Jsr1InputEvent): void;
   resize?(width: number, height: number): void;
   sendSshData?(data: string): void;
@@ -104,10 +106,18 @@ export interface GatewayBackend {
   close(): Promise<void>;
 }
 
+export interface GatewaySessionContext {
+  rdpHelperPath: string;
+  allowDemoSession: boolean;
+  sshBinary?: string;
+  sftpBinary?: string;
+  pythonBinary?: string | null;
+}
+
 export type GatewaySessionFactory = (
   params: OpenSessionParams,
   sink: BackendSink,
-  context: { rdpHelperPath: string; allowDemoSession: boolean },
+  context: GatewaySessionContext,
 ) => Promise<GatewayBackend>;
 
 export interface GatewayServerOptions {
@@ -120,6 +130,9 @@ export interface GatewayServerOptions {
   uiDir?: string;
   allowDemoSession?: boolean;
   rdpHelperPath?: string;
+  sshBinary?: string;
+  sftpBinary?: string;
+  pythonBinary?: string | null;
   tls?: { cert: string | Buffer; key: string | Buffer };
   sessionFactory?: GatewaySessionFactory;
   maxInFlightFrames?: number;
@@ -801,90 +814,645 @@ class VncGatewayBackend implements GatewayBackend {
   }
 }
 
-class SshGatewayBackend implements GatewayBackend {
+export interface ParsedJumpHop {
+  readonly spec: string;
+  readonly user?: string;
+  readonly host: string;
+  readonly port: number;
+}
+
+const MAX_JUMP_HOPS = 5;
+
+function isSafeSshUser(user: string): boolean {
+  if (!user || user.length > 128) return false;
+  if (user.startsWith('-')) return false;
+  return !/[\s\x00-\x1f\x7f"'`$|&;<>()]/.test(user);
+}
+
+export function validateSshUsername(rawUsername: string | undefined): string {
+  const user = (rawUsername ?? '').trim() || 'root';
+  if (!isSafeSshUser(user)) {
+    throw new Error('Invalid SSH username');
+  }
+  return user;
+}
+
+export function parseJumpHostHops(rawJumpHost: string): ParsedJumpHop[] {
+  const trimmed = rawJumpHost.trim();
+  if (!trimmed) return [];
+  if (/[\s\x00-\x1f\x7f"'`$|&;<>()\\/]/.test(trimmed)) {
+    throw new Error('Invalid SSH jumpHost syntax');
+  }
+  const parts = trimmed.split(',').map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 0 || parts.length > MAX_JUMP_HOPS) {
+    throw new Error(`SSH jumpHost must specify between 1 and ${MAX_JUMP_HOPS} hops`);
+  }
+
+  const hops: ParsedJumpHop[] = [];
+  for (const part of parts) {
+    if (part.startsWith('-')) {
+      throw new Error('SSH jumpHost hop must not begin with "-"');
+    }
+    let user: string | undefined;
+    let hostPort = part;
+    const atIdx = part.lastIndexOf('@');
+    if (atIdx >= 0) {
+      user = part.slice(0, atIdx);
+      hostPort = part.slice(atIdx + 1);
+      if (!isSafeSshUser(user)) {
+        throw new Error('Invalid username in SSH jumpHost');
+      }
+    }
+
+    let host = '';
+    let port = 22;
+    let portSpecified = false;
+    if (hostPort.startsWith('[')) {
+      const closeIdx = hostPort.indexOf(']');
+      if (closeIdx <= 1) {
+        throw new Error('Invalid IPv6 host in SSH jumpHost');
+      }
+      host = hostPort.slice(1, closeIdx);
+      const rest = hostPort.slice(closeIdx + 1);
+      if (rest) {
+        if (!/^:\d{1,5}$/.test(rest)) {
+          throw new Error('Invalid port in IPv6 SSH jumpHost');
+        }
+        port = Number(rest.slice(1));
+        portSpecified = true;
+      }
+    } else {
+      const colonIdx = hostPort.indexOf(':');
+      if (colonIdx >= 0) {
+        host = hostPort.slice(0, colonIdx);
+        const portStr = hostPort.slice(colonIdx + 1);
+        if (!/^\d{1,5}$/.test(portStr)) {
+          throw new Error('Invalid port in SSH jumpHost');
+        }
+        port = Number(portStr);
+        portSpecified = true;
+      } else {
+        host = hostPort;
+      }
+    }
+
+    if (!host || host.startsWith('-') || !Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error('Invalid host or port in SSH jumpHost');
+    }
+
+    const hostFormatted = host.includes(':') ? `[${host}]` : host;
+    const spec = `${user ? `${user}@` : ''}${hostFormatted}${portSpecified ? `:${port}` : ''}`;
+    hops.push({ spec, ...(user ? { user } : {}), host, port });
+  }
+  return hops;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function resolveExecutable(
+  override: string | undefined,
+  preferredPaths: readonly string[],
+  fallbackName: string,
+): string {
+  if (override && override.trim()) {
+    return override.trim();
+  }
+  for (const candidate of preferredPaths) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return fallbackName;
+}
+
+let cachedDefaultPython3: string | null | undefined;
+
+function probePythonPtyBinary(binPath: string): Promise<boolean> {
+  return new Promise((resolveProbe) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveProbe(ok);
+    };
+    const child = spawn(binPath, ['-c', 'import pty, fcntl, termios, select, signal, struct'], {
+      shell: false,
+      stdio: 'ignore',
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+      finish(false);
+    }, 2500);
+    timer.unref();
+    child.once('error', () => finish(false));
+    child.once('close', (code) => finish(code === 0));
+  });
+}
+
+async function resolvePython3Binary(override?: string | null): Promise<string | null> {
+  if (override === null) return null;
+  if (typeof override === 'string') {
+    const trimmed = override.trim();
+    if (!trimmed) return null;
+    if ((trimmed.includes('/') || trimmed.includes('\\')) && !existsSync(trimmed)) {
+      return null;
+    }
+    return (await probePythonPtyBinary(trimmed)) ? trimmed : null;
+  }
+  if (cachedDefaultPython3 !== undefined) {
+    return cachedDefaultPython3;
+  }
+  const candidates = ['/usr/bin/python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3', 'python3'];
+  for (const candidate of candidates) {
+    if (candidate.startsWith('/') && !existsSync(candidate)) continue;
+    if (await probePythonPtyBinary(candidate)) {
+      cachedDefaultPython3 = candidate;
+      return candidate;
+    }
+  }
+  cachedDefaultPython3 = null;
+  return null;
+}
+
+// Genuine POSIX PTY bridge using pty.openpty() + TIOCSCTTY + TIOCSWINSZ resize + clean process-group teardown
+const PYTHON_GATEWAY_PTY_BRIDGE = String.raw`
+import os, sys, pty, select, signal, struct, fcntl, termios, json, errno, time
+
+argv_cmd = json.loads(sys.argv[1])
+cols = max(20, min(400, int(sys.argv[2])))
+rows = max(8, min(200, int(sys.argv[3])))
+
+# Consume optional fallback passwords and immediately strip them before execvp
+jump_pass = os.environ.pop("JALADESK_GW_JUMP_PASS", "")
+ssh_pass = os.environ.pop("JALADESK_GW_SSH_PASS", "")
+auto_passwords = [p for p in (jump_pass, ssh_pass) if p]
+started_at = time.monotonic()
+
+def set_winsize(fd, r, c):
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", r, c, 0, 0))
+    except Exception:
+        pass
+
+def write_all(fd, data):
+    view = memoryview(data)
+    written = 0
+    total = len(view)
+    while written < total:
+        try:
+            n = os.write(fd, view[written:])
+            if n <= 0:
+                return False
+            written += n
+        except BlockingIOError:
+            _, wlist, _ = select.select([], [fd], [], 1.0)
+            if not wlist:
+                return False
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            return False
+    return True
+
+master_fd, slave_fd = pty.openpty()
+set_winsize(slave_fd, rows, cols)
+set_winsize(master_fd, rows, cols)
+
+pid = os.fork()
+if pid == 0:
+    try:
+        os.close(master_fd)
+        os.setsid()
+        try:
+            fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+        except Exception:
+            pass
+        os.dup2(slave_fd, 0)
+        os.dup2(slave_fd, 1)
+        os.dup2(slave_fd, 2)
+        if slave_fd > 2:
+            os.close(slave_fd)
+        os.environ["TERM"] = "xterm-256color"
+        os.environ["COLORTERM"] = "truecolor"
+        os.environ["COLUMNS"] = str(cols)
+        os.environ["LINES"] = str(rows)
+        if "LANG" not in os.environ:
+            os.environ["LANG"] = "en_US.UTF-8"
+        os.execvp(argv_cmd[0], argv_cmd)
+    except Exception as exc:
+        try:
+            os.write(2, f"PTY exec failed: {exc}\r\n".encode("utf-8", "replace"))
+        except Exception:
+            pass
+        os._exit(127)
+
+os.close(slave_fd)
+stdin_fd = sys.stdin.fileno()
+stdout_fd = sys.stdout.fileno()
+os.set_blocking(master_fd, False)
+os.set_blocking(stdin_fd, False)
+
+stopping = False
+def handle_term(signum, frame):
+    global stopping
+    stopping = True
+
+signal.signal(signal.SIGTERM, handle_term)
+signal.signal(signal.SIGINT, handle_term)
+
+in_buf = b""
+prompt_tail = b""
+exit_code = 0
+child_exited = False
+
+def reap_child_nonblocking():
+    global child_exited, exit_code
+    if child_exited:
+        return True
+    try:
+        wpid, status = os.waitpid(pid, os.WNOHANG)
+        if wpid == pid:
+            child_exited = True
+            if os.WIFEXITED(status):
+                exit_code = os.WEXITSTATUS(status)
+            elif os.WIFSIGNALED(status):
+                exit_code = 128 + os.WTERMSIG(status)
+            return True
+    except ChildProcessError:
+        child_exited = True
+        return True
+    return False
+
+def signal_child_group(sig):
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        try:
+            os.kill(pid, sig)
+        except Exception:
+            pass
+
+try:
+    while not stopping:
+        if auto_passwords and (time.monotonic() - started_at) > 20.0:
+            auto_passwords.clear()
+        try:
+            rlist, _, _ = select.select([master_fd, stdin_fd], [], [], 0.12)
+        except InterruptedError:
+            continue
+
+        if master_fd in rlist:
+            try:
+                data = os.read(master_fd, 16384)
+                if not data:
+                    break
+                if not write_all(stdout_fd, data):
+                    break
+                if auto_passwords:
+                    prompt_tail = (prompt_tail + data)[-512:]
+                    lower = prompt_tail.lower()
+                    if b"welcome to" in lower or b"last login:" in lower:
+                        auto_passwords.clear()
+                    elif b"password:" in lower or b"passphrase" in lower:
+                        pw = auto_passwords.pop(0)
+                        prompt_tail = b""
+                        write_all(master_fd, (pw + "\n").encode("utf-8"))
+                    elif b"$ " in lower or b"# " in lower or b"> " in lower:
+                        auto_passwords.clear()
+            except BlockingIOError:
+                pass
+            except OSError:
+                break
+
+        if stdin_fd in rlist:
+            try:
+                chunk = os.read(stdin_fd, 16384)
+                if not chunk:
+                    break
+                in_buf += chunk
+                while b"\n" in in_buf:
+                    line, in_buf = in_buf.split(b"\n", 1)
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line.decode("utf-8"))
+                    except Exception:
+                        continue
+                    t = msg.get("t")
+                    if t == "d":
+                        raw = msg.get("d", "")
+                        if isinstance(raw, str) and raw:
+                            if auto_passwords:
+                                auto_passwords.clear()
+                            write_all(master_fd, raw.encode("utf-8"))
+                    elif t == "r":
+                        new_c = max(20, min(400, int(msg.get("cols", cols))))
+                        new_r = max(8, min(200, int(msg.get("rows", rows))))
+                        cols, rows = new_c, new_r
+                        set_winsize(master_fd, rows, cols)
+                        try:
+                            fg = os.tcgetpgrp(master_fd)
+                            if fg > 0:
+                                os.killpg(fg, signal.SIGWINCH)
+                            else:
+                                signal_child_group(signal.SIGWINCH)
+                        except Exception:
+                            signal_child_group(signal.SIGWINCH)
+            except BlockingIOError:
+                pass
+            except OSError:
+                break
+
+        if reap_child_nonblocking():
+            for _ in range(32):
+                try:
+                    r2, _, _ = select.select([master_fd], [], [], 0.02)
+                    if master_fd not in r2:
+                        break
+                    rem = os.read(master_fd, 16384)
+                    if not rem:
+                        break
+                    write_all(stdout_fd, rem)
+                except OSError:
+                    break
+            break
+finally:
+    try:
+        os.close(master_fd)
+    except Exception:
+        pass
+    if not reap_child_nonblocking():
+        signal_child_group(signal.SIGTERM)
+        deadline = time.monotonic() + 0.35
+        while time.monotonic() < deadline:
+            if reap_child_nonblocking():
+                break
+            time.sleep(0.02)
+        if not child_exited:
+            signal_child_group(signal.SIGKILL)
+            try:
+                os.waitpid(pid, 0)
+            except Exception:
+                pass
+sys.exit(exit_code)
+`;
+
+export interface SshRuntimeOptions {
+  sshBinary?: string;
+  sftpBinary?: string;
+  pythonBinary?: string | null;
+}
+
+export class SshGatewayBackend implements GatewayBackend {
   readonly protocol: GatewayProtocol;
   readonly width = 0;
   readonly height = 0;
+  readonly ptyAllocated: boolean;
 
   private proc: ChildProcessWithoutNullStreams | null = null;
-  private tempDir: string;
+  private readonly tempDir: string;
+  private readonly sshBinary: string;
+  private readonly sftpBinary: string;
   private readonly sshBaseArgs: string[];
   private readonly sshEnv: NodeJS.ProcessEnv;
+  private readonly activeSubProcs = new Set<ChildProcessWithoutNullStreams>();
+  private cols: number;
+  private rows: number;
   private closed = false;
+  private tempDirCleaned = false;
 
-  private constructor(
-    protocol: 'ssh' | 'sftp',
-    tempDir: string,
-    sshBaseArgs: string[],
-    sshEnv: NodeJS.ProcessEnv,
-    proc: ChildProcessWithoutNullStreams | null,
-  ) {
-    this.protocol = protocol;
-    this.tempDir = tempDir;
-    this.sshBaseArgs = sshBaseArgs;
-    this.sshEnv = sshEnv;
-    this.proc = proc;
+  private constructor(opts: {
+    protocol: 'ssh' | 'sftp';
+    tempDir: string;
+    sshBinary: string;
+    sftpBinary: string;
+    sshBaseArgs: string[];
+    sshEnv: NodeJS.ProcessEnv;
+    proc: ChildProcessWithoutNullStreams | null;
+    ptyAllocated: boolean;
+    cols: number;
+    rows: number;
+  }) {
+    this.protocol = opts.protocol;
+    this.tempDir = opts.tempDir;
+    this.sshBinary = opts.sshBinary;
+    this.sftpBinary = opts.sftpBinary;
+    this.sshBaseArgs = opts.sshBaseArgs;
+    this.sshEnv = opts.sshEnv;
+    this.proc = opts.proc;
+    this.ptyAllocated = opts.ptyAllocated;
+    this.cols = opts.cols;
+    this.rows = opts.rows;
   }
 
-  static async open(params: OpenSessionParams, sink: BackendSink): Promise<SshGatewayBackend> {
+  static async open(
+    params: OpenSessionParams,
+    sink: BackendSink,
+    runtimeOpts: SshRuntimeOptions = {},
+  ): Promise<SshGatewayBackend> {
     const tempDir = await mkdtemp(join(tmpdir(), 'jaladesk-gw-ssh-'));
-    const host = params.host ?? '';
-    const port = params.port ?? 22;
-    const username = params.username || 'root';
+    try {
+      await chmod(tempDir, 0o700);
 
-    const baseArgs: string[] = [
-      '-p',
-      String(port),
-      '-o',
-      'ConnectTimeout=10',
-      '-o',
-      'ServerAliveInterval=15',
-      '-o',
-      'StrictHostKeyChecking=accept-new',
-    ];
+      const host = (params.host ?? '').trim().replace(/^\[|\]$/g, '');
+      if (!host || host.startsWith('-') || /[\s\x00-\x1f\x7f"'`$|&;<>()\\/]/.test(host)) {
+        throw new Error('Invalid SSH target host');
+      }
+      const rawPort = params.port ?? 22;
+      const port = Number.isInteger(rawPort) && rawPort >= 1 && rawPort <= 65535 ? rawPort : 22;
+      const username = validateSshUsername(params.username);
 
-    const env: NodeJS.ProcessEnv = { ...process.env, TERM: 'xterm-256color' };
+      const sshBinary = resolveExecutable(runtimeOpts.sshBinary, ['/usr/bin/ssh', '/usr/local/bin/ssh'], 'ssh');
+      const sftpBinary = resolveExecutable(runtimeOpts.sftpBinary, ['/usr/bin/sftp', '/usr/local/bin/sftp'], 'sftp');
 
-    if (params.privateKey && params.privateKey.trim()) {
-      const keyFile = join(tempDir, 'id_ephemeral');
-      await writeFile(keyFile, `${params.privateKey.trim()}\n`, { mode: 0o600 });
-      await chmod(keyFile, 0o600);
-      baseArgs.push('-i', keyFile, '-o', 'IdentitiesOnly=yes');
-    }
+      const baseArgs: string[] = [
+        '-p',
+        String(port),
+        '-o',
+        'ConnectTimeout=10',
+        '-o',
+        'ServerAliveInterval=15',
+        '-o',
+        'ServerAliveCountMax=3',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+      ];
 
-    if (params.password) {
-      // Ephemeral 0600 SSH_ASKPASS helper — avoids exposing password in process CLI args
-      const askpassFile = join(tempDir, 'askpass.sh');
-      const secretFile = join(tempDir, 'secret');
-      await writeFile(secretFile, params.password, { mode: 0o600 });
-      await chmod(secretFile, 0o600);
-      await writeFile(askpassFile, `#!/bin/sh\ncat "${secretFile}"\n`, { mode: 0o700 });
-      await chmod(askpassFile, 0o700);
-      env.SSH_ASKPASS = askpassFile;
-      env.SSH_ASKPASS_REQUIRE = 'force';
-      env.DISPLAY = ':0';
-    }
+      const jumpHops = params.jumpHost && params.jumpHost.trim() ? parseJumpHostHops(params.jumpHost) : [];
+      if (jumpHops.length > 0) {
+        baseArgs.push('-J', jumpHops.map((h) => h.spec).join(','));
+      }
 
-    const targetSpec = `${username}@${host}`;
-    let proc: ChildProcessWithoutNullStreams | null = null;
-    if (params.protocol === 'ssh') {
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+        ...(process.env.LANG ? {} : { LANG: 'en_US.UTF-8' }),
+      };
+
+      if (params.privateKey && params.privateKey.trim()) {
+        const keyFile = join(tempDir, 'id_ephemeral');
+        await writeFile(keyFile, `${params.privateKey.trim()}\n`, { mode: 0o600 });
+        await chmod(keyFile, 0o600);
+        baseArgs.push('-i', keyFile, '-o', 'IdentitiesOnly=yes');
+      }
+
+      const targetPassword = typeof params.password === 'string' && params.password.length > 0 ? params.password : '';
+      const jumpPassword =
+        jumpHops.length > 0 && typeof params.jumpPassword === 'string' && params.jumpPassword.length > 0
+          ? params.jumpPassword
+          : '';
+
+      if (targetPassword || jumpPassword) {
+        // Ephemeral 0700 SSH_ASKPASS reading 0600 secret files — never places passwords in argv or logs
+        const askpassFile = join(tempDir, 'askpass.sh');
+        const targetSecretFile = join(tempDir, 'secret_target');
+        const jumpSecretFile = join(tempDir, 'secret_jump');
+        const jumpMarkerFile = join(tempDir, 'jump_answered');
+
+        if (targetPassword) {
+          await writeFile(targetSecretFile, targetPassword, { mode: 0o600 });
+          await chmod(targetSecretFile, 0o600);
+        }
+        if (jumpPassword) {
+          await writeFile(jumpSecretFile, jumpPassword, { mode: 0o600 });
+          await chmod(jumpSecretFile, 0o600);
+        }
+
+        const scriptLines: string[] = [
+          '#!/bin/sh',
+          'PROMPT="$1"',
+          'case "$PROMPT" in',
+          '  *[Pp][Aa][Ss][Ss]*) ;;',
+          '  *) exit 1 ;;',
+          'esac',
+        ];
+        if (jumpPassword && targetPassword) {
+          const jumpHosts = [...new Set(jumpHops.map((h) => h.host).filter((h) => h !== host))];
+          if (jumpHosts.length > 0) {
+            const jumpPattern = jumpHosts.map((h) => `*${shellSingleQuote(h)}*`).join('|');
+            scriptLines.push(
+              'case "$PROMPT" in',
+              `  ${jumpPattern}) cat ${shellSingleQuote(jumpSecretFile)}; exit 0 ;;`,
+              `  *${shellSingleQuote(host)}*) cat ${shellSingleQuote(targetSecretFile)}; exit 0 ;;`,
+              'esac',
+            );
+          }
+          scriptLines.push(
+            `if [ ! -f ${shellSingleQuote(jumpMarkerFile)} ]; then`,
+            `  : > ${shellSingleQuote(jumpMarkerFile)}`,
+            `  cat ${shellSingleQuote(jumpSecretFile)}`,
+            'else',
+            `  cat ${shellSingleQuote(targetSecretFile)}`,
+            'fi',
+          );
+        } else if (jumpPassword) {
+          scriptLines.push(`cat ${shellSingleQuote(jumpSecretFile)}`);
+        } else {
+          scriptLines.push(`cat ${shellSingleQuote(targetSecretFile)}`);
+        }
+
+        await writeFile(askpassFile, `${scriptLines.join('\n')}\n`, { mode: 0o700 });
+        await chmod(askpassFile, 0o700);
+        env.SSH_ASKPASS = askpassFile;
+        env.SSH_ASKPASS_REQUIRE = 'force';
+        env.DISPLAY = env.DISPLAY || ':0';
+      }
+
+      const targetSpec = `${username}@${host}`;
+      const sshCommandArgs = [...baseArgs, '--', targetSpec];
       const cols = Math.max(20, Math.min(400, Math.floor(params.cols ?? 100)));
       const rows = Math.max(8, Math.min(200, Math.floor(params.rows ?? 30)));
-      env.COLUMNS = String(cols);
-      env.LINES = String(rows);
-      proc = spawn('ssh', ['-tt', ...baseArgs, targetSpec], {
-        shell: false,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env,
-      });
-      proc.stdout.on('data', (chunk: Buffer) => sink.onSshData(chunk.toString('utf8')));
-      proc.stderr.on('data', (chunk: Buffer) => sink.onSshData(chunk.toString('utf8')));
-      proc.on('error', (err) => sink.onState('failed', err.message));
-      proc.on('close', (code) => sink.onState('closed', `exit:${code ?? 0}`));
-    }
 
-    sink.onState('connected');
-    return new SshGatewayBackend(params.protocol === 'sftp' ? 'sftp' : 'ssh', tempDir, [...baseArgs, targetSpec], env, proc);
+      let proc: ChildProcessWithoutNullStreams | null = null;
+      let ptyAllocated = false;
+
+      if (params.protocol === 'ssh') {
+        const pythonBin = await resolvePython3Binary(runtimeOpts.pythonBinary);
+        const sshArgv = [sshBinary, '-tt', ...sshCommandArgs];
+        const spawnEnv: NodeJS.ProcessEnv = {
+          ...env,
+          COLUMNS: String(cols),
+          LINES: String(rows),
+        };
+
+        if (pythonBin) {
+          if (targetPassword) spawnEnv.JALADESK_GW_SSH_PASS = targetPassword;
+          if (jumpPassword) spawnEnv.JALADESK_GW_JUMP_PASS = jumpPassword;
+          proc = spawn(
+            pythonBin,
+            ['-u', '-c', PYTHON_GATEWAY_PTY_BRIDGE, JSON.stringify(sshArgv), String(cols), String(rows)],
+            {
+              shell: false,
+              stdio: ['pipe', 'pipe', 'pipe'],
+              env: spawnEnv,
+            },
+          );
+          ptyAllocated = true;
+        } else {
+          // Clean pipe fallback when python3 / POSIX pty is absent
+          proc = spawn(sshBinary, ['-tt', ...sshCommandArgs], {
+            shell: false,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: spawnEnv,
+          });
+          ptyAllocated = false;
+        }
+      }
+
+      const backend = new SshGatewayBackend({
+        protocol: params.protocol === 'sftp' ? 'sftp' : 'ssh',
+        tempDir,
+        sshBinary,
+        sftpBinary,
+        sshBaseArgs: sshCommandArgs,
+        sshEnv: env,
+        proc,
+        ptyAllocated,
+        cols,
+        rows,
+      });
+
+      if (proc) {
+        const stdoutDecoder = new StringDecoder('utf8');
+        const stderrDecoder = new StringDecoder('utf8');
+        proc.stdout.on('data', (chunk: Buffer) => {
+          const text = stdoutDecoder.write(chunk);
+          if (text) sink.onSshData(text);
+        });
+        proc.stderr.on('data', (chunk: Buffer) => {
+          const text = stderrDecoder.write(chunk);
+          if (text) sink.onSshData(text);
+        });
+        proc.on('error', (err) => {
+          void backend.cleanupTempDir();
+          sink.onState('failed', err.message);
+        });
+        proc.on('close', (code) => {
+          const tailOut = stdoutDecoder.end();
+          if (tailOut) sink.onSshData(tailOut);
+          const tailErr = stderrDecoder.end();
+          if (tailErr) sink.onSshData(tailErr);
+          void backend.cleanupTempDir();
+          sink.onState('closed', `exit:${code ?? 0}`);
+        });
+      }
+
+      sink.onState('connected');
+      return backend;
+    } catch (err) {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
   }
 
   sendInput(event: Jsr1InputEvent): void {
@@ -894,15 +1462,23 @@ class SshGatewayBackend implements GatewayBackend {
   }
 
   sendSshData(data: string): void {
-    if (this.closed || !this.proc || !this.proc.stdin.writable) return;
-    this.proc.stdin.write(data);
+    if (this.closed || !this.proc || !this.proc.stdin.writable || !data) return;
+    if (this.ptyAllocated) {
+      this.proc.stdin.write(`${JSON.stringify({ t: 'd', d: data })}\n`);
+    } else {
+      this.proc.stdin.write(data);
+    }
   }
 
   resizeSsh(cols: number, rows: number): void {
     if (this.closed || !this.proc || !this.proc.stdin.writable) return;
     const c = Math.max(20, Math.min(400, Math.floor(cols)));
     const r = Math.max(8, Math.min(200, Math.floor(rows)));
-    this.proc.stdin.write(`stty rows ${r} cols ${c}\n`);
+    this.cols = c;
+    this.rows = r;
+    if (this.ptyAllocated) {
+      this.proc.stdin.write(`${JSON.stringify({ t: 'r', cols: c, rows: r })}\n`);
+    }
   }
 
   async handleSftp(req: SftpRequestPayload): Promise<SftpResponsePayload> {
@@ -964,17 +1540,22 @@ class SshGatewayBackend implements GatewayBackend {
     const pIdx = sftpArgs.indexOf('-p');
     if (pIdx >= 0) sftpArgs[pIdx] = '-P';
     return new Promise((resolveDone) => {
-      const child = spawn('sftp', ['-b', '-', ...sftpArgs], {
+      const child = spawn(this.sftpBinary, ['-b', '-', ...sftpArgs], {
         shell: false,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: this.sshEnv,
       });
+      this.activeSubProcs.add(child);
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       child.stdout.on('data', (c: Buffer) => out.push(c));
       child.stderr.on('data', (c: Buffer) => err.push(c));
-      child.on('error', (e) => resolveDone({ ok: false, stdout: '', error: e.message }));
+      child.on('error', (e) => {
+        this.activeSubProcs.delete(child);
+        resolveDone({ ok: false, stdout: '', error: e.message });
+      });
       child.on('close', (code) => {
+        this.activeSubProcs.delete(child);
         if (code === 0) resolveDone({ ok: true, stdout: Buffer.concat(out).toString('utf8') });
         else resolveDone({ ok: false, stdout: '', error: Buffer.concat(err).toString('utf8').trim() || `sftp exit ${code}` });
       });
@@ -987,17 +1568,22 @@ class SshGatewayBackend implements GatewayBackend {
     stdinBytes?: Buffer,
   ): Promise<{ ok: boolean; stdout: Buffer; error?: string }> {
     return new Promise((resolveDone) => {
-      const child = spawn('ssh', [...this.sshBaseArgs, remoteCmd], {
+      const child = spawn(this.sshBinary, [...this.sshBaseArgs, remoteCmd], {
         shell: false,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: this.sshEnv,
       });
+      this.activeSubProcs.add(child);
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       child.stdout.on('data', (c: Buffer) => out.push(c));
       child.stderr.on('data', (c: Buffer) => err.push(c));
-      child.on('error', (e) => resolveDone({ ok: false, stdout: Buffer.alloc(0), error: e.message }));
+      child.on('error', (e) => {
+        this.activeSubProcs.delete(child);
+        resolveDone({ ok: false, stdout: Buffer.alloc(0), error: e.message });
+      });
       child.on('close', (code) => {
+        this.activeSubProcs.delete(child);
         if (code === 0) resolveDone({ ok: true, stdout: Buffer.concat(out) });
         else resolveDone({ ok: false, stdout: Buffer.alloc(0), error: Buffer.concat(err).toString('utf8').trim() || `ssh exit ${code}` });
       });
@@ -1006,9 +1592,28 @@ class SshGatewayBackend implements GatewayBackend {
     });
   }
 
+  private async cleanupTempDir(): Promise<void> {
+    if (this.tempDirCleaned) return;
+    this.tempDirCleaned = true;
+    await rm(this.tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closed) {
+      await this.cleanupTempDir();
+      return;
+    }
     this.closed = true;
+
+    for (const sub of [...this.activeSubProcs]) {
+      try {
+        sub.kill('SIGTERM');
+      } catch {
+        // ignore
+      }
+    }
+    this.activeSubProcs.clear();
+
     const proc = this.proc;
     this.proc = null;
     if (proc && proc.exitCode === null && !proc.killed) {
@@ -1027,9 +1632,14 @@ class SshGatewayBackend implements GatewayBackend {
             // ignore
           }
           done();
-        }, 500);
+        }, 1000);
         forceKill.unref();
         proc.once('close', done);
+        try {
+          if (proc.stdin.writable) proc.stdin.end();
+        } catch {
+          // ignore
+        }
         try {
           proc.kill('SIGTERM');
         } catch {
@@ -1037,7 +1647,7 @@ class SshGatewayBackend implements GatewayBackend {
         }
       });
     }
-    await rm(this.tempDir, { recursive: true, force: true }).catch(() => {});
+    await this.cleanupTempDir();
   }
 }
 
@@ -1055,7 +1665,11 @@ export const defaultSessionFactory: GatewaySessionFactory = async (params, sink,
     return VncGatewayBackend.open(params, sink);
   }
   if (params.protocol === 'ssh' || params.protocol === 'sftp') {
-    return SshGatewayBackend.open(params, sink);
+    return SshGatewayBackend.open(params, sink, {
+      sshBinary: ctx.sshBinary,
+      sftpBinary: ctx.sftpBinary,
+      pythonBinary: ctx.pythonBinary,
+    });
   }
   throw new Error(`Unsupported protocol: ${String(params.protocol)}`);
 };
@@ -1359,6 +1973,12 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
     const hostArg = typeof msg.host === 'string' ? msg.host.trim() : '';
     const defaultPort = protocol === 'rdp' ? 3389 : protocol === 'vnc' ? 5900 : 22;
     const portArg = typeof msg.port === 'number' ? msg.port : defaultPort;
+    const rawJumpHost =
+      typeof msg.jumpHost === 'string'
+        ? msg.jumpHost.trim()
+        : typeof msg.proxyJump === 'string'
+          ? msg.proxyJump.trim()
+          : '';
 
     if (protocol !== 'demo') {
       const check = await policy.validate(hostArg, portArg);
@@ -1369,6 +1989,31 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
           message: check.reason,
         });
         return;
+      }
+
+      if (rawJumpHost) {
+        let hops: ParsedJumpHop[];
+        try {
+          hops = parseJumpHostHops(rawJumpHost);
+        } catch (err) {
+          sendControl(viewer.conn, {
+            type: 'error',
+            code: 'invalid_jump_host',
+            message: err instanceof Error ? err.message : 'Invalid jumpHost',
+          });
+          return;
+        }
+        for (const hop of hops) {
+          const hopCheck = await policy.validate(hop.host, hop.port);
+          if (!hopCheck.ok) {
+            sendControl(viewer.conn, {
+              type: 'error',
+              code: hopCheck.code === 'metadata_blocked' ? 'ssrf_blocked' : hopCheck.code,
+              message: `Jump host blocked: ${hopCheck.reason}`,
+            });
+            return;
+          }
+        }
       }
     }
 
@@ -1384,7 +2029,7 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
       password: typeof msg.password === 'string' ? msg.password : undefined,
       domain: typeof msg.domain === 'string' ? msg.domain : undefined,
       certificateSha256: typeof msg.certificateSha256 === 'string' ? msg.certificateSha256 : undefined,
-      jumpHost: typeof msg.jumpHost === 'string' ? msg.jumpHost : undefined,
+      jumpHost: rawJumpHost || undefined,
       jumpPassword: typeof msg.jumpPassword === 'string' ? msg.jumpPassword : undefined,
       privateKey: typeof msg.privateKey === 'string' ? msg.privateKey : undefined,
       width: typeof msg.width === 'number' ? msg.width : 1280,
@@ -1397,6 +2042,7 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
     let sessionRef: MultiplexedSession | null = null;
     const pendingFrames: Array<{ rgba: Uint8Array; width: number; height: number; forceKeyframe?: boolean }> = [];
     const pendingSsh: string[] = [];
+    let pendingState: { state: 'closed' | 'failed'; reason?: string } | null = null;
 
     const sink: BackendSink = {
       onFrame(rgba, width, height, forceKeyframe) {
@@ -1416,16 +2062,18 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
         broadcastControl(sessionRef, { type: 'sshData', sessionId: sessionRef.id, data });
       },
       onState(state, reason) {
-        if (!sessionRef) return;
-        if (state === 'closed' || state === 'failed') {
-          broadcastControl(sessionRef, {
-            type: state === 'failed' ? 'error' : 'close',
-            sessionId: sessionRef.id,
-            code: state,
-            message: reason ?? state,
-          });
-          void closeSession(sessionRef);
+        if (state !== 'closed' && state !== 'failed') return;
+        if (!sessionRef) {
+          pendingState = { state, reason };
+          return;
         }
+        broadcastControl(sessionRef, {
+          type: state === 'failed' ? 'error' : 'close',
+          sessionId: sessionRef.id,
+          code: state,
+          message: reason ?? state,
+        });
+        void closeSession(sessionRef);
       },
       onError(code, message) {
         if (!sessionRef) return;
@@ -1435,7 +2083,13 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
 
     let backend: GatewayBackend;
     try {
-      backend = await sessionFactory(params, sink, { rdpHelperPath, allowDemoSession });
+      backend = await sessionFactory(params, sink, {
+        rdpHelperPath,
+        allowDemoSession,
+        sshBinary: options.sshBinary,
+        sftpBinary: options.sftpBinary,
+        pythonBinary: options.pythonBinary,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to start backend session';
       sendControl(viewer.conn, { type: 'error', code: 'backend_open_failed', message });
@@ -1473,6 +2127,13 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
       protocol,
       width: backend.width,
       height: backend.height,
+      ...(protocol === 'ssh'
+        ? {
+            pty: Boolean(backend.ptyAllocated),
+            cols: params.cols,
+            rows: params.rows,
+          }
+        : {}),
       viewOnly: session.controllerId !== viewer.id,
       hasControl: session.controllerId === viewer.id,
       controllerId: session.controllerId,
@@ -1485,6 +2146,16 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
     }
     for (const f of pendingFrames) {
       deliverFrameToSession(session, f.rgba, f.width, f.height, Boolean(f.forceKeyframe));
+    }
+    if (pendingState) {
+      const st = pendingState as { state: 'closed' | 'failed'; reason?: string };
+      broadcastControl(session, {
+        type: st.state === 'failed' ? 'error' : 'close',
+        sessionId: session.id,
+        code: st.state,
+        message: st.reason ?? st.state,
+      });
+      void closeSession(session);
     }
   };
 
@@ -1669,6 +2340,9 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
     if (allowedOrigin) {
       res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
       res.setHeader('Vary', 'Origin');
+      if (req.headers['access-control-request-private-network'] === 'true') {
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
+      }
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
@@ -1917,6 +2591,76 @@ export function createGatewayServer(options: GatewayServerOptions = {}): Gateway
         openSockets.clear();
       });
     },
+  };
+}
+
+export interface StartedGatewayServer {
+  readonly host: string;
+  readonly port: number;
+  readonly protocol: 'http' | 'https';
+  readonly url: string;
+  readonly wsUrl: string;
+  readonly pairingCode: string | null;
+  readonly pairingExpiresInSec: number;
+  readonly token: string;
+  readonly activeSessions: number;
+  readonly activeClients: number;
+  readonly running: boolean;
+  rotatePairingCode(): { code: string; expiresAt: number; expiresInSec: number };
+  stop(): Promise<void>;
+  close(): Promise<void>;
+  readonly handle: GatewayServerHandle;
+}
+
+/**
+ * Programmatic lifecycle wrapper for embedding JalaDesk Web Gateway inside
+ * JalaDesk Desktop (`src/desktop/main.ts`) or automated tests.
+ */
+export async function startGatewayServer(
+  options: GatewayServerOptions = {},
+): Promise<StartedGatewayServer> {
+  const handle = createGatewayServer(options);
+  const info = await handle.listen();
+  let stopped = false;
+  let stopPromise: Promise<void> | null = null;
+
+  const stop = async (): Promise<void> => {
+    if (stopPromise) return stopPromise;
+    stopped = true;
+    stopPromise = handle.close();
+    return stopPromise;
+  };
+
+  return {
+    host: info.host,
+    port: info.port,
+    protocol: handle.protocol,
+    url: info.url,
+    wsUrl: info.wsUrl,
+    get pairingCode(): string | null {
+      return handle.auth.pairing.getActiveCodeForCli()?.code ?? null;
+    },
+    get pairingExpiresInSec(): number {
+      return handle.auth.pairing.getActiveCodeForCli()?.expiresInSec ?? 0;
+    },
+    get token(): string {
+      return handle.auth.getMasterTokenForCli();
+    },
+    get activeSessions(): number {
+      return handle.activeSessionCount();
+    },
+    get activeClients(): number {
+      return handle.activeClientCount();
+    },
+    get running(): boolean {
+      return !stopped;
+    },
+    rotatePairingCode() {
+      return handle.auth.pairing.rotate();
+    },
+    stop,
+    close: stop,
+    handle,
   };
 }
 

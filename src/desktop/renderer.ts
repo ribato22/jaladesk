@@ -12596,6 +12596,26 @@ if (rdpHudBtn) {
 const cloudSyncBridge = (window as any).cloudSync;
 const totpVaultBridge = (window as any).totpVault;
 const appLockBridge = (window as any).appLock;
+const webBridgeApi = (window as any).webBridge as
+  | {
+      status: () => Promise<WebBridgeStatusView>;
+      start: (options?: { port?: number }) => Promise<WebBridgeStatusView>;
+      stop: () => Promise<WebBridgeStatusView>;
+      openWebApp: (options?: { port?: number }) => Promise<WebBridgeStatusView & { opened?: boolean }>;
+      copyCode?: () => Promise<{ ok: boolean; error?: string }>;
+      rotateCode?: () => Promise<WebBridgeStatusView>;
+    }
+  | undefined;
+
+interface WebBridgeStatusView {
+  running: boolean;
+  url: string | null;
+  pairingCode: string | null;
+  pairingExpiresInSec?: number;
+  activeSessions: number;
+  port?: number;
+  error?: string;
+}
 
 const cloudSyncStudio = createCloudSyncStudio({
   getState: async () => (cloudSyncBridge ? await cloudSyncBridge.getState() : {}),
@@ -12685,6 +12705,329 @@ const userGuideModal = createUserGuideModal();
 document.getElementById('cloud-sync-btn')?.addEventListener('click', (e) => void cloudSyncStudio.open(e.currentTarget as HTMLElement));
 document.getElementById('vault-2fa-btn')?.addEventListener('click', (e) => void vault2faStudio.open(e.currentTarget as HTMLElement));
 document.getElementById('user-guide-btn')?.addEventListener('click', (e) => void userGuideModal.open(e.currentTarget as HTMLElement));
+
+const createWebBridgeStudio = () => {
+  const dialog = document.getElementById('web-bridge-dialog') as HTMLDialogElement | null;
+  const triggerBtn = document.getElementById('tb-web-bridge') as HTMLButtonElement | null;
+  const headerIcon = document.getElementById('web-bridge-header-icon');
+  const statusPill = document.getElementById('web-bridge-status-pill');
+  const closeBtn = document.getElementById('web-bridge-close') as HTMLButtonElement | null;
+  const doneBtn = document.getElementById('web-bridge-done-btn') as HTMLButtonElement | null;
+  const refreshBtn = document.getElementById('web-bridge-refresh-btn') as HTMLButtonElement | null;
+  const endpointHeading = document.getElementById('web-bridge-endpoint-heading');
+  const endpointDetail = document.getElementById('web-bridge-endpoint-detail');
+  const portInput = document.getElementById('web-bridge-port') as HTMLInputElement | null;
+  const toggleBtn = document.getElementById('web-bridge-toggle-btn') as HTMLButtonElement | null;
+  const pairingMeta = document.getElementById('web-bridge-pairing-meta');
+  const pairingOutput = document.getElementById('web-bridge-pairing-code');
+  const copyBtn = document.getElementById('web-bridge-copy-btn') as HTMLButtonElement | null;
+  const rotateBtn = document.getElementById('web-bridge-rotate-btn') as HTMLButtonElement | null;
+  const openWebBtn = document.getElementById('web-bridge-open-web-btn') as HTMLButtonElement | null;
+  const feedbackEl = document.getElementById('web-bridge-feedback');
+  const feedbackIcon = document.getElementById('web-bridge-feedback-icon');
+  const feedbackText = document.getElementById('web-bridge-feedback-text');
+
+  let currentStatus: WebBridgeStatusView = { running: false, url: null, pairingCode: null, activeSessions: 0, port: 8443 };
+  let busy = false;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+  let openerEl: HTMLElement | null = null;
+
+  if (headerIcon) headerIcon.replaceChildren(jalaSvgIcon('route', document, 17));
+  if (closeBtn) closeBtn.replaceChildren(jalaSvgIcon('close', document, 14));
+  const setButtonWithIcon = (btn: HTMLButtonElement | null, icon: JalaStudioIconName, label: string, size = 13) => {
+    if (!btn) return;
+    const span = document.createElement('span');
+    span.textContent = label;
+    btn.replaceChildren(jalaSvgIcon(icon, document, size), span);
+  };
+  setButtonWithIcon(copyBtn, 'copy', 'Copy Code', 13);
+  setButtonWithIcon(openWebBtn, 'bolt', 'Open JalaDesk Web (Auto-Paired)', 14);
+
+  if (triggerBtn && !triggerBtn.querySelector('svg')) {
+    const dot = document.createElement('span');
+    dot.className = 'wb-pill-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    const labelSpan = document.createElement('span');
+    labelSpan.textContent = 'Web Bridge';
+    triggerBtn.replaceChildren(jalaSvgIcon('route', document, 13), dot, labelSpan);
+  }
+
+  const showFeedback = (tone: 'ok' | 'danger' | 'warn' | null, message: string) => {
+    if (!feedbackEl || !feedbackText || !feedbackIcon) return;
+    if (!tone || !message) {
+      feedbackEl.hidden = true;
+      feedbackText.textContent = '';
+      delete feedbackEl.dataset.tone;
+      return;
+    }
+    feedbackEl.hidden = false;
+    feedbackEl.dataset.tone = tone;
+    feedbackIcon.replaceChildren(jalaSvgIcon(tone === 'ok' ? 'check' : 'alert', document, 15));
+    feedbackText.textContent = message;
+  };
+
+  const readRequestedPort = (): number => {
+    const parsed = Number.parseInt(portInput?.value ?? '8443', 10);
+    return Number.isInteger(parsed) && parsed >= 1024 && parsed <= 65535 ? parsed : 8443;
+  };
+
+  const hostPortLabel = (st: WebBridgeStatusView): string => {
+    if (st.url) {
+      try {
+        const u = new URL(st.url);
+        return u.host;
+      } catch {
+        return st.url.replace(/^https?:\/\//i, '');
+      }
+    }
+    return `127.0.0.1:${st.port ?? 8443}`;
+  };
+
+  const render = (st: WebBridgeStatusView) => {
+    currentStatus = st;
+    const hostPort = hostPortLabel(st);
+    const sessions = Math.max(0, Number(st.activeSessions) || 0);
+
+    if (triggerBtn) {
+      triggerBtn.dataset.running = st.running ? 'true' : 'false';
+      triggerBtn.title = st.running
+        ? `Web Bridge Active (${hostPort}) · ${sessions} active ${sessions === 1 ? 'session' : 'sessions'}`
+        : 'Built-In Local Web Bridge for JalaDesk Web';
+    }
+
+    if (statusPill) {
+      if (st.running) {
+        statusPill.textContent = `Bridge Active · ${hostPort}`;
+        statusPill.dataset.tone = 'ok';
+      } else if (st.error) {
+        statusPill.textContent = 'Bridge Error';
+        statusPill.dataset.tone = 'danger';
+      } else {
+        statusPill.textContent = 'Bridge Stopped';
+        delete statusPill.dataset.tone;
+      }
+    }
+
+    if (endpointHeading) {
+      endpointHeading.textContent = st.running ? `Listening on ${st.url ?? `http://${hostPort}`}` : 'Local Gateway Inactive';
+    }
+    if (endpointDetail) {
+      endpointDetail.textContent = st.running
+        ? `${sessions} active browser ${sessions === 1 ? 'session' : 'sessions'} · CORS enabled for ribato22.github.io`
+        : 'Binds exclusively to 127.0.0.1 · 0 active browser sessions';
+    }
+
+    if (portInput) {
+      if (st.running && st.port) portInput.value = String(st.port);
+      portInput.disabled = busy || st.running;
+    }
+
+    if (toggleBtn) {
+      toggleBtn.disabled = busy;
+      toggleBtn.textContent = busy
+        ? st.running
+          ? 'Stopping…'
+          : 'Starting…'
+        : st.running
+          ? 'Stop Web Bridge'
+          : 'Start Web Bridge';
+      toggleBtn.className = st.running ? 'jala-btn jala-btn-danger-outline' : 'jala-btn jala-btn-primary';
+    }
+
+    if (pairingOutput) {
+      if (st.running && st.pairingCode && /^\d{6}$/.test(st.pairingCode)) {
+        pairingOutput.textContent = `${st.pairingCode.slice(0, 3)} ${st.pairingCode.slice(3)}`;
+        pairingOutput.dataset.empty = 'false';
+      } else if (st.running) {
+        pairingOutput.textContent = 'Used / Expired';
+        pairingOutput.dataset.empty = 'true';
+      } else {
+        pairingOutput.textContent = '--- ---';
+        pairingOutput.dataset.empty = 'true';
+      }
+    }
+
+    if (pairingMeta) {
+      if (st.running && st.pairingCode) {
+        const expText =
+          typeof st.pairingExpiresInSec === 'number' ? ` · expires in ${Math.max(0, Math.round(st.pairingExpiresInSec))}s` : '';
+        pairingMeta.textContent = `Single-use code${expText}`;
+      } else if (st.running) {
+        pairingMeta.textContent = 'Code consumed or expired — click New Code or Open JalaDesk Web';
+      } else {
+        pairingMeta.textContent = 'Start Web Bridge to generate a single-use code';
+      }
+    }
+
+    if (copyBtn) copyBtn.disabled = busy || !st.running || !st.pairingCode;
+    if (rotateBtn) rotateBtn.disabled = busy || !st.running;
+    if (openWebBtn) openWebBtn.disabled = busy;
+    if (refreshBtn) refreshBtn.disabled = busy;
+
+    if (st.error) {
+      showFeedback('danger', st.error);
+    }
+  };
+
+  const refresh = async (): Promise<WebBridgeStatusView> => {
+    if (!webBridgeApi) {
+      const unavailable: WebBridgeStatusView = {
+        running: false,
+        url: null,
+        pairingCode: null,
+        activeSessions: 0,
+        error: 'Web Bridge IPC unavailable in this environment.',
+      };
+      render(unavailable);
+      return unavailable;
+    }
+    try {
+      const st = await webBridgeApi.status();
+      render(st);
+      return st;
+    } catch (err) {
+      const failed: WebBridgeStatusView = {
+        ...currentStatus,
+        error: err instanceof Error ? err.message : String(err),
+      };
+      render(failed);
+      return failed;
+    }
+  };
+
+  const stopPolling = () => {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  };
+
+  const close = () => {
+    stopPolling();
+    if (dialog?.open) dialog.close();
+    openerEl?.focus();
+    openerEl = null;
+  };
+
+  const open = async (trigger?: HTMLElement | null) => {
+    openerEl = trigger ?? null;
+    showFeedback(null, '');
+    await refresh();
+    if (dialog && !dialog.open) {
+      dialog.showModal();
+    }
+    stopPolling();
+    pollTimer = setInterval(() => {
+      if (!busy && dialog?.open) void refresh();
+    }, 3000);
+  };
+
+  toggleBtn?.addEventListener('click', () => {
+    if (busy || !webBridgeApi) return;
+    void (async () => {
+      busy = true;
+      showFeedback(null, '');
+      render(currentStatus);
+      try {
+        const st = currentStatus.running
+          ? await webBridgeApi.stop()
+          : await webBridgeApi.start({ port: readRequestedPort() });
+        busy = false;
+        render(st);
+        if (!st.error) {
+          showFeedback(
+            'ok',
+            st.running
+              ? `Web Bridge active on ${hostPortLabel(st)}. Ready for JalaDesk Web.`
+              : 'Web Bridge stopped and all bridged sessions closed.',
+          );
+        }
+      } catch (err) {
+        busy = false;
+        render({ ...currentStatus, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+  });
+
+  copyBtn?.addEventListener('click', () => {
+    if (busy || !currentStatus.pairingCode) return;
+    void (async () => {
+      try {
+        const res: { ok: boolean; error?: string } = webBridgeApi?.copyCode
+          ? await webBridgeApi.copyCode()
+          : await navigator.clipboard.writeText(currentStatus.pairingCode!).then(() => ({ ok: true }));
+        if (res && !res.ok) {
+          showFeedback('danger', res.error ?? 'Unable to copy pairing code.');
+          return;
+        }
+        setButtonWithIcon(copyBtn, 'check', 'Copied!', 13);
+        showFeedback('ok', '6-digit pairing code copied to clipboard.');
+        if (copyResetTimer !== null) clearTimeout(copyResetTimer);
+        copyResetTimer = setTimeout(() => {
+          setButtonWithIcon(copyBtn, 'copy', 'Copy Code', 13);
+        }, 1800);
+      } catch (err) {
+        showFeedback('danger', err instanceof Error ? err.message : 'Unable to copy pairing code.');
+      }
+    })();
+  });
+
+  rotateBtn?.addEventListener('click', () => {
+    if (busy || !webBridgeApi?.rotateCode || !currentStatus.running) return;
+    void (async () => {
+      busy = true;
+      render(currentStatus);
+      try {
+        const st = await webBridgeApi.rotateCode!();
+        busy = false;
+        render(st);
+        if (!st.error) showFeedback('ok', 'Generated a fresh single-use 6-digit pairing code.');
+      } catch (err) {
+        busy = false;
+        render({ ...currentStatus, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+  });
+
+  openWebBtn?.addEventListener('click', () => {
+    if (busy || !webBridgeApi) return;
+    void (async () => {
+      busy = true;
+      showFeedback(null, '');
+      render(currentStatus);
+      try {
+        const st = await webBridgeApi.openWebApp({ port: readRequestedPort() });
+        busy = false;
+        render(st);
+        if (!st.error) {
+          showFeedback('ok', `Opened JalaDesk Web auto-paired with ${hostPortLabel(st)}.`);
+        }
+      } catch (err) {
+        busy = false;
+        render({ ...currentStatus, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+  });
+
+  refreshBtn?.addEventListener('click', () => {
+    if (!busy) void refresh();
+  });
+  closeBtn?.addEventListener('click', close);
+  doneBtn?.addEventListener('click', close);
+  dialog?.addEventListener('close', () => {
+    stopPolling();
+  });
+  dialog?.addEventListener('click', (e) => {
+    if (e.target === dialog) close();
+  });
+  triggerBtn?.addEventListener('click', (e) => void open(e.currentTarget as HTMLElement));
+
+  void refresh();
+  return { open, close, refresh };
+};
+
+const webBridgeStudio = createWebBridgeStudio();
 
 const TOPBAR_PILL_ICONS: ReadonlyArray<readonly [string, JalaStudioIconName]> = [
   ['cloud-sync-btn', 'cloud'],
@@ -12802,6 +13145,7 @@ function renderCommandPaletteItems(query: string): void {
   }
 
   const quickCommands: [string, string, () => void][] = [
+    ['Open Local Web Bridge for JalaDesk Web (SSH TUI / RDP / VNC / SFTP)', 'Web Bridge', () => void webBridgeStudio.open()],
     ['Open Zero-Knowledge Cloud Sync & .jvault Backup Studio', 'Cloud Sync', () => void cloudSyncStudio.open()],
     ['Open RFC 6238 2FA Authenticator Vault (SHA1/SHA256/SHA512)', '2FA Vault', () => void vault2faStudio.open()],
     ['Configure App Lock PIN & Auto-Lock Timeout', 'App Lock PIN', () => void appLockPinUi.openSettings()],
@@ -12961,7 +13305,8 @@ if (appTree) {
   for (const row of appTree.querySelectorAll<HTMLElement>('[data-app-action]')) {
     row.onclick = () => {
       const act = row.dataset.appAction;
-      if (act === 'cloud-sync') void cloudSyncStudio.open(row);
+      if (act === 'web-bridge') void webBridgeStudio.open(row);
+      else if (act === 'cloud-sync') void cloudSyncStudio.open(row);
       else if (act === 'authenticator-2fa') void vault2faStudio.open(row);
       else if (act === 'app-lock-pin') void appLockPinUi.openSettings(row);
       else if (act === 'user-guide') void userGuideModal.open(row);

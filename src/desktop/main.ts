@@ -14,6 +14,7 @@ import {join,resolve} from 'node:path';import {pathToFileURL} from 'node:url';im
 import {DesktopCloudSyncService,type VaultSyncConfig,type VaultSyncOperationMode} from './cloud-sync-service.js';
 import {DesktopTotpVaultStore,parseOtpAuthUri} from '../credentials/totp.js';
 import {AppLockPinManager} from './app-lock-pin.js';
+import {startGatewayServer,type StartedGatewayServer} from '../gateway/server.js';
 import {applyMobileSyncPayloadToLibrary,buildDesktopVaultSyncPayload,resolveDocumentNodeJumpRoute} from './studios-sre-ha.js';
 import {makeOwner,ipcAllowed,type Session} from '../protocols/rdp/owner.js';
 import {createProfiledOwner,closeProfiledSessions} from '../protocols/rdp/profiled-owner.js';
@@ -163,6 +164,97 @@ const credentialInputUrl=pathToFileURL(join(root,'src/desktop/credential-input.h
 const passwordUrl=pathToFileURL(join(root,'src/desktop/password.html')).href;
 const settingsUrl=pathToFileURL(join(root,'src/desktop/settings.html')).href;
 const helper=join(root,'native/bin',process.platform==='win32'?'rdp-bridge.exe':'rdp-bridge');
+const WEB_BRIDGE_DEFAULT_PORT=8443;
+const WEB_BRIDGE_PUBLIC_APP_URL='https://ribato22.github.io/jaladesk/app/';
+let webBridgeServer:StartedGatewayServer|null=null;
+let webBridgePendingStart:Promise<StartedGatewayServer>|null=null;
+let webBridgeLastPort=WEB_BRIDGE_DEFAULT_PORT;
+let webBridgeLastError:string|undefined;
+let webBridgeQuitting=false;
+const normalizeWebBridgePort=(raw:unknown):number=>typeof raw==='number'&&Number.isInteger(raw)&&raw>=1024&&raw<=65535?raw:WEB_BRIDGE_DEFAULT_PORT;
+const webBridgeCorsOrigins=(port:number):string[]=>[...new Set(['https://ribato22.github.io','http://127.0.0.1:8443','http://localhost:8443',`http://127.0.0.1:${port}`,`http://localhost:${port}`])];
+const webBridgeStatus=(error?:string)=>{
+  const srv=webBridgeServer;
+  if(srv&&srv.running){
+    return{
+      running:true,
+      url:srv.url,
+      pairingCode:srv.pairingCode,
+      pairingExpiresInSec:srv.pairingExpiresInSec,
+      activeSessions:srv.activeSessions,
+      port:srv.port,
+      ...(error?{error}:{}),
+    };
+  }
+  const resolvedError=error??webBridgeLastError;
+  return{
+    running:false,
+    url:null as string|null,
+    pairingCode:null as string|null,
+    pairingExpiresInSec:0,
+    activeSessions:0,
+    port:webBridgeLastPort,
+    ...(resolvedError?{error:resolvedError}:{}),
+  };
+};
+const startWebBridge=async(options?:unknown)=>{
+  if(webBridgeServer?.running)return webBridgeStatus();
+  if(webBridgePendingStart){
+    try{await webBridgePendingStart;}catch{}
+    return webBridgeStatus();
+  }
+  const rec=typeof options==='object'&&options!==null?(options as Record<string,unknown>):{};
+  const port=normalizeWebBridgePort(rec.port);
+  webBridgeLastPort=port;
+  webBridgeLastError=undefined;
+  const pending=startGatewayServer({
+    host:'127.0.0.1',
+    port,
+    corsOrigins:webBridgeCorsOrigins(port),
+    rdpHelperPath:helper,
+  });
+  webBridgePendingStart=pending;
+  try{
+    const started=await pending;
+    webBridgeServer=started;
+    webBridgeLastPort=started.port;
+    return webBridgeStatus();
+  }catch(error){
+    const code=(error as NodeJS.ErrnoException|undefined)?.code;
+    const msg=code==='EADDRINUSE'
+      ?`Port ${port} is already in use on 127.0.0.1. Stop the existing gateway or choose another port.`
+      :(error instanceof Error?error.message:String(error));
+    webBridgeLastError=msg;
+    return webBridgeStatus(msg);
+  }finally{
+    if(webBridgePendingStart===pending)webBridgePendingStart=null;
+  }
+};
+const stopWebBridge=async()=>{
+  if(webBridgePendingStart){
+    try{const started=await webBridgePendingStart;if(!webBridgeServer)webBridgeServer=started;}catch{}
+    webBridgePendingStart=null;
+  }
+  const srv=webBridgeServer;
+  webBridgeServer=null;
+  webBridgeLastError=undefined;
+  if(srv){
+    try{await srv.stop();}catch(error){console.error('[web-bridge]',error);}
+  }
+  return webBridgeStatus();
+};
+const openWebBridgeApp=async(options?:unknown)=>{
+  const started=await startWebBridge(options);
+  if(!started.running||!webBridgeServer)return{...started,opened:false};
+  const launchUrl=`${WEB_BRIDGE_PUBLIC_APP_URL}#gateway=${webBridgeServer.url}&token=${webBridgeServer.token}`;
+  try{
+    await electronShell.openExternal(launchUrl);
+    return{...webBridgeStatus(),opened:true};
+  }catch(error){
+    const msg=error instanceof Error?error.message:String(error);
+    return{...webBridgeStatus(msg),opened:false};
+  }
+};
 const owner=fixture?makeOwner(path=>spawn(path,['--fixture'],{shell:false,stdio:['pipe','pipe','pipe']}),helper):createProfiledOwner({root:scratch,helper});
 const sessions=new Map<string,Session>();let window:BrowserWindow;let shell:Shell|undefined;
 const reportProfileCleanup=(message:string)=>console.error('[rdp]',message);
@@ -675,9 +767,23 @@ app.whenReady().then(async()=>{
   ipcMain.handle('appLock:lockNow',event=>{check(event);return appLockPin.lockNow();});
   ipcMain.on('appLock:activity',event=>{try{check(event);appLockPin.recordActivity();}catch{}});
 
+  ipcMain.handle('webBridge:status',event=>{check(event);return webBridgeStatus();});
+  ipcMain.handle('webBridge:start',async(event,options)=>{check(event);return startWebBridge(options);});
+  ipcMain.handle('webBridge:stop',async event=>{check(event);return stopWebBridge();});
+  ipcMain.handle('webBridge:openWebApp',async(event,options)=>{check(event);return openWebBridgeApp(options);});
+  ipcMain.handle('webBridge:copyCode',event=>{check(event);const code=webBridgeServer?.running?webBridgeServer.pairingCode:null;if(!code)return{ok:false,error:'No active 6-digit pairing code to copy.'};clipboard.writeText(code);return{ok:true};});
+  ipcMain.handle('webBridge:rotateCode',event=>{check(event);if(!webBridgeServer?.running)return webBridgeStatus('Start Web Bridge first.');webBridgeServer.rotatePairingCode();return webBridgeStatus();});
+
   ipcMain.handle('rdp:close',async(event,id)=>{check(event);if(typeof id!=='string')throw new Error('Invalid session');await closeEngine(id);});
   window.on('closed',()=>{stopPinWatcher();connectLifetime.abort();for(const id of starting.keys())void closeEngine(id).catch(()=>reportProfileCleanup('RDP profile cleanup incomplete'));connects.close(operationOwner);bulk.close(operationOwner);transfer.close(operationOwner);plans.close();maintenance.close();if(settingsWindow&&!settingsWindow.isDestroyed())settingsWindow.close();shell?.stop();followed.stop();for(const d of deliveries.values())d.close();deliveries.clear();void closeProfiledSessions(sessions.values(),reportProfileCleanup);library.closeAll();});
   try{shell.start();}catch(error){console.error('[shell]',error);}   // whatever goes wrong with the menu, the page still loads
   await window.loadURL(localUrl);
 });
-app.on('window-all-closed',async()=>{await closeProfiledSessions(sessions.values(),reportProfileCleanup);app.quit();});
+app.on('before-quit',event=>{
+  if((webBridgeServer?.running||webBridgePendingStart)&&!webBridgeQuitting){
+    webBridgeQuitting=true;
+    event.preventDefault();
+    void stopWebBridge().finally(()=>app.quit());
+  }
+});
+app.on('window-all-closed',async()=>{await stopWebBridge();await closeProfiledSessions(sessions.values(),reportProfileCleanup);app.quit();});
